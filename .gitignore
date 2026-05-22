@@ -52,5 +52,4 @@ Thumbs.db
 __pycache__/
 *.pyc
 processedData/
-rawData/
 modulus_env/
