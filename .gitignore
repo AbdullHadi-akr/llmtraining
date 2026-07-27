@@ -22,6 +22,8 @@ modulus_env/
 # Always ignore data folders
 processedData/
 OP1/
-coordinates/
+/coordinates/
 outputs/
+storeOps/
+
 

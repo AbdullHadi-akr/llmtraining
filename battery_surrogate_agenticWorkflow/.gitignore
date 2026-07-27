@@ -1,0 +1,20 @@
+# Local rules for the workflow package.
+# Keep generated artifacts out of version control.
+
+!*.md
+!*.txt
+!*.yaml
+!*.yml
+!*.cfg
+!*.toml
+!.gitignore
+!coordinates/
+!coordinates/*.csv
+
+data_raw/
+data_cache/
+ingest_manifest.json
+configs/data/raw_paths.local.yaml
+__pycache__/
+*.pyc
+.ipynb_checkpoints/

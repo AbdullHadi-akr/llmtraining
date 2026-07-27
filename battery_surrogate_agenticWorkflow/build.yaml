@@ -1,0 +1,23 @@
+schema_version: 2
+csv_encoding: "cp1252"
+csv_encoding_overrides: {}
+dtype: "float32"
+units:
+  T: "C"
+  q_source: "W"
+time_axes:
+  mode: "native"
+sign_check:
+  i_threshold_A: 1.0
+  window_s: 30.0
+filters:
+  T_clip_C: [-50.0, 150.0]
+  V_clip_V: [0.0, 5.0]
+format: "npz"
+size_budget_mb: 200
+coordinates_dir: "coordinates/"
+ignored_files:
+  - "*Positionen Tmax Tmin.csv"
+  - "*_Batemo FMU2.csv"
+  - "*_Plane/**"
+  - "*_FluidInletTemperatur(t).xlsx"
