@@ -163,8 +163,14 @@ lassen — `python3 PINNmodulusTwo/generate_cache.py` (nutzt
 
 ## 6. Smoke-Test
 
+Zwei Stufen: erst prüfen, ob überhaupt etwas auf der GPU rechnet, dann ob das
+Training konvergiert. Beides zusammen dauert wenige Minuten — deutlich billiger
+als nach 20 Stunden Benchmark festzustellen, dass die Verluste explodiert sind.
+
+### 6.1 GPU-Kurzcheck (< 1 Minute)
+
 ```bash
-cd PINNmodulusTwo
+cd ~/llmtraining/PINNmodulusTwo
 python3 train.py --epochs 2 --subsample 40 --device cuda
 ```
 
@@ -177,61 +183,266 @@ Erwartete Ausgabe (Auszug):
 [device] cuda:0 NVIDIA A100-SXM4-40GB  39.6 GiB  sm_80  torch=2.5.1+cu121 cuda=12.1
 [CFL OK] Δt=4.000s, Δt_max≈...
 OPs=['OP01', 'OP02', 'OP03'] n_config=7 ...
-model params=... 
+model params=...
   epoch   1  L_data=...  L_phys_bal=...
 ```
 
 Parallel in einer zweiten Session `nvidia-smi` — der Python-Prozess muss dort
 mit belegtem Speicher auftauchen.
 
+### 6.2 Konvergenz-Smoke-Test
+
+Prüft, ob das Training tatsächlich konvergiert, **bevor** der große Benchmark startet.
+
+```bash
+cd ~/llmtraining
+source .venv/bin/activate
+
+python3 PINNmodulusTwo/smallBench.py --epochs 5 --w-phys 0.0 0.1 --w-bc 0.1 --device cuda
+```
+
+Was dabei passiert:
+
+- trainiert zwei Modelle: `w_phys=0.0` (data-only) und `w_phys=0.1` (mit Physik)
+- nur 5 Epochen, nur 2 OPs (OP01, OP02)
+- Test auf OP07 (held-out)
+- Laufzeit: ~5 min auf CPU, auf der GPU entsprechend weniger
+
+Erwartete Outputs:
+
+```
+PINNmodulusTwo/artifacts/smallBench_results.txt      -> PASS/FAIL-Bericht
+PINNmodulusTwo/artifacts/smallBench_convergence.png  -> Loss-Kurven über die Epochen
+```
+
+Auswerten:
+
+```bash
+cat PINNmodulusTwo/artifacts/smallBench_results.txt
+ls -lh PINNmodulusTwo/artifacts/smallBench_convergence.png
+```
+
+Am Ende des Berichts steht entweder
+
+```
+✓ ALL CHECKS PASSED - Ready for full benchmark!
+```
+
+oder
+
+```
+✗ SOME CHECKS FAILED - Review issues above before full benchmark
+```
+
+### Entscheidung
+
+- **ALL CHECKS PASSED** → weiter zu Schritt 7.
+- **SOME CHECKS FAILED** → **stopp**, erst die Ursache klären:
+  - Loss explodiert (inf/NaN) → CFL-Problem, `--subsample` verkleinern (z. B. `--subsample 2`)
+  - Test-MAE > 20 °C → das Modell lernt nicht richtig
+  - noch nicht konvergiert → mit mehr Epochen gegenprüfen
+
 ---
 
-## 7. Längere Läufe
+## 7. Full Benchmark (Extended Grid)
 
-Ein Training überlebt keine getrennte SSH-Verbindung — also `tmux` benutzen:
+Sucht das optimale Paar `(w_phys, w_bc)` auf einem 10×10-Gitter. **Nur starten,
+wenn der Smoke-Test aus Schritt 6 PASSED ist.**
+
+### 7.1 Start
 
 ```bash
-tmux new -s pinn
-source ~/llmtraining/.venv/bin/activate
-cd ~/llmtraining/PINNmodulusTwo
-mkdir -p artifacts
-python3 train.py --epochs 200 --subsample 40 2>&1 | tee artifacts/train.log
-# Detach: Ctrl-b, dann d      Reattach: tmux attach -t pinn
+cd ~/llmtraining
+source .venv/bin/activate
+
+nohup python3 PINNmodulusTwo/benchmark_wphys_wbc.py --extended-grid --device cuda \
+  > benchmark_extended.log 2>&1 &
+echo $! > benchmark.pid
+
+echo "Full Benchmark gestartet - PID $(cat benchmark.pid), Log: benchmark_extended.log"
 ```
 
-Monitoring:
+Durch `nohup` läuft der Benchmark weiter, wenn das Terminal geschlossen wird.
+Wer lieber interaktiv mitliest, nimmt stattdessen `tmux new -s bench` und startet
+das Kommando ohne `nohup`/`&` (Detach mit `Ctrl-b`, dann `d`).
+
+### 7.2 Was läuft
+
+| Parameter | Wert |
+|---|---|
+| Grid | 10×10 = 100 Punkte (quasi-logarithmisch) |
+| `w_phys` | 0.0, 0.001, 0.005, 0.01, 0.03, 0.05, 0.1, 0.2, 0.5, 1.0 |
+| `w_bc` | 0.0, 0.001, 0.005, 0.01, 0.03, 0.05, 0.1, 0.3, 0.7, 1.0 |
+| Trainings-OPs | OP01–OP06 |
+| Test-OP | OP07 (held-out) |
+| Epochen | 60 pro Gitterpunkt |
+| Laufzeit | ~17 min/Punkt → **~28 h** (CPU-Referenzwert) |
+
+Die ~28 h stammen aus CPU-Läufen. Die echte GPU-Laufzeit steht im Log: nach jedem
+Punkt wird `Train time: ... min | ETA: ... min` aus den tatsächlich gemessenen
+Zeiten ausgegeben. Nach zwei, drei Punkten weißt du, woran du bist.
+
+Ohne `--extended-grid` läuft das kleinere 5×5-Standardgitter (25 Punkte, ~7 h auf CPU).
+
+### 7.3 Erwartete Outputs
+
+```
+PINNmodulusTwo/artifacts/benchmark_wphys_wbc.csv               -> alle 100 Punkte
+PINNmodulusTwo/artifacts/benchmark_wphys_wbc_heatmap.png       -> 2D-MAE-Heatmap
+PINNmodulusTwo/artifacts/benchmark_wphys_wbc_convergence.png   -> Loss-Kurven (Ecken + Best)
+PINNmodulusTwo/artifacts/benchmark_wphys_wbc_best.txt          -> beste Kombination + Tabelle
+PINNmodulusTwo/artifacts/checkpoints_wphys_wbc/*.pt            -> 100 Modelle (mehrere GB!)
+```
+
+### 7.4 Monitoring
 
 ```bash
+# Live mitlesen (Ctrl-C beendet nur tail, nicht den Benchmark)
+tail -f benchmark_extended.log
+
+# Welcher Punkt läuft gerade?
+grep "Training w_phys" benchmark_extended.log | tail -3
+#   [23/100] Training w_phys=0.05, w_bc=0.1
+
+# Restlaufzeit
+grep "ETA" benchmark_extended.log | tail -3
+#   Train time: 16.8 min | ETA: 1155.0 min
+
+# Wie viele Ergebnisse stehen schon in der CSV? (steigt bis 101 = Header + 100)
+wc -l PINNmodulusTwo/artifacts/benchmark_wphys_wbc.csv
+
+# Läuft der Prozess noch?
+ps -p $(cat benchmark.pid)
+
+# GPU-Auslastung
 watch -n 2 nvidia-smi
-tail -f ~/llmtraining/PINNmodulusTwo/artifacts/train.log
 ```
+
+**Batchgrößen.** Der Geschwindigkeitsgewinn kommt weniger aus dem Netz selbst
+(kleines MLP) als daraus, dass auf der GPU deutlich größere Physik-Batches
+bezahlbar sind. Wenn `nvidia-smi` viel freien Speicher zeigt, lohnt ein Neustart
+mit z. B. `--batch-phys 2048 --batch-bc 1024`.
 
 **Mehrere GPUs.** Der Code nutzt genau eine GPU pro Prozess (kein DDP). Für
-parallele Hyperparameter-Läufe je einen Prozess pro Karte starten:
+parallele Läufe je einen Prozess pro Karte starten — `--device cuda:0`,
+`--device cuda:1`, alternativ `CUDA_VISIBLE_DEVICES=1 ... --device cuda`. Achtung:
+alle Läufe schreiben nach `PINNmodulusTwo/artifacts/` und überschreiben sich
+gegenseitig, also Artefakte pro Lauf wegsichern oder `--model-dir` setzen.
+
+### 7.5 Auswertung nach Abschluss
 
 ```bash
-python3 train.py --device cuda:0 --w-phys 0.1 &
-python3 train.py --device cuda:1 --w-phys 0.5 &
-# alternativ:  CUDA_VISIBLE_DEVICES=1 python3 train.py --device cuda
+cat PINNmodulusTwo/artifacts/benchmark_wphys_wbc_best.txt
 ```
 
-Achtung: alle Läufe schreiben nach `PINNmodulusTwo/artifacts/` und
-überschreiben sich gegenseitig — Artefakte pro Lauf wegsichern.
+Erwartete Ausgabe (Ende der Datei):
 
-**Batchgrößen.** Der Geschwindigkeitsgewinn kommt hier weniger aus dem Netz
-selbst (kleines MLP) als daraus, dass auf der GPU deutlich größere
-Physik-Batches bezahlbar sind. Nach dem Smoke-Test lohnt sich:
+```
+BEST (by held-out MAE): w_phys=0.1, w_bc=0.3  -> held-out 8.220°C, in-time 6.432°C
+Total runtime: 27.85 hours (1671.2 min)
+Checkpoints dir: /home/user/llmtraining/PINNmodulusTwo/artifacts/checkpoints_wphys_wbc
+```
+
+Die besten Werte sind immer Gitterpunkte aus 7.2.
 
 ```bash
-python3 train.py --batch-phys 2048 --batch-bc 1024 --epochs 200
+# Plots
+ls -lh PINNmodulusTwo/artifacts/benchmark_wphys_wbc*.png
+
+# Top 10 nach held-out MAE (Spalte 7 = MAE_test_C; Spalte 6 ist die in-time MAE!)
+head -1 PINNmodulusTwo/artifacts/benchmark_wphys_wbc.csv && \
+  tail -n +2 PINNmodulusTwo/artifacts/benchmark_wphys_wbc.csv | sort -t',' -k7 -n | head -10
+
+# Checkpoints: Anzahl und Platzbedarf
+ls PINNmodulusTwo/artifacts/checkpoints_wphys_wbc/ | wc -l   # sollte 100 sein
+du -sh PINNmodulusTwo/artifacts/checkpoints_wphys_wbc/
 ```
 
-und dann per `nvidia-smi` schauen, wie viel Speicher noch frei ist.
+### 7.6 Abbrechen und neu starten
 
-**TF32** (`--tf32`) ist per Default aus. Es beschleunigt Matmuls auf Ampere+,
-verschlechtert aber die zweiten Ableitungen im Physik-Residual. Nur einschalten,
-wenn ein Vergleichslauf zeigt, dass die MAE-Werte gleich bleiben.
-AMP/fp16/bf16 wird aus demselben Grund gar nicht angeboten.
+```bash
+kill $(cat benchmark.pid)
+# falls das nicht greift:
+pkill -f benchmark_wphys_wbc
+ps -p $(cat benchmark.pid)   # "No such process" = gestoppt
+```
+
+**Es gibt keine Resume-Funktion** — ein Neustart beginnt wieder bei Punkt 1.
+
+### 7.7 Weiter mit den besten Gewichten
+
+```bash
+# Werte aus benchmark_wphys_wbc_best.txt einsetzen
+python3 PINNmodulusTwo/train.py \
+    --epochs 100 --w-phys 0.1 --w-bc 0.3 --subsample 2 \
+    --ops OP01 OP02 OP03 OP04 OP05 OP06 --test-op OP07 --device cuda
+```
+
+Bestes Checkpoint laden (Dateiname folgt dem Schema `model_p<w_phys>_b<w_bc>.pt`,
+Punkte werden zu `p`, also `w_phys=0.1, w_bc=0.3` → `model_p0p1_b0p3.pt`):
+
+```python
+# aus dem Ordner PINNmodulusTwo/ heraus ausführen
+import torch
+from model import RecurrentField
+
+ckpt = torch.load("artifacts/checkpoints_wphys_wbc/model_p0p1_b0p3.pt")
+model = RecurrentField(**ckpt["model_config"])
+model.load_state_dict(ckpt["model_state_dict"])
+model.eval()
+# ckpt["bundle_stats"] enthält T_mu / T_sigma / T_span_ref zum Rückskalieren
+```
+
+### 7.8 Komplette Session zum Kopieren
+
+```bash
+# ---------------------------------------------------------------------------
+# TEIL 1: SMOKE TEST
+# ---------------------------------------------------------------------------
+cd ~/llmtraining
+source .venv/bin/activate
+
+python3 PINNmodulusTwo/train.py --epochs 2 --subsample 40 --device cuda
+python3 PINNmodulusTwo/smallBench.py --epochs 5 --w-phys 0.0 0.1 --w-bc 0.1 --device cuda
+cat PINNmodulusTwo/artifacts/smallBench_results.txt
+# Erwartung: "✓ ALL CHECKS PASSED - Ready for full benchmark!"
+
+# ---------------------------------------------------------------------------
+# TEIL 2: FULL BENCHMARK  -  nur bei PASSED starten!
+# ---------------------------------------------------------------------------
+nohup python3 PINNmodulusTwo/benchmark_wphys_wbc.py --extended-grid --device cuda \
+  > benchmark_extended.log 2>&1 &
+echo $! > benchmark.pid
+
+echo "PID:  $(cat benchmark.pid)"
+echo "Log:  benchmark_extended.log"
+echo "Live: tail -f benchmark_extended.log"
+echo "Stop: kill \$(cat benchmark.pid)"
+# Terminal kann jetzt geschlossen werden.
+
+tail -f benchmark_extended.log   # optional, Ctrl-C beendet nur das tail
+```
+
+### 7.9 Checkliste
+
+Vor dem Start:
+
+- [ ] venv aktiviert (`source .venv/bin/activate`)
+- [ ] Smoke-Test gelaufen und PASSED
+- [ ] genug Plattenplatz (~10–20 GB für die Checkpoints, `df -h`)
+- [ ] `nohup` oder `tmux` benutzt, damit der Lauf die SSH-Session überlebt
+
+Während des Laufs:
+
+- [ ] alle paar Stunden ins Log schauen (`tail benchmark_extended.log`)
+- [ ] Prozess läuft noch (`ps -p $(cat benchmark.pid)`)
+- [ ] GPU wird ausgelastet (`nvidia-smi`)
+
+Danach:
+
+- [ ] beste Kombination aus `benchmark_wphys_wbc_best.txt` notieren
+- [ ] Heatmap und Convergence-Plot ansehen
+- [ ] Production-Training mit den optimalen Gewichten starten
 
 ---
 
@@ -241,9 +452,22 @@ AMP/fp16/bf16 wird aus demselben Grund gar nicht angeboten.
 rsync -avz user@gpu-server:~/llmtraining/PINNmodulusTwo/artifacts/ ./artifacts/
 ```
 
-Enthält `metrics.txt`, `training_curves.png`, `timeseries.png` und
-`pred_OP*.npz`. Die Plots werden mit dem `Agg`-Backend erzeugt, es wird also
-kein X-Server auf dem Server gebraucht.
+Enthält je nach gelaufenem Schritt:
+
+- `train.py`: `metrics.txt`, `training_curves.png`, `timeseries.png`, `pred_OP*.npz`
+- `smallBench.py`: `smallBench_results.txt`, `smallBench_convergence.png`
+- `benchmark_wphys_wbc.py`: `benchmark_wphys_wbc.csv`, `*_heatmap.png`,
+  `*_convergence.png`, `*_best.txt` und `checkpoints_wphys_wbc/` (mehrere GB —
+  ggf. gezielt nur das beste Checkpoint holen)
+
+Das Benchmark-Log liegt dort, wo der Lauf gestartet wurde:
+
+```bash
+rsync -avz user@gpu-server:~/llmtraining/benchmark_extended.log ./
+```
+
+Die Plots werden mit dem `Agg`-Backend erzeugt, es wird also kein X-Server auf
+dem Server gebraucht.
 
 ---
 
@@ -260,6 +484,9 @@ kein X-Server auf dem Server gebraucht.
 | `FileNotFoundError: .../material_properties/constants.yaml` | dito → Schritt 5. |
 | `[CFL WARN]` beim Start | Zeitschritt zu groß für die Diffusion — `--subsample` verkleinern (z. B. `--subsample 2`) oder `--grad-clip 1.0` setzen. Unabhängig von der GPU. |
 | Training bricht mit `[ABORT] ... loss exploded` ab | Gleiche Ursache wie oben; die Meldung nennt die empfohlenen Gegenmaßnahmen. |
+| `No space left on device` während des Benchmarks | Die 100 Checkpoints brauchen mehrere GB → mit `--no-save-models` (gar keine) oder `--save-best-only` (nur das beste Modell) neu starten. |
+| Benchmark startet nicht, "läuft schon" | Alten Prozess finden und beenden: `ps aux \| grep benchmark_wphys_wbc`, dann `kill <PID>`. |
+| Loss explodiert mitten im Benchmark | Lauf stoppen (`kill $(cat benchmark.pid)`) und mit stabileren Einstellungen neu starten: `--grad-clip 2.0 --lr 0.001`. |
 | Läuft auf der GPU kaum schneller | Erwartbar bei kleinen Batches: pro Epoche gibt es viele *sequentielle* Rollout-Schritte, die sich nicht parallelisieren lassen. Batchgrößen erhöhen (Schritt 7). |
 
 ---
