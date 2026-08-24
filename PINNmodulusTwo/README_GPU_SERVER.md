@@ -205,7 +205,7 @@ Was dabei passiert:
 
 - trainiert zwei Modelle: `w_phys=0.0` (data-only) und `w_phys=0.1` (mit Physik)
 - nur 5 Epochen, nur 2 OPs (OP01, OP02)
-- Test auf OP07 (held-out)
+- Test auf OP07 (held-out; im Full Benchmark ist OP07 der Val-OP)
 - Laufzeit: ~5 min auf CPU, auf der GPU entsprechend weniger
 
 Erwartete Outputs:
@@ -274,9 +274,16 @@ das Kommando ohne `nohup`/`&` (Detach mit `Ctrl-b`, dann `d`).
 | `w_phys` | 0.0, 0.001, 0.005, 0.01, 0.03, 0.05, 0.1, 0.2, 0.5, 1.0 |
 | `w_bc` | 0.0, 0.001, 0.005, 0.01, 0.03, 0.05, 0.1, 0.3, 0.7, 1.0 |
 | Trainings-OPs | OP01–OP06 |
-| Test-OP | OP07 (held-out) |
+| Val-OP (Auswahl) | OP07 |
+| Test-OP (nur Bericht) | OP08 |
+| Seeds | 1 (`--seeds`, siehe 7.3) |
 | Epochen | 60 pro Gitterpunkt |
 | Laufzeit | ~17 min/Punkt → **~28 h** (CPU-Referenzwert) |
+
+**Val und Test sind getrennt.** Die Auswahl des besten `(w_phys, w_bc)` läuft auf
+dem Val-OP, der Test-OP fließt in keine Auswahl ein und liefert deshalb die Zahl,
+die man berichtet. Vorher rankte der Sweep auf demselben OP, den er als Ergebnis
+meldete — das Minimum über 100 Kandidaten ist dabei systematisch zu optimistisch.
 
 Die ~28 h stammen aus CPU-Läufen. Die echte GPU-Laufzeit steht im Log: nach jedem
 Punkt wird `Train time: ... min | ETA: ... min` aus den tatsächlich gemessenen
@@ -284,7 +291,38 @@ Zeiten ausgegeben. Nach zwei, drei Punkten weißt du, woran du bist.
 
 Ohne `--extended-grid` läuft das kleinere 5×5-Standardgitter (25 Punkte, ~7 h auf CPU).
 
-### 7.3 Erwartete Outputs
+### 7.3 Seeds — wie viele Läufe pro Gitterpunkt
+
+Standard ist **ein** Seed pro Punkt. Damit ist nicht entscheidbar, ob der
+Unterschied zwischen zwei Zellen der Heatmap echt ist oder nur unterschiedliche
+Initialisierung: der Sweep berichtet das Minimum aus 100 Ziehungen, und ein Teil
+davon ist schlicht der glücklichste Startwert.
+
+```bash
+# drei Seeds pro Punkt: jeder Punkt wird über den Mittelwert bewertet
+python3 PINNmodulusTwo/benchmark_wphys_wbc.py --extended-grid --seeds 0 1 2 --device cuda
+```
+
+Jeder Punkt wird dann über den **Mittelwert** seiner Seeds bewertet und trägt die
+Standardabweichung mit (Spalten `MAE_val_std_C` / `MAE_test_std_C` in der CSV,
+Spalten `+/-` in der Tabelle). `benchmark_wphys_wbc_best.txt` vergleicht am Ende
+den Abstand des Siegers zum Zweitplatzierten mit der Seed-Streuung und sagt
+explizit, ob die Rangfolge belastbar ist oder im Rauschen liegt.
+
+> **Laufzeit skaliert linear.** 100 Punkte × 3 Seeds = 300 Trainings. Bei ~3
+> min/Training sind das ~15 h statt ~5 h. Wer das nicht investieren will, macht
+> zuerst den billigen Test: **einen einzelnen** Gitterpunkt mit mehreren Seeds
+> laufen lassen und die Streuung mit den Unterschieden in der bestehenden Heatmap
+> vergleichen.
+>
+> ```bash
+> # ~15 Minuten: ist die Seed-Streuung so groß wie die Heatmap-Unterschiede,
+> # dann ist die Heatmap Rauschen und ein feineres Gitter bringt nichts.
+> python3 PINNmodulusTwo/benchmark_wphys_wbc.py \
+>   --w-phys 0.05 --w-bc 0.1 --seeds 0 1 2 3 4 --epochs 60 --device cuda
+> ```
+
+### 7.4 Erwartete Outputs
 
 ```
 PINNmodulusTwo/artifacts/benchmark_wphys_wbc.csv               -> alle 100 Punkte
@@ -294,7 +332,7 @@ PINNmodulusTwo/artifacts/benchmark_wphys_wbc_best.txt          -> beste Kombinat
 PINNmodulusTwo/artifacts/checkpoints_wphys_wbc/*.pt            -> 100 Modelle (mehrere GB!)
 ```
 
-### 7.4 Monitoring
+### 7.5 Monitoring
 
 ```bash
 # Live mitlesen (Ctrl-C beendet nur tail, nicht den Benchmark)
@@ -329,7 +367,7 @@ parallele Läufe je einen Prozess pro Karte starten — `--device cuda:0`,
 alle Läufe schreiben nach `PINNmodulusTwo/artifacts/` und überschreiben sich
 gegenseitig, also Artefakte pro Lauf wegsichern oder `--model-dir` setzen.
 
-### 7.5 Auswertung nach Abschluss
+### 7.6 Auswertung nach Abschluss
 
 ```bash
 cat PINNmodulusTwo/artifacts/benchmark_wphys_wbc_best.txt
@@ -338,7 +376,12 @@ cat PINNmodulusTwo/artifacts/benchmark_wphys_wbc_best.txt
 Erwartete Ausgabe (Ende der Datei):
 
 ```
-BEST (by held-out MAE): w_phys=0.1, w_bc=0.3  -> held-out 8.220°C, in-time 6.432°C
+Selection ran on OP07 (MAE_val); OP08 (MAE_test) was never used to choose anything.
+BEST (by MAE_val): w_phys=0.1, w_bc=0.3
+  -> val 8.220°C, test 8.641°C, in-time 6.432°C
+  Report the test number. MAE_val is optimistic: it is the minimum over 100 grid points.
+  NOTE: one seed per point - the ranking cannot be separated from init noise.
+  Re-run with --seeds 0 1 2 to find out.
 Total runtime: 27.85 hours (1671.2 min)
 Checkpoints dir: /home/user/llmtraining/PINNmodulusTwo/artifacts/checkpoints_wphys_wbc
 ```
@@ -349,16 +392,22 @@ Die besten Werte sind immer Gitterpunkte aus 7.2.
 # Plots
 ls -lh PINNmodulusTwo/artifacts/benchmark_wphys_wbc*.png
 
-# Top 10 nach held-out MAE (Spalte 7 = MAE_test_C; Spalte 6 ist die in-time MAE!)
+# Top 10 nach Val-MAE - das ist die Spalte, auf der ausgewaehlt wurde.
+# Spalten: 6=MAE_in_C  7=MAE_val_C  8=MAE_val_std_C  9=MAE_test_C  10=MAE_test_std_C
 head -1 PINNmodulusTwo/artifacts/benchmark_wphys_wbc.csv && \
   tail -n +2 PINNmodulusTwo/artifacts/benchmark_wphys_wbc.csv | sort -t',' -k7 -n | head -10
+
+# Dieselben Punkte mit ihrer Test-MAE (Spalte 9) - die Zahl, die berichtet wird.
+# Wenn die Reihenfolge hier stark von der obigen abweicht, ist die Auswahl instabil.
+tail -n +2 PINNmodulusTwo/artifacts/benchmark_wphys_wbc.csv | sort -t',' -k7 -n | \
+  head -10 | cut -d',' -f1,2,7,8,9,10
 
 # Checkpoints: Anzahl und Platzbedarf
 ls PINNmodulusTwo/artifacts/checkpoints_wphys_wbc/ | wc -l   # sollte 100 sein
 du -sh PINNmodulusTwo/artifacts/checkpoints_wphys_wbc/
 ```
 
-### 7.6 Abbrechen und neu starten
+### 7.7 Abbrechen und neu starten
 
 ```bash
 kill $(cat benchmark.pid)
@@ -369,13 +418,13 @@ ps -p $(cat benchmark.pid)   # "No such process" = gestoppt
 
 **Es gibt keine Resume-Funktion** — ein Neustart beginnt wieder bei Punkt 1.
 
-### 7.7 Weiter mit den besten Gewichten
+### 7.8 Weiter mit den besten Gewichten
 
 ```bash
 # Werte aus benchmark_wphys_wbc_best.txt einsetzen
 python3 PINNmodulusTwo/train.py \
     --epochs 100 --w-phys 0.1 --w-bc 0.3 --subsample 2 \
-    --ops OP01 OP02 OP03 OP04 OP05 OP06 --test-op OP07 --device cuda
+    --ops OP01 OP02 OP03 OP04 OP05 OP06 --test-op OP08 --device cuda
 ```
 
 Bestes Checkpoint laden (Dateiname folgt dem Schema `model_p<w_phys>_b<w_bc>.pt`,
@@ -393,7 +442,7 @@ model.eval()
 # ckpt["bundle_stats"] enthält T_mu / T_sigma / T_span_ref zum Rückskalieren
 ```
 
-### 7.8 Komplette Session zum Kopieren
+### 7.9 Komplette Session zum Kopieren
 
 ```bash
 # ---------------------------------------------------------------------------
@@ -423,7 +472,7 @@ echo "Stop: kill \$(cat benchmark.pid)"
 tail -f benchmark_extended.log   # optional, Ctrl-C beendet nur das tail
 ```
 
-### 7.9 Checkliste
+### 7.10 Checkliste
 
 Vor dem Start:
 
@@ -494,7 +543,7 @@ dem Server gebraucht.
 ## Was der GPU-Umbau am Code geändert hat
 
 - `device_utils.py` (neu): `resolve_device()`, `seed_everything()`, `enable_tf32()`.
-- `train.py`, `smallBench.py`, `benchmark_wphys.py`, `benchmark_wphys_wbc.py`:
+- `train.py`, `smallBench.py`, `benchmark_wphys_wbc.py`:
   `--device` steht jetzt auf `auto` statt `cpu`; ein explizites `cuda` schlägt
   hart fehl, wenn keine GPU da ist, statt still auf die CPU zu wechseln.
 - `train.py`: zusätzliches `--tf32`-Flag, `torch.cuda.manual_seed_all()` beim Seeding.

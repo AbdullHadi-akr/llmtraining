@@ -233,7 +233,7 @@ def main():
 
     if all_passed:
         print("\n✓ ALL CHECKS PASSED - Ready for full benchmark!")
-        print("  Run: python3 PINNmodulusTwo/benchmark_wphys.py")
+        print("  Run: python3 PINNmodulusTwo/benchmark_wphys_wbc.py --extended-grid")
     else:
         print("\n✗ SOME CHECKS FAILED - Review issues above before full benchmark")
 

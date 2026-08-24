@@ -5,15 +5,32 @@ import dataclasses
 import sys
 from pathlib import Path
 
-# Add battery_surrogate to path
-sys.path.insert(0, str(Path(__file__).parent.parent / "battery_surrogate_agenticWorkflow" / "src"))
+# The raw-CSV assembly still lives in the legacy workflow; this is the one place
+# the active code depends on it. Both layouts are accepted so a checkout that has
+# not been restructured keeps working.
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent
+_SRC_CANDIDATES = (
+    _PROJECT_ROOT / "legacy" / "battery_surrogate_agenticWorkflow" / "src",
+    _PROJECT_ROOT / "battery_surrogate_agenticWorkflow" / "src",
+)
+for _src in _SRC_CANDIDATES:
+    if _src.exists():
+        sys.path.insert(0, str(_src))
+        break
+else:
+    raise SystemExit(
+        "cannot find the legacy battery_surrogate sources needed to build the cache.\n"
+        "  searched:\n"
+        + "".join(f"    {c}\n" for c in _SRC_CANDIDATES)
+    )
 
 from battery_surrogate.data.assemble import assemble_op
 from battery_surrogate.data.cache import save_bundle, compute_cache_key
 
 def generate_cache_for_ops(op_ids):
     """Generate .npz cache files for the given OP IDs."""
-    output_dir = Path(__file__).parent / "data_cache"
+    # Preferred location: shared and top-level, matching data._CACHE_CANDIDATES.
+    output_dir = _PROJECT_ROOT / "data_cache"
     output_dir.mkdir(parents=True, exist_ok=True)
     
     for op_id in op_ids:

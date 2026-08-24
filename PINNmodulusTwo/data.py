@@ -41,11 +41,25 @@ THIS_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = THIS_DIR.parent
 
 
+# Where the OP*.npz bundles may live, most specific first. The cache is not in
+# git (see .gitignore), so it stays wherever it already is on a given machine --
+# hence the fallbacks: a checkout that moved the legacy folders must keep finding
+# a cache that did not move with them. First existing hit wins; if none exists,
+# the preferred top-level location is reported so errors name the right path.
+_CACHE_CANDIDATES = (
+    THIS_DIR / "data_cache",                    # project-local override
+    PROJECT_ROOT / "data_cache",                # preferred: shared, top level
+    PROJECT_ROOT / "legacy" / "battery_surrogate_agenticWorkflow" / "data_cache",
+    PROJECT_ROOT / "battery_surrogate_agenticWorkflow" / "data_cache",  # pre-move
+)
+PREFERRED_DATA_CACHE = PROJECT_ROOT / "data_cache"
+
+
 def _resolve_data_cache() -> Path:
-    local_cache = THIS_DIR / "data_cache"
-    if local_cache.exists():
-        return local_cache
-    return PROJECT_ROOT / "battery_surrogate_agenticWorkflow" / "data_cache"
+    for candidate in _CACHE_CANDIDATES:
+        if candidate.exists():
+            return candidate
+    return PREFERRED_DATA_CACHE
 
 
 DATA_CACHE = _resolve_data_cache()
@@ -346,11 +360,15 @@ def require_ops(*op_ids: str) -> None:
     have = set(available_ops())
     missing = [op for op in dict.fromkeys(op_ids) if op and op not in have]
     if missing:
+        searched = "\n".join(f"                {c}" for c in _CACHE_CANDIDATES)
         raise SystemExit(
             f"missing cached OP bundle(s): {', '.join(missing)}\n"
-            f"  looked in : {DATA_CACHE}\n"
-            f"  available : {', '.join(available_ops()) or '(none)'}\n"
-            f"  build them: python3 PINNmodulusTwo/generate_cache.py"
+            f"  using cache : {DATA_CACHE}"
+            f"{' (does not exist)' if not DATA_CACHE.exists() else ''}\n"
+            f"  available   : {', '.join(available_ops()) or '(none)'}\n"
+            f"  searched    :\n{searched}\n"
+            f"  preferred   : {PREFERRED_DATA_CACHE}\n"
+            f"  build them  : python3 PINNmodulusTwo/generate_cache.py"
         )
 
 

@@ -10,7 +10,12 @@ Everything except w_phys and w_bc is fixed so the comparison is apples-to-apples
 Fixed hyperparameters (override on CLI if desired):
 - architecture: width=128, depth=4, per-layer learnable swish, weight-norm
 - recurrence: k_max=2, history_mode=hybrid, rate_lags=[5.0, 20.0]
-- optimization: Adam, lr=2e-3, epochs=60, seed=0, device=auto (CUDA when available)
+- optimization: Adam, lr=2e-3, epochs=60, device=auto (CUDA when available)
+- seeds: one training run per seed per grid point (--seeds, default [0]).
+  Each point is scored by the MEAN over its seeds and carries the standard
+  deviation, so a difference between points can be read against the spread
+  the initialisation alone produces. Runtime scales linearly with the seed
+  count: 100 points x 3 seeds = 300 trainings.
 - data: train=OP01-OP06, val=OP07 (selection), test=OP08 (report only),
   subsample=2 (CFL-stable Δt=0.2s)
 - loss weights: w_data=1.0 (fixed), w_phys and w_bc swept
@@ -34,7 +39,8 @@ For faster testing:
     --w-phys 0.0 0.01 0.05 0.1 0.3 --w-bc 0.0 0.01 0.05 0.1 0.3 → 25 points, ~7 hours
 
 Outputs (in PINNmodulusTwo/artifacts/):
-    benchmark_wphys_wbc.csv - one row per (w_phys, w_bc) with rollout MAEs
+    benchmark_wphys_wbc.csv - one row per (w_phys, w_bc): mean rollout MAEs
+        over the seeds, their standard deviation, and how many seeds survived
     benchmark_wphys_wbc_heatmap.png - 2D heatmap of validation MAE
     benchmark_wphys_wbc_best.txt - best combination + summary table
     checkpoints_wphys_wbc/*.pt - per-sweep model checkpoints
@@ -106,7 +112,11 @@ def parse_args() -> argparse.Namespace:
                    help="LR multiplier for src_gain/diff_gain (FIXED)")
     p.add_argument("--grad-clip", type=float, default=1.0)
     p.add_argument("--early-stopping-patience", type=int, default=0)
-    p.add_argument("--seed", type=int, default=0)
+    p.add_argument("--seeds", type=int, nargs="+", default=[0],
+                   help="one training run per seed per grid point; the point is "
+                        "scored by the MEAN over seeds. Runtime scales with the "
+                        "number of seeds. Use >=3 to tell a real effect from "
+                        "init noise.")
     p.add_argument("--device", default=d.get("device", "auto"),
                    help="auto | cpu | cuda | cuda:N (auto = cuda when available)")
     # Architecture (FIXED for fair comparison)
@@ -160,7 +170,8 @@ def parse_args() -> argparse.Namespace:
     return args
 
 
-def _make_args(cli: argparse.Namespace, w_phys: float, w_bc: float) -> Namespace:
+def _make_args(cli: argparse.Namespace, w_phys: float, w_bc: float,
+               seed: int) -> Namespace:
     """Build the Namespace that train.fit expects for one sweep point."""
     return Namespace(
         ops=cli.ops, subsample=cli.subsample, epochs=cli.epochs,
@@ -175,7 +186,7 @@ def _make_args(cli: argparse.Namespace, w_phys: float, w_bc: float) -> Namespace
         early_stopping_patience=cli.early_stopping_patience,
         phys_norm=cli.phys_norm,
         use_static=cli.use_static, use_forcing=cli.use_forcing,
-        seed=cli.seed, device=cli.device,
+        seed=int(seed), device=cli.device,
         test_op=cli.test_op,
     )
 
@@ -211,7 +222,8 @@ _EMPTY_HIST = {"epoch": [], "L_data": [], "L_phys": [], "L_bc": [],
                "L_phys_bal": [], "L_bc_bal": [], "delta": [], "aborted": True}
 
 
-def _failed_result(w_phys: float, w_bc: float, train_time: float) -> dict:
+def _failed_result(w_phys: float, w_bc: float, train_time: float,
+                   n_seeds: int = 1) -> dict:
     """Result row for a grid point that diverged or crashed.
 
     Every grid point must produce exactly one entry in ``results`` and
@@ -221,6 +233,8 @@ def _failed_result(w_phys: float, w_bc: float, train_time: float) -> dict:
     return {
         "w_phys": float(w_phys), "w_bc": float(w_bc),
         "intime_mae": nan, "val_mae": nan, "test_mae": nan,
+        "val_mae_std": nan, "test_mae_std": nan,
+        "n_seeds": int(n_seeds), "n_seeds_ok": 0,
         "L_data": nan, "L_phys": nan, "L_bc": nan,
         "delta_s": nan, "src_gain": nan, "diff_gain": nan,
         "n_params": 0,
@@ -229,6 +243,181 @@ def _failed_result(w_phys: float, w_bc: float, train_time: float) -> dict:
         "checkpoint": "",
         "test_time_maes": np.full(N_BOX_POINTS, nan),
     }
+
+
+def _train_one_seed(cli, w_phys: float, w_bc: float, seed: int, device,
+                    model_dir: Path, save_ckpt: bool):
+    """Train one (w_phys, w_bc) at one seed.
+
+    Returns ``(row_or_None, history)``. ``None`` means this seed produced nothing
+    usable -- it crashed or its loss diverged -- and the caller drops it from the
+    mean instead of letting a NaN poison the whole grid point.
+    """
+    args = _make_args(cli, w_phys, w_bc, seed)
+    try:
+        model, bundle, _packed, _dtn, hist = fit(args)
+    except Exception as exc:  # one bad seed must not kill the sweep
+        print(f"    seed {seed}: training failed ({exc})", flush=True)
+        return None, _EMPTY_HIST
+    model.eval()
+
+    # fit() aborts on NaN/Inf and records the failed epoch, so an empty history
+    # only happens for epochs=0. Either way this seed has no usable result.
+    L_data_raw = float(hist["L_data"][-1]) if hist["L_data"] else float("nan")
+    L_phys_raw = float(hist["L_phys"][-1]) if hist["L_phys"] else float("nan")
+    L_bc_raw = float(hist["L_bc"][-1]) if hist["L_bc"] else float("nan")
+    if not np.isfinite(L_data_raw):
+        print(f"    seed {seed}: loss diverged (L_data={L_data_raw})", flush=True)
+        return None, hist
+
+    intime_maes = [
+        _mae(_rollout_phys(model, op, bundle, device), op.T_lab, op.split_t, op.n_t)
+        for op in bundle.ops
+    ]
+
+    # Selection OP: this is what min() ranks on.
+    val_data = build_op(cli.val_op, bundle, subsample_time=cli.subsample)
+    val_pred = _rollout_phys(model, val_data, bundle, device)
+    val_mae = _mae(val_pred, val_data.T_lab, 0, val_data.n_t)
+
+    # Reporting OP: never used to choose anything, so the number stays an honest
+    # held-out estimate for the point that selection lands on.
+    test_data = build_op(cli.test_op, bundle, subsample_time=cli.subsample)
+    test_pred = _rollout_phys(model, test_data, bundle, device)
+    test_mae = _mae(test_pred, test_data.T_lab, 0, test_data.n_t)
+
+    test_time_idx = np.linspace(0, test_data.n_t - 1, num=N_BOX_POINTS, dtype=int)
+    test_time_maes = _timepoint_maes(test_pred, test_data.T_lab, test_time_idx)
+
+    checkpoint = ""
+    if save_ckpt:
+        checkpoint_path = model_dir / f"model_{_w_tag(w_phys, w_bc)}.pt"
+        torch.save(
+            {
+                "model_state_dict": model.state_dict(),
+                "model_config": {
+                    "n_config": bundle.n_config,
+                    "n_static": model.n_static,
+                    "n_forcing": model.n_forcing,
+                    "k_max": args.k_max,
+                    "history_mode": args.history_mode,
+                    "rate_lags": [float(v) / bundle.T_span_ref for v in args.rate_lags],
+                    "layer_size": args.width,
+                    "num_layers": args.depth,
+                    "delta_seconds": 1.0,
+                    "dtn": float(_dtn),
+                    "t_span_ref": float(bundle.T_span_ref),
+                    "rate_scale": float(bundle.dTdt_scale),
+                    "use_autograd_time": (args.time_deriv == "autograd"),
+                },
+                "bundle_stats": {
+                    "T_mu": float(bundle.T_mu),
+                    "T_sigma": float(bundle.T_sigma),
+                    "T_span_ref": float(bundle.T_span_ref),
+                },
+                "benchmark_context": {
+                    "w_phys": float(w_phys),
+                    "w_bc": float(w_bc),
+                    "ops": list(args.ops),
+                    "val_op": cli.val_op,
+                    "test_op": args.test_op,
+                    "epochs": int(args.epochs),
+                    "subsample": int(args.subsample),
+                    "seed": int(seed),
+                },
+            },
+            checkpoint_path,
+        )
+        checkpoint = str(checkpoint_path)
+
+    return (
+        {
+            "intime_mae": float(np.mean(intime_maes)),
+            "val_mae": val_mae,
+            "test_mae": test_mae,
+            "L_data": L_data_raw,
+            "L_phys": L_phys_raw,
+            "L_bc": L_bc_raw,
+            "delta_s": float(model.delta.detach()) * bundle.T_span_ref,
+            "src_gain": float(model.src_gain.detach()),
+            "diff_gain": float(model.diff_gain.detach()),
+            "n_params": sum(p.numel() for p in model.parameters()),
+            "rate_lags_s": (
+                np.array(model.rate_lags.detach().cpu().numpy()) * bundle.T_span_ref
+            ).astype(float).tolist(),
+            "checkpoint": checkpoint,
+            "test_time_maes": test_time_maes,
+        },
+        hist,
+    )
+
+
+def _aggregate_seeds(w_phys: float, w_bc: float, per_seed: list, n_seeds: int,
+                     train_time: float) -> dict:
+    """Collapse the per-seed rows of one grid point into a single result row.
+
+    The point is scored by the MEAN over seeds; the standard deviation travels
+    with it so a difference between two grid points can be read against the
+    spread the seeds alone produce. With one seed the std is 0 by construction --
+    that is not evidence of stability, only of a single sample.
+    """
+    def col(key):
+        return np.array([r[key] for r in per_seed], dtype=float)
+
+    def spread(values):
+        return float(values.std(ddof=1)) if len(values) > 1 else 0.0
+
+    val, test = col("val_mae"), col("test_mae")
+    first = per_seed[0]
+    return {
+        "w_phys": float(w_phys),
+        "w_bc": float(w_bc),
+        "intime_mae": float(col("intime_mae").mean()),
+        "val_mae": float(val.mean()),
+        "test_mae": float(test.mean()),
+        "val_mae_std": spread(val),
+        "test_mae_std": spread(test),
+        "n_seeds": int(n_seeds),
+        "n_seeds_ok": len(per_seed),
+        "L_data": float(col("L_data").mean()),
+        "L_phys": float(col("L_phys").mean()),
+        "L_bc": float(col("L_bc").mean()),
+        "delta_s": first["delta_s"],
+        "src_gain": float(col("src_gain").mean()),
+        "diff_gain": float(col("diff_gain").mean()),
+        "n_params": first["n_params"],
+        "rate_lags_s": first["rate_lags_s"],
+        "train_time": train_time,
+        "checkpoint": first["checkpoint"],
+        "test_time_maes": np.mean([r["test_time_maes"] for r in per_seed], axis=0),
+    }
+
+
+def _noise_verdict(usable: list, best: dict, cli) -> list:
+    """Say whether the winning grid point is actually distinguishable from noise.
+
+    A sweep over 100 points reports the minimum of 100 draws, so the winner is
+    partly whichever point got the luckiest initialisation. Comparing the gap to
+    the runner-up against the seed-to-seed spread is what turns the ranking into
+    a claim one can defend.
+    """
+    if len(cli.seeds) < 2:
+        return ["  NOTE: one seed per point - the ranking cannot be separated from "
+                "init noise. Re-run with --seeds 0 1 2 to find out."]
+    if len(usable) < 2:
+        return []
+    runner_up = sorted(usable, key=lambda r: r["val_mae"])[1]
+    gap = runner_up["val_mae"] - best["val_mae"]
+    noise = max(best["val_mae_std"], runner_up["val_mae_std"])
+    if noise <= 0:
+        return []
+    if gap < noise:
+        return [f"  WARNING: the gap to the runner-up ({gap:.3f} °C) is smaller than "
+                f"the seed spread ({noise:.3f} °C).",
+                "  The ranking is within noise - treat the winning cell as "
+                "'one of several equally good', not as the optimum."]
+    return [f"  The gap to the runner-up ({gap:.3f} °C) exceeds the seed spread "
+            f"({noise:.3f} °C), so the ranking is meaningful at this grid size."]
 
 
 def _print_eta(idx: int, total_points: int, start_time_total: float,
@@ -261,7 +450,10 @@ def main() -> None:
         f"history_mode={cli.history_mode}  rate_lags_init={cli.rate_lags}s",
         f"  time_deriv={cli.time_deriv}  use_static={cli.use_static}  use_forcing={cli.use_forcing}",
         "TRAINING SETTINGS:",
-        f"  lr={cli.lr}  epochs={cli.epochs}  dt={dt_s:.1f}s  seed={cli.seed}  grad_clip={cli.grad_clip}",
+        f"  lr={cli.lr}  epochs={cli.epochs}  dt={dt_s:.1f}s  "
+        f"seeds={cli.seeds}  grad_clip={cli.grad_clip}",
+        f"  runs = {len(cli.w_phys)*len(cli.w_bc)} grid points x {len(cli.seeds)} "
+        f"seed(s) = {len(cli.w_phys)*len(cli.w_bc)*len(cli.seeds)} trainings",
         "LOSS WEIGHTS (SWEPT):",
         f"  w_data=1.0 (fixed)   phys_norm={cli.phys_norm} (adaptive EMA)",
         f"  w_phys sweep = {cli.w_phys}",
@@ -280,135 +472,55 @@ def main() -> None:
         [(p, b) for p in cli.w_phys for b in cli.w_bc], start=1
     ):
         print(f"\n{'='*60}")
-        print(f"[{idx}/{total_points}] Training w_phys={w_phys}, w_bc={w_bc}")
+        print(f"[{idx}/{total_points}] Training w_phys={w_phys}, w_bc={w_bc}"
+              f"  ({len(cli.seeds)} seed{'s' if len(cli.seeds) > 1 else ''}: "
+              f"{', '.join(str(s) for s in cli.seeds)})")
         print(f"{'='*60}")
         start_time = time.time()
 
-        args = _make_args(cli, w_phys, w_bc)
-        try:
-            model, bundle, _packed, _dtn, hist = fit(args)
-        except Exception as exc:  # one bad grid point must not kill the sweep
-            train_time = time.time() - start_time
-            print(f"  [SKIP] w_phys={w_phys}, w_bc={w_bc}: training failed ({exc})",
-                  flush=True)
-            results.append(_failed_result(w_phys, w_bc, train_time))
-            histories.append({"w_phys": w_phys, "w_bc": w_bc, "hist": _EMPTY_HIST})
-            _print_eta(idx, total_points, start_time_total, train_time)
-            continue
-        model.eval()
+        per_seed, first_hist = [], None
+        for seed in cli.seeds:
+            # Only the first seed writes a checkpoint: the grid point is scored by
+            # the mean over seeds, so no single seed's weights are "the" result.
+            save_ckpt = (cli.save_models and not cli.save_best_only
+                         and seed == cli.seeds[0])
+            one, hist = _train_one_seed(cli, w_phys, w_bc, seed, device,
+                                        model_dir, save_ckpt)
+            if first_hist is None:
+                first_hist = hist
+            if one is not None:
+                per_seed.append(one)
+
         train_time = time.time() - start_time
 
-        # fit() aborts on NaN/Inf and records the failed epoch, so an empty history
-        # only happens for epochs=0. Either way this point has no usable result.
-        L_data_raw = float(hist["L_data"][-1]) if hist["L_data"] else float("nan")
-        L_phys_raw = float(hist["L_phys"][-1]) if hist["L_phys"] else float("nan")
-        L_bc_raw = float(hist["L_bc"][-1]) if hist["L_bc"] else float("nan")
-
-        if not np.isfinite(L_data_raw):
-            print(f"  [SKIP] w_phys={w_phys}, w_bc={w_bc}: loss diverged "
-                  f"(L_data={L_data_raw}) - recorded as NaN, sweep continues",
-                  flush=True)
-            failed = _failed_result(w_phys, w_bc, train_time)
-            failed.update(L_data=L_data_raw, L_phys=L_phys_raw, L_bc=L_bc_raw)
-            results.append(failed)
-            histories.append({"w_phys": w_phys, "w_bc": w_bc, "hist": hist})
+        if not per_seed:
+            print(f"  [SKIP] w_phys={w_phys}, w_bc={w_bc}: every seed diverged or "
+                  f"crashed - recorded as NaN, sweep continues", flush=True)
+            results.append(_failed_result(w_phys, w_bc, train_time, len(cli.seeds)))
+            histories.append({"w_phys": w_phys, "w_bc": w_bc,
+                              "hist": first_hist or _EMPTY_HIST})
             _print_eta(idx, total_points, start_time_total, train_time)
             continue
 
-        intime_maes = [
-            _mae(_rollout_phys(model, op, bundle, device), op.T_lab, op.split_t, op.n_t)
-            for op in bundle.ops
-        ]
-        # Selection OP: this is what min() ranks on.
-        val_data = build_op(cli.val_op, bundle, subsample_time=cli.subsample)
-        val_pred = _rollout_phys(model, val_data, bundle, device)
-        val_mae = _mae(val_pred, val_data.T_lab, 0, val_data.n_t)
+        row = _aggregate_seeds(w_phys, w_bc, per_seed, len(cli.seeds), train_time)
+        results.append(row)
+        histories.append({"w_phys": w_phys, "w_bc": w_bc, "hist": first_hist})
 
-        # Reporting OP: never used to choose anything, so the number stays an
-        # honest held-out estimate for the point that selection lands on.
-        test_data = build_op(cli.test_op, bundle, subsample_time=cli.subsample)
-        test_pred = _rollout_phys(model, test_data, bundle, device)
-        test_mae = _mae(test_pred, test_data.T_lab, 0, test_data.n_t)
-
-        # Boxplot over time on the reporting OP.
-        test_time_idx = np.linspace(0, test_data.n_t - 1, num=N_BOX_POINTS, dtype=int)
-        test_time_maes = _timepoint_maes(test_pred, test_data.T_lab, test_time_idx)
-
-        intime = float(np.mean(intime_maes))
-
-        delta_s = float(model.delta.detach()) * bundle.T_span_ref
-        src_gain = float(model.src_gain.detach())
-        diff_gain = float(model.diff_gain.detach())
-        n_params = sum(p.numel() for p in model.parameters())
-        learned_rate_lags_s = (
-            np.array(model.rate_lags.detach().cpu().numpy()) * bundle.T_span_ref
-        ).astype(float).tolist()
-
-        checkpoint = ""
-        if cli.save_models and not cli.save_best_only:
-            checkpoint_path = model_dir / f"model_{_w_tag(w_phys, w_bc)}.pt"
-            torch.save(
-                {
-                    "model_state_dict": model.state_dict(),
-                    "model_config": {
-                        "n_config": bundle.n_config,
-                        "n_static": model.n_static,
-                        "n_forcing": model.n_forcing,
-                        "k_max": args.k_max,
-                        "history_mode": args.history_mode,
-                        "rate_lags": [float(v) / bundle.T_span_ref for v in args.rate_lags],
-                        "layer_size": args.width,
-                        "num_layers": args.depth,
-                        "delta_seconds": 1.0,
-                        "dtn": float(_dtn),
-                        "t_span_ref": float(bundle.T_span_ref),
-                        "rate_scale": float(bundle.dTdt_scale),
-                        "use_autograd_time": (args.time_deriv == "autograd"),
-                    },
-                    "bundle_stats": {
-                        "T_mu": float(bundle.T_mu),
-                        "T_sigma": float(bundle.T_sigma),
-                        "T_span_ref": float(bundle.T_span_ref),
-                    },
-                    "benchmark_context": {
-                        "w_phys": float(w_phys),
-                        "w_bc": float(w_bc),
-                        "ops": list(args.ops),
-                        "val_op": cli.val_op,
-                        "test_op": args.test_op,
-                        "epochs": int(args.epochs),
-                        "subsample": int(args.subsample),
-                        "seed": int(args.seed),
-                    },
-                },
-                checkpoint_path,
-            )
-            checkpoint = str(checkpoint_path)
-
-        results.append({
-            "w_phys": float(w_phys),
-            "w_bc": float(w_bc),
-            "intime_mae": intime,
-            "val_mae": val_mae,
-            "test_mae": test_mae,
-            "L_data": L_data_raw,
-            "L_phys": L_phys_raw,
-            "L_bc": L_bc_raw,
-            "delta_s": delta_s,
-            "src_gain": src_gain,
-            "diff_gain": diff_gain,
-            "n_params": n_params,
-            "rate_lags_s": learned_rate_lags_s,
-            "train_time": train_time,
-            "checkpoint": checkpoint,
-            "test_time_maes": test_time_maes,
-        })
-        histories.append({"w_phys": w_phys, "w_bc": w_bc, "hist": hist})
-
-        print(f"  MAE(in-time)={intime:.3f}°C  "
-              f"MAE(val {cli.val_op})={val_mae:.3f}°C  "
-              f"MAE(test {cli.test_op})={test_mae:.3f}°C")
-        print(f"  L_data={L_data_raw:.4g}  L_phys={L_phys_raw:.4g}  L_bc={L_bc_raw:.4g}")
+        n_ok, n_all = row["n_seeds_ok"], row["n_seeds"]
+        spread = ""
+        if n_ok > 1:
+            spread = (f"  (+/-{row['val_mae_std']:.3f} val, "
+                      f"+/-{row['test_mae_std']:.3f} test over {n_ok} seeds)")
+        elif n_all > 1:
+            spread = f"  ({n_ok}/{n_all} seeds usable)"
+        print(f"  MAE(in-time)={row['intime_mae']:.3f}°C  "
+              f"MAE(val {cli.val_op})={row['val_mae']:.3f}°C  "
+              f"MAE(test {cli.test_op})={row['test_mae']:.3f}°C{spread}")
+        print(f"  L_data={row['L_data']:.4g}  L_phys={row['L_phys']:.4g}  "
+              f"L_bc={row['L_bc']:.4g}")
+        if n_ok < n_all:
+            print(f"  note: {n_all - n_ok}/{n_all} seeds diverged and were left out "
+                  f"of the mean", flush=True)
         _print_eta(idx, total_points, start_time_total, train_time)
 
     total_time = time.time() - start_time_total
@@ -418,14 +530,17 @@ def main() -> None:
 
     # ---- CSV ----------------------------------------------------------------
     csv_lines = [
-        "w_phys,w_bc,L_data,L_phys,L_bc,MAE_in_C,MAE_val_C,MAE_test_C,"
+        "w_phys,w_bc,L_data,L_phys,L_bc,MAE_in_C,MAE_val_C,MAE_val_std_C,"
+        "MAE_test_C,MAE_test_std_C,n_seeds,n_seeds_ok,"
         "delta_s,src_gain,diff_gain,rate_lags_s,train_time_min,checkpoint"
     ]
     for r in results:
         lags_str = ";".join(f"{v:.6g}" for v in r["rate_lags_s"])
         csv_lines.append(
             f"{r['w_phys']},{r['w_bc']},{r['L_data']:.6f},{r['L_phys']:.6f},{r['L_bc']:.6f},"
-            f"{r['intime_mae']:.4f},{r['val_mae']:.4f},{r['test_mae']:.4f},"
+            f"{r['intime_mae']:.4f},{r['val_mae']:.4f},{r['val_mae_std']:.4f},"
+            f"{r['test_mae']:.4f},{r['test_mae_std']:.4f},"
+            f"{r['n_seeds']},{r['n_seeds_ok']},"
             f"{r['delta_s']:.6f},{r['src_gain']:.6f},{r['diff_gain']:.6f},"
             f"\"{lags_str}\",{r['train_time']/60:.2f},{r['checkpoint']}"
         )
@@ -447,7 +562,7 @@ def main() -> None:
     best = min(usable, key=lambda r: r["val_mae"])
     if cli.save_models and cli.save_best_only:
         best_ckpt_path = model_dir / f"model_best_{_w_tag(best['w_phys'], best['w_bc'])}.pt"
-        args_best = _make_args(cli, best["w_phys"], best["w_bc"])
+        args_best = _make_args(cli, best["w_phys"], best["w_bc"], cli.seeds[0])
         model_best, bundle_best, _, dtn_best, _ = fit(args_best)
         torch.save(
             {
@@ -488,13 +603,13 @@ def main() -> None:
         best["checkpoint"] = str(best_ckpt_path)
 
     th = (f"{'w_phys':>7} {'w_bc':>7} | {'L_data':>10} {'L_phys':>10} {'L_bc':>10} | "
-          f"{'MAE_in':>7} {'MAE_val':>8} {'MAE_test':>9}")
+          f"{'MAE_in':>7} {'MAE_val':>8} {'+/-':>6} {'MAE_test':>9} {'+/-':>6}")
     summary = header + [th, "-" * len(th)]
     for r in results:
         summary.append(
             f"{r['w_phys']:>7.3f} {r['w_bc']:>7.3f} | {r['L_data']:>10.4g} {r['L_phys']:>10.4g} "
             f"{r['L_bc']:>10.4g} | {r['intime_mae']:>7.3f} {r['val_mae']:>8.3f} "
-            f"{r['test_mae']:>9.3f}"
+            f"{r['val_mae_std']:>6.3f} {r['test_mae']:>9.3f} {r['test_mae_std']:>6.3f}"
         )
     summary += [
         "",
@@ -506,6 +621,7 @@ def main() -> None:
         f"in-time {best['intime_mae']:.3f}°C",
         "  Report the test number. MAE_val is optimistic: it is the minimum over "
         f"{len(results)} grid points.",
+        *_noise_verdict(usable, best, cli),
         f"Total runtime: {total_time/3600:.2f} hours ({total_time/60:.1f} min)",
     ]
     if n_failed:
