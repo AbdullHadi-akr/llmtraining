@@ -58,18 +58,26 @@ coupled to the hybrid feature layout.
 ## Run
 
 ```bash
-cd /mnt/c/Users/M0245635/batterysurrogatemodell
-source modulus_env/bin/activate
+source .venv/bin/activate
 python3 PINNmodulusTwo/train.py --epochs 60 --subsample 40
 ```
+
+`--device` steht auf `auto`: läuft auf der GPU, wenn eine verfügbar ist, sonst
+auf der CPU. Explizit erzwingen mit `--device cuda` / `--device cuda:1` /
+`--device cpu`. Komplettes Server-Setup (Treiber, CUDA-PyTorch, Modulus,
+Datenübertragung): **[README_GPU_SERVER.md](README_GPU_SERVER.md)**.
 
 Outputs land in `PINNmodulusTwo/artifacts/`: `metrics.txt`, `training_curves.png`,
 `timeseries.png`, and `pred_OP0*.npz`.
 
 ## Notes
 
-- CPU-first (per the repo Modulus workflow). The spatial part of the physics
-  residual uses autograd, so `batch_phys` is kept small.
+- The spatial part of the physics residual uses autograd, so `batch_phys` was
+  kept small for the original CPU runs. On a GPU it can be raised considerably —
+  that is where most of the speed-up comes from (see `README_GPU_SERVER.md`).
+- No AMP/fp16: the residual differentiates the network twice, and reduced
+  precision degrades those second derivatives. TF32 is available as an opt-in
+  `--tf32` flag but is off by default for the same reason.
 - Training is free-running: the data loss is taken on the model's own
   autoregressive rollout (seeded only by the measured initial condition), never
   on ground-truth history. There is NO teacher forcing anywhere in train/eval.
