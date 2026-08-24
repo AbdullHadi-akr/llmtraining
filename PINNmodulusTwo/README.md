@@ -61,14 +61,15 @@ feeds the network a more compact feature block:
   `0.2 s`), a free knob independent of `--subsample`, and used **only** in
   hybrid mode -- raw mode spaces its lags by `δ` instead.
 - One rate channel per entry in `rate_lags` (`5 s` and `20 s` by default). The
-  segments are cumulative, each starting where the previous ended, and the
-  divisor is `Δgrid + that segment's own length`:
+  segments are cumulative, each starting where the previous ended, and each rate
+  is divided by **its own segment length** — the actual distance between the two
+  points being differenced:
 
-      Rate 1: [T(t-Δgrid)   - T(t-Δgrid-5)]  / (Δgrid + 5)
-      Rate 2: [T(t-Δgrid-5) - T(t-Δgrid-25)] / (Δgrid + 20)
+      Rate 1: [T(t-Δgrid)   - T(t-Δgrid-5)]  / 5
+      Rate 2: [T(t-Δgrid-5) - T(t-Δgrid-25)] / 20
 
-  So the rate is the average slope from `t` out to the segment's far endpoint --
-  the same reference the anchor channel beside it uses. Dividing by the clamped
+  `Δgrid` shifts where the window sits but is not part of any span: the endpoints
+  of rate 1 are 5 s apart however far back the anchor is. Dividing by the clamped
   *elapsed* span instead is a singularity: early in the rollout that span
   collapses to one grid step and the rate explodes, which is what made every
   sweep point diverge to NaN.

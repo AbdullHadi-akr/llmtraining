@@ -293,7 +293,7 @@ Flags trainiert also dasselbe Modell, das die Benchmarks vermessen.
 | `--subsample` | `2` | Datenraster: `dt = 0.1 s × subsample` → **0.2 s**. Bestimmt die Rollout-Länge und damit die Laufzeit. CFL-Grenze ~0.241 s |
 | `--history-mode` | `hybrid` | `hybrid` = Anker + Raten, `raw` = reiner Lag-Stapel |
 | `--delta-grid` | `0.2` s | **Anker** der History: `[T(t−Δgrid), rate₁, …]`, die Ratensegmente laufen von dort rückwärts. Unabhängig von `--subsample`. **Nur im `hybrid`-Modus wirksam** — im `raw`-Modus bestimmt stattdessen `δ` die Lag-Abstände |
-| `--rate-lags` | `5 20` | kumulative Segmentlängen in Sekunden; jedes Segment beginnt, wo das vorige endete. Nenner der Rate ist `Δgrid + eigene Segmentlänge` |
+| `--rate-lags` | `5 20` | kumulative Segmentlängen in Sekunden; jedes Segment beginnt, wo das vorige endete. Nenner der Rate ist die **eigene Segmentlänge** (5 bzw. 20 s) — der Abstand der beiden Punkte, deren Differenz gebildet wird |
 | `--k-max` | `2` | nur im `raw`-Modus wirksam; im `hybrid`-Modus folgt `k` aus der Zahl der `rate_lags` und das Flag wird ignoriert |
 | `--width` / `--depth` | `128` / `4` | MLP-Geometrie |
 | `--time-deriv` | `bdf2` | Zeitableitung im Physik-Residuum |
