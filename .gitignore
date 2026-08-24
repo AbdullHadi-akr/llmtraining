@@ -10,6 +10,10 @@
 !README
 !README.*
 
+# Keep the PINNmodulusTwo server setup files tracked (config + deps)
+!PINNmodulusTwo/config.yaml
+!PINNmodulusTwo/requirements-gpu.txt
+
 # Keep this file tracked
 !.gitignore
 

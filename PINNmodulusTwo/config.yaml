@@ -1,0 +1,47 @@
+# Defaults for PINNmodulusTwo/train.py (every key is overridable on the CLI).
+# train.py reads this file in _load_yaml_defaults(); smallBench.py and the two
+# benchmark scripts read the keys they share (device, seed, ...).
+
+# ---- hardware ---------------------------------------------------------------
+# auto | cpu | cuda | cuda:N   ("auto" = CUDA when available, otherwise CPU)
+device: auto
+# TF32 matmuls on Ampere+ GPUs. Off on purpose: the physics residual
+# differentiates the network twice and TF32 degrades second derivatives.
+tf32: false
+
+# ---- data -------------------------------------------------------------------
+ops: [OP01, OP02, OP03]
+test_op: OP16
+subsample_time: 40
+
+# ---- model ------------------------------------------------------------------
+layer_size: 128
+num_layers: 4
+k_max: 4
+history_mode: raw          # raw | hybrid
+rate_lags: [5.0, 25.0]     # seconds, hybrid history mode only
+time_deriv: bdf2           # bdf1 | bdf2 | autograd
+delta_init_steps: 1.0
+use_static: false
+use_forcing: false
+
+# ---- optimisation -----------------------------------------------------------
+epochs: 60
+lr: 2.0e-3
+weight_decay: 0.0
+grad_clip: 0.0             # 0 disables clipping
+early_stopping_patience: 0 # 0 disables early stopping
+seed: 0
+
+# ---- loss weights -----------------------------------------------------------
+w_data: 1.0
+w_phys: 0.1
+w_bc: 0.1
+phys_norm: 0.0             # 0 = adaptive EMA balancing, >0 = fixed divisor
+
+# ---- batch sizes ------------------------------------------------------------
+# On a GPU these can be raised a lot (that is where the speed-up comes from);
+# lower them again if you hit "CUDA out of memory".
+batch_data: 2048
+batch_phys: 256
+batch_bc: 128
