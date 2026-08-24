@@ -1,0 +1,32 @@
+data:
+  subsample_time: 50
+  test_ops:
+  - OP11
+  - OP12
+  train_ops:
+  - OP01
+  - OP02
+  - OP08
+  ts_extrapolation: clamp
+  val_ops:
+  - OP09
+  - OP10
+loss:
+  T_weight: 1.0
+  bc_V_weight: 1.0
+model:
+  hidden_size: 128
+  n_hidden_layers: 2
+  swish_beta_init: 2.0
+  swish_beta_learnable: false
+  type: mlp_pointwise
+output:
+  ckpt_dir: C:\Users\M0245635\batterysurrogatemodell\battery_surrogate_agenticWorkflow\artifacts\real_data_eval_benchmarks\test3b\layer_beta\depth_2_w128_b2p0\{timestamp}
+seed: 42
+train:
+  batch_size: 4096
+  early_stopping_patience: 10
+  epochs: 4
+  grad_clip: 1.0
+  lr: 0.001
+  weight_decay: 0.0

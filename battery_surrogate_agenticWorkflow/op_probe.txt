@@ -1,0 +1,8 @@
+OK: OP01, OP02, OP08, OP09, OP10, OP12, OP13, OP14, OP15, OP16, OP19
+BAD:
+  OP03: Missing file for pattern '*_Inputsignale.csv' in C:\Users\M0
+  OP04: Missing file for pattern '*_Inputsignale.csv' in C:\Users\M0
+  OP05: Missing file for pattern '*_Inputsignale.csv' in C:\Users\M0
+  OP06: Missing file for pattern '*_Inputsignale.csv' in C:\Users\M0
+  OP07: Missing file for pattern '*_Inputsignale.csv' in C:\Users\M0
+  OP11: OP OP11 has no value for c_rate

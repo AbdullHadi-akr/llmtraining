@@ -1,0 +1,37 @@
+data:
+  subsample_time: 50
+  test_ops:
+  - OP11
+  train_ops:
+  - OP15
+  - OP14
+  - OP01
+  - OP13
+  - OP10
+  - OP03
+  - OP02
+  - OP16
+  - OP09
+  - OP12
+  ts_extrapolation: clamp
+  val_ops:
+  - OP08
+loss:
+  T_weight: 1.0
+  bc_V_weight: 1.0
+model:
+  hidden_size: 256
+  n_hidden_layers: 2
+  swish_beta_init: 1.5
+  swish_beta_learnable: false
+  type: mlp_pointwise
+output:
+  ckpt_dir: C:\Users\M0245635\batterysurrogatemodell\battery_surrogate_agenticWorkflow\artifacts\real_data_eval_benchmarks\test5\mlp_opt_80_10_10\trial_002\{timestamp}
+seed: 42
+train:
+  batch_size: 4096
+  early_stopping_patience: 10
+  epochs: 6
+  grad_clip: 1.0
+  lr: 0.0005
+  weight_decay: 1.0e-06

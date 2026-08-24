@@ -1,0 +1,35 @@
+data:
+  subsample_time: 50
+  test_ops:
+  - OP11
+  - OP12
+  train_ops:
+  - OP01
+  - OP02
+  - OP03
+  - OP08
+  - OP13
+  ts_extrapolation: clamp
+  val_ops:
+  - OP09
+  - OP10
+loss:
+  T_weight: 1.0
+  bc_V_weight: 1.0
+model:
+  hidden_size: 128
+  history_length: 8
+  n_layers: 2
+  rnn_type: gru
+  type: recurrent
+output:
+  ckpt_dir: C:\Users\M0245635\batterysurrogatemodell\battery_surrogate_agenticWorkflow\artifacts\real_data_eval_benchmarks\test1\headline\recurrent_gru\{timestamp}
+preprocess: null
+seed: 42
+train:
+  batch_size: 1
+  early_stopping_patience: 10
+  epochs: 8
+  grad_clip: 1.0
+  lr: 0.001
+  weight_decay: 0.0

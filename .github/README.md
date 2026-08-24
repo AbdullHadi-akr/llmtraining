@@ -23,7 +23,7 @@ This folder contains a multi-agent AI workflow system with specialized agents, s
 
 ## 🤖 Agents
 
-Builder may inspect, edit, rename, and move files or folders anywhere in the workspace when a task requires it. The other agents should still stay within the `battery_surrogate_agenticWorkflow/` folder unless the user explicitly asks to work elsewhere.
+All agents may inspect the whole workspace when a task requires cross-folder context (skills, environment, integration points). Builder remains the implementation role; Thinker/Tester/Hater should still keep task artifacts organized under the relevant project folder (for PINN work: `battery_surrogate_agenticWorkflow_PINN/`).
 
 ### Thinker
 **Role**: Architecture planning and task breakdown

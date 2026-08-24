@@ -133,8 +133,10 @@ def _bundle_to_npz_payload(bundle: OpBundle) -> dict[str, Any]:
         "T": bundle.T,
         "q_source": bundle.q_source,
         "xyz": bundle.xyz,
-        "layer": np.asarray(bundle.layer),
-        "sensor_id": np.asarray(bundle.sensor_id),
+        # Store string metadata as fixed-width unicode so NPZ round-trips
+        # without pickling (load uses allow_pickle=False).
+        "layer": np.asarray(bundle.layer).astype("U"),
+        "sensor_id": np.asarray(bundle.sensor_id).astype("U"),
         "fluid_props": bundle.fluid_props,
         "sim_config_scalar": bundle.sim_config_scalar,
         "sim_config_scalar_names_json": np.asarray(

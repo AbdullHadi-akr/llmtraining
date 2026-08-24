@@ -48,6 +48,22 @@ def resolve_profile_source(op_dir: Path, channel: str) -> Path | None:
     return None
 
 
+def resolve_inputsignale_source(op_dir: Path) -> Path | None:
+    """Find the Inputsignale CSV, accepting spacing variants from raw exports."""
+
+    patterns = [
+        "*_Inputsignale.csv",
+        "*_Inputsignale*.csv",
+        "*_Input Signale.csv",
+        "*_Input Signale*.csv",
+    ]
+    for pattern in patterns:
+        matches = sorted(op_dir.glob(pattern))
+        if matches:
+            return matches[0]
+    return None
+
+
 def profile_source_name(path: Path | None) -> str | None:
     """Return the file name for metadata storage."""
 

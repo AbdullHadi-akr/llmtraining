@@ -21,13 +21,20 @@ BATEMO_FMU1_KEEP_COLUMNS: dict[str, str] = {
 
 INPUTSIGNALE_COLUMN_ALIASES: dict[str, str] = {
     "C-Rate Monitor (1/h)": "c_rate",
+    "C-Rate Monitor": "c_rate",
+    "C-Rate": "c_rate",
     "Cell Current Monitor (A)": "cell_current",
+    "Cell Current Monitor": "cell_current",
     "Fluid Initial Temperature Monitor (C)": "fluid_initial_temp",
+    "Fluid Initial Temperature Monitor": "fluid_initial_temp",
     "Fluid Inlet Temperature Monitor (C)": "fluid_inlet_temp",
+    "Fluid Inlet Temperature Monitor": "fluid_inlet_temp",
     "Fluid Mass Flow Monitor (kg/s)": "fluid_mass_flow",
+    "Fluid Mass Flow Monitor": "fluid_mass_flow",
     "SOC Start Monitor (%)": "soc_start",
     "SOC Start Monitor": "soc_start",
     "Solid Initial Temperature Monitor (C)": "solid_initial_temp",
+    "Solid Initial Temperature Monitor": "solid_initial_temp",
 }
 
 PROFILE_CHANNELS: tuple[str, ...] = (

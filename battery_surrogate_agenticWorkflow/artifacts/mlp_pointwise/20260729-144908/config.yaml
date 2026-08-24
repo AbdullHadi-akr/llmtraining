@@ -1,0 +1,37 @@
+data:
+  subsample_time: 50
+  test_ops:
+  - OP16
+  - OP19
+  train_ops:
+  - OP01
+  - OP02
+  - OP08
+  - OP09
+  - OP10
+  - OP11
+  - OP12
+  - OP13
+  ts_extrapolation: clamp
+  val_ops:
+  - OP14
+  - OP15
+loss:
+  T_weight: 1.0
+  bc_V_weight: 1.0
+model:
+  hidden_size: 128
+  n_hidden_layers: 3
+  swish_beta_init: 1.0
+  swish_beta_learnable: true
+  type: mlp_pointwise
+output:
+  ckpt_dir: artifacts/mlp_pointwise/{timestamp}
+seed: 42
+train:
+  batch_size: 4096
+  early_stopping_patience: 10
+  epochs: 1
+  grad_clip: 1.0
+  lr: 0.001
+  weight_decay: 0.0

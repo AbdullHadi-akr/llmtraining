@@ -33,6 +33,11 @@ The workflow turns raw OP folders into cached model bundles for battery surrogat
 - `Inputsignale.csv` is the source of truth for OP setup.
 - If the same profile exists as both `.csv` and `.xlsx`, the `.csv` file wins.
 - OP08 is the known exception where the fluid-inlet profile is xlsx-only.
+- Some raw OP folders use misspelled or spaced file names and headers.
+	Examples: `OP03`-`OP07` use `Input Signale.csv` instead of `Inputsignale.csv`,
+	and `OP11` uses shortened `Inputsignale` headers.
+	The loader and OP-matrix builder now tolerate these variants, so the issue is
+	annoying but fixable rather than fatal.
 - OP19 uses module-test data and derived values, so it is not a simple scalar-only case.
 - `soc_start` may be derived from OCV instead of being stored as a number.
 - Any schema change should force a cache rebuild.

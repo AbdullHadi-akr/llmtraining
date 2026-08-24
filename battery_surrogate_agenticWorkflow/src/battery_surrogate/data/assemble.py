@@ -12,6 +12,7 @@ from ..schema.inputsignale import InputSentinel
 from ..schema.mapping import (
     get_op_record,
     load_op_matrix,
+    resolve_inputsignale_source,
     profile_source_name,
     resolve_profile_source,
 )
@@ -137,7 +138,10 @@ def assemble_op(op_id: str, root: Path | None = None) -> OpBundle:
     T = clip_temperature(T, t_clip)
     q_source = heat_source[["jr1_w", "jr2_w", "total_w"]].to_numpy(dtype=np.float32)
 
-    inputsignale = read_inputsignale(_single_glob(op_dir, "*_Inputsignale.csv"), encoding=encoding)
+    inputsignale_path = resolve_inputsignale_source(op_dir)
+    if inputsignale_path is None:
+        raise MissingOpError(f"Missing Inputsignale file in {op_dir}")
+    inputsignale = read_inputsignale(inputsignale_path, encoding=encoding)
     scalar_names: list[str] = []
     scalar_values: list[float] = []
     sim_config_ts: dict[str, tuple[np.ndarray, np.ndarray]] = {}

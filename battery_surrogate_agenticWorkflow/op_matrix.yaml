@@ -18,6 +18,56 @@ OP02:
   regime: train
   soc_start: 10.0
   solid_initial_temp: 15.0
+OP03:
+  c_rate: 2.0
+  cell_current: 316.0
+  charge_discharge: mixed
+  fluid_initial_temp: 30.0
+  fluid_inlet_temp: 30.0
+  fluid_mass_flow: 0.0013
+  regime: train
+  soc_start: 10.0
+  solid_initial_temp: 30.0
+OP04:
+  c_rate: 2.0
+  cell_current: 316.0
+  charge_discharge: mixed
+  fluid_initial_temp: 25.0
+  fluid_inlet_temp: 25.0
+  fluid_mass_flow: 0.0026
+  regime: train
+  soc_start: 10.0
+  solid_initial_temp: 25.0
+OP05:
+  c_rate: 2.0
+  cell_current: 316.0
+  charge_discharge: mixed
+  fluid_initial_temp: 40.0
+  fluid_inlet_temp: 40.0
+  fluid_mass_flow: 0.0026
+  regime: train
+  soc_start: 10.0
+  solid_initial_temp: 40.0
+OP06:
+  c_rate: 2.0
+  cell_current: 316.0
+  charge_discharge: mixed
+  fluid_initial_temp: 25.0
+  fluid_inlet_temp: 25.0
+  fluid_mass_flow: 0.0
+  regime: train
+  soc_start: 10.0
+  solid_initial_temp: 25.0
+OP07:
+  c_rate: 2.0
+  cell_current: 316.0
+  charge_discharge: mixed
+  fluid_initial_temp: 10.0
+  fluid_inlet_temp: 10.0
+  fluid_mass_flow: 0.0
+  regime: train
+  soc_start: 10.0
+  solid_initial_temp: 10.0
 OP08:
   c_rate: 3.0
   cell_current: 474.0
@@ -49,6 +99,7 @@ OP10:
   soc_start: 10.0
   solid_initial_temp: 25.0
 OP11:
+  c_rate: 3.0
   cell_current: file_table
   charge_discharge: mixed
   fluid_initial_temp: 15.0
@@ -111,9 +162,9 @@ OP19:
   c_rate: modul_test_data
   cell_current: modul_test_data
   charge_discharge: mixed
-  fluid_initial_temp: modul_test_data
+  fluid_initial_temp: 25.260003662109398
   fluid_inlet_temp: modul_test_data
   fluid_mass_flow: modul_test_data
   regime: train
-  soc_start: derive_from_ocv
-  solid_initial_temp: modul_test_data
+  soc_start: 77.06810818353584
+  solid_initial_temp: 25.260003662109398
