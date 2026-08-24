@@ -29,11 +29,13 @@ try:
 except ModuleNotFoundError as exc:
     if exc.name == "modulus":
         raise ModuleNotFoundError(
-            "Modulus is not installed in the current Python environment. "
-            "Activate the repo env first:\n"
-            "  cd /mnt/c/Users/M0245635/batterysurrogatemodell\n"
-            "  source modulus_env/bin/activate\n"
-            "Then rerun the benchmark/train command."
+            "Modulus is not installed in the current Python environment.\n"
+            "  Activate the project virtualenv first, e.g.:\n"
+            "    source .venv/bin/activate\n"
+            "  and install it if needed:\n"
+            "    pip install nvidia-modulus\n"
+            "  Full setup (driver, CUDA torch, Modulus): "
+            "PINNmodulusTwo/README_GPU_SERVER.md"
         ) from exc
     raise
 

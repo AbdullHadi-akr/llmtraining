@@ -9,7 +9,7 @@ Everything except w_phys and w_bc is fixed so the comparison is apples-to-apples
 Fixed hyperparameters (override on CLI if desired):
 - architecture: width=128, depth=4, per-layer learnable swish, weight-norm
 - recurrence: k_max=2, history_mode=hybrid, rate_lags=[5.0, 20.0]
-- optimization: Adam, lr=2e-3, epochs=60, seed=0, device=cpu
+- optimization: Adam, lr=2e-3, epochs=60, seed=0, device=auto (CUDA when available)
 - data: train=OP01-OP06, test=OP07, subsample=2 (CFL-stable Δt=0.2s)
 - loss weights: w_data=1.0 (fixed), w_phys and w_bc swept
 
@@ -49,6 +49,7 @@ import numpy as np
 import torch
 
 from data import build_op
+from device_utils import resolve_device
 from model import rollout
 from train import fit
 
@@ -99,7 +100,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--grad-clip", type=float, default=1.0)
     p.add_argument("--early-stopping-patience", type=int, default=0)
     p.add_argument("--seed", type=int, default=0)
-    p.add_argument("--device", default="cpu")
+    p.add_argument("--device", default=d.get("device", "auto"),
+                   help="auto | cpu | cuda | cuda:N (auto = cuda when available)")
     # Architecture (FIXED for fair comparison)
     p.add_argument("--width", type=int, default=128, help="MLP width (FIXED)")
     p.add_argument("--depth", type=int, default=4, help="MLP depth (FIXED)")
@@ -200,7 +202,8 @@ def main() -> None:
     import matplotlib.pyplot as plt
 
     cli = parse_args()
-    device = torch.device(cli.device)
+    device = resolve_device(cli.device)
+    cli.device = str(device)  # hand the resolved device down to fit()
     dt_s = 0.1 * cli.subsample
     model_dir = Path(cli.model_dir)
     if cli.save_models:

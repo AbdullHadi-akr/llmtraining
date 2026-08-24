@@ -1,0 +1,19 @@
+# Minimal dependency set for PINNmodulusTwo on a Linux NVIDIA GPU server.
+#
+# Install torch FIRST from the CUDA wheel index, otherwise pip resolves the
+# CPU-only build (see README_GPU_SERVER.md, step 3):
+#
+#   pip install torch --index-url https://download.pytorch.org/whl/cu121
+#   pip install -r PINNmodulusTwo/requirements-gpu.txt
+#
+# The repo-root requirements.txt is a UTF-16 Windows `pip freeze` and installs
+# CPU wheels - do not use it on the server.
+
+torch>=2.2
+nvidia-modulus>=0.9.0
+
+numpy>=1.24,<2.0
+pandas>=2.0
+scipy>=1.10
+matplotlib>=3.7
+pyyaml>=6.0
