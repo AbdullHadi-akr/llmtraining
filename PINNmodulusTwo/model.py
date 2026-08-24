@@ -316,11 +316,16 @@ class RecurrentField(nn.Module):
         """Hybrid history: anchor T(t-Δgrid) plus disjoint rate segments.
 
 rate_lags are CUMULATIVE segment lengths (not absolute boundaries), and each
-        segment starts where the previous one ended. With delta_grid=1s and
+        segment starts where the previous one ended. The divisor is
+        ``delta_grid + this segment's length``. With delta_grid=1s and
         rate_lags=[5, 20]:
             Anchor: T(t-1)
-            Rate 1: (T(t-1)  - T(t-6))  / 5      <- divided by the SEGMENT LENGTH,
-            Rate 2: (T(t-6)  - T(t-26)) / 20        not by the distance from t
+            Rate 1: (T(t-1)  - T(t-6))  / (1 + 5)  = ... / 6
+            Rate 2: (T(t-6)  - T(t-26)) / (1 + 20) = ... / 21
+
+        Note the divisor uses each segment's OWN length, not the cumulative
+        distance from t: rate 2 spans 20 s but sits 25 s in the past, and it is
+        divided by 1+20, not by 1+5+20.
 
         Per-endpoint padding: T(t) := T(0) if t < 0.
 
@@ -349,9 +354,14 @@ rate_lags are CUMULATIVE segment lengths (not absolute boundaries), and each
             T_end = self._padded_lookup(Tn_seq, dtn, t_boundary, p_idx)
             T_start = self._padded_lookup(Tn_seq, dtn, t_next, p_idx)
 
-            # Nominal segment length, floored at one grid step: a configured lag
+            # Span = anchor offset + this segment's own length, i.e. the whole
+            # stretch from the query time t out to the far endpoint of the
+            # segment. Dividing by the segment length alone would treat the rate
+            # as a local slope; including delta_grid makes it the average slope
+            # from t back to where the segment ends, which is what the anchor
+            # channel next to it is relative to. Floored at one grid step: a span
             # below the time resolution is not something we can resolve.
-            span = torch.clamp(seg_len, min=float(dtn))
+            span = torch.clamp(dgrid + seg_len, min=float(dtn))
 
             # Normalised d T / d t: rate_scale keeps this channel O(1) so it sits
             # on the same scale as the z-scored anchor channel next to it.
