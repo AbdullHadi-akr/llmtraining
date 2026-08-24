@@ -5,10 +5,11 @@ Temperature only (bc_V is intentionally out of scope). The model uses a Modulus
 ``FCLayer`` MLP with a per-layer learnable swish, wrapped in a PyTorch recurrence
 whose history spacing ``delta`` and per-lag gates (variable ``k``) are learned.
 
-Run (CPU-first, in the repo's WSL env):
-    cd /mnt/c/Users/M0245635/batterysurrogatemodell
-    source modulus_env/bin/activate
+Run (the device defaults to ``auto`` = CUDA when a GPU is available):
+    source .venv/bin/activate
     python3 PINNmodulusTwo/train.py --epochs 60 --subsample 40
+
+For the GPU server setup see ``PINNmodulusTwo/README_GPU_SERVER.md``.
 """
 
 from __future__ import annotations
@@ -20,6 +21,7 @@ import numpy as np
 import torch
 
 from data import load_ops
+from device_utils import enable_tf32, resolve_device, seed_everything
 from model import RecurrentField, rollout, rollout_train
 from physics import heat_residual, boundary_condition_loss
 
@@ -92,7 +94,11 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--use-static", action="store_true", default=d.get("use_static", False))
     p.add_argument("--use-forcing", action="store_true", default=d.get("use_forcing", False))
     p.add_argument("--seed", type=int, default=d.get("seed", 0))
-    p.add_argument("--device", default=d.get("device", "cpu"))
+    p.add_argument("--device", default=d.get("device", "auto"),
+                   help="auto | cpu | cuda | cuda:N (auto = cuda when available)")
+    p.add_argument("--tf32", action="store_true", default=d.get("tf32", False),
+                   help="allow TF32 matmuls on Ampere+ GPUs; off by default because "
+                        "the physics residual needs precise second derivatives")
     p.add_argument("--test-op", default=d.get("test_op", "OP16"))
     return p.parse_args()
 
@@ -122,9 +128,9 @@ def _to_tensor_ops(bundle, device):
 
 def fit(args):
     """Train on ``args.ops`` and return ``(model, bundle, ops_packed, dtn, history)``."""
-    torch.manual_seed(args.seed)
-    np.random.seed(args.seed)
-    device = torch.device(args.device)
+    seed_everything(args.seed)
+    device = resolve_device(args.device)
+    enable_tf32(getattr(args, "tf32", False))
 
     bundle = load_ops(op_ids=args.ops, subsample_time=args.subsample)
     ops = _to_tensor_ops(bundle, device)
@@ -310,7 +316,7 @@ def fit(args):
 
 def train(args) -> None:
     model, bundle, ops, dtn, history = fit(args)
-    device = torch.device(args.device)
+    device = next(model.parameters()).device
     evaluate(model, bundle, ops, dtn, device, history)
 
 

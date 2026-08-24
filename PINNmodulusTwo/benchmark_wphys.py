@@ -18,7 +18,8 @@ Chosen, fixed hyperparameters (override on the CLI if desired)
                  swish, weight-norm on hidden layers.
 * recurrence   : k_max = 2 history lags, fixed delta (init = 1 step),
                  learnable src/diff gains.
-* optimisation : Adam, lr = 2e-3, epochs = 80, seed = 0, device = cpu.
+* optimisation : Adam, lr = 2e-3, epochs = 80, seed = 0, device = auto
+  (CUDA when a GPU is available, otherwise CPU).
 * data         : train = OP01+OP02+OP03, held-out test = OP16,
                  subsample from config (default 10 -> dt ~ 1 s), train_frac = 0.8.
 * loss weights : w_data = 1.0 (fixed), w_phys swept over
@@ -67,6 +68,7 @@ import numpy as np
 import torch
 
 from data import build_op
+from device_utils import resolve_device
 from model import rollout
 from train import fit
 
@@ -127,7 +129,8 @@ def parse_args() -> argparse.Namespace:
                    help="L_phys divisor: 0 = adaptive EMA auto-balance, >0 = "
                         "fixed divisor")
     p.add_argument("--seed", type=int, default=d.get("seed", 0))
-    p.add_argument("--device", default=d.get("device", "cpu"))
+    p.add_argument("--device", default=d.get("device", "auto"),
+                   help="auto | cpu | cuda | cuda:N (auto = cuda when available)")
     p.add_argument("--w-phys", type=float, nargs="+", default=DEFAULT_W_PHYS,
                    help="physics weights to sweep (w_data is fixed at 1.0)")
     p.add_argument("--save-models", dest="save_models", action="store_true", default=True,
@@ -190,7 +193,8 @@ def main() -> None:
     import matplotlib.pyplot as plt
 
     cli = parse_args()
-    device = torch.device(cli.device)
+    device = resolve_device(cli.device)
+    cli.device = str(device)  # hand the resolved device down to fit()
     dt_s = 0.1 * cli.subsample
     model_dir = Path(cli.model_dir)
     if cli.save_models:

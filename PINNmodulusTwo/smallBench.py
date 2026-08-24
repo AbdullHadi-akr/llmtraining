@@ -31,6 +31,7 @@ THIS_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(THIS_DIR))
 
 from data import build_op, load_ops
+from device_utils import resolve_device
 from model import rollout
 from train import fit
 
@@ -72,7 +73,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--use-static", action="store_true", default=d.get("use_static", True))
     p.add_argument("--use-forcing", action="store_true", default=d.get("use_forcing", True))
     p.add_argument("--seed", type=int, default=0)
-    p.add_argument("--device", default=d.get("device", "cpu"))
+    p.add_argument("--device", default=d.get("device", "auto"),
+                   help="auto | cpu | cuda | cuda:N (auto = cuda when available)")
     return p.parse_args()
 
 
@@ -130,7 +132,8 @@ def _rollout_mae(model, op, bundle, device) -> float:
 
 def main():
     cli = parse_args()
-    device = torch.device(cli.device)
+    device = resolve_device(cli.device)
+    cli.device = str(device)  # hand the resolved device down to fit()
     dt_s = 0.1 * cli.subsample
 
     print("=" * 70)
