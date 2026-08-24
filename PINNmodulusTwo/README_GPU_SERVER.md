@@ -322,6 +322,36 @@ kleineres Gitter, größeres `--subsample`.
 
 ---
 
+#### Nebenbei: wie viel bringt die GPU hier eigentlich?
+
+Derselbe Lauf mit `--device cpu` beantwortet das in denselben zehn Minuten:
+
+```bash
+python3 PINNmodulusTwo/train.py --ops OP01 OP02 --subsample 2 --epochs 3 \
+  --history-mode hybrid --rate-lags 5 20 --grad-clip 1.0 --device cpu
+```
+
+Die Sekunden pro Epoche aus beiden Läufen ins Verhältnis setzen — **erwarte
+keinen großen Faktor.** Der Grund steckt in der Struktur der Last:
+
+| Anteil | parallelisierbar? | GPU-Gewinn |
+|---|---|---|
+| Rollout: ~7000 sequentielle Schritte je OP und Epoche | nein, jeder Schritt braucht den vorherigen | gering |
+| Python-Schleife und Kernel-Starts, ~37.000 Iterationen je Epoche | nein, identisch auf beiden | keiner |
+| MLP-Matmuls je Schritt (363 Punkte × 128 breit) | ja, aber winzig | klein |
+| Physik-Residuum (`--batch-phys`, doppeltes Autograd) | ja, echte Parallelarbeit | groß |
+
+Die GPU gewinnt dort, wo tatsächlich große Batches anfallen — beim
+Physik-Residuum. Der Rollout, der die Laufzeit dominiert, ist latenzgebunden und
+läuft auf beiden ähnlich schnell. Deshalb steht in der Troubleshooting-Tabelle
+auch „läuft auf der GPU kaum schneller" als *erwartbar*, nicht als Fehler.
+
+**Praktische Konsequenz:** wenn `nvidia-smi` viel freien Speicher zeigt, ist
+`--batch-phys 2048 --batch-bc 1024` der Hebel, der die GPU wirklich nutzt — nicht
+ein breiteres Netz.
+
+---
+
 ### 7.3 Schritt 3 — Range-Probe: in welcher Dekade wirken die Gewichte? (~6 h)
 
 Bevor ein Gitter Stunden investiert, um Unterschiede *innerhalb* eines Bereichs

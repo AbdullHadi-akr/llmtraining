@@ -90,9 +90,10 @@ THIS_DIR = Path(__file__).resolve().parent
 ART_DIR = THIS_DIR / "artifacts"
 ART_DIR.mkdir(parents=True, exist_ok=True)
 
-# Default 2D sweep grid (5×5 = 25 points, ~7 hours on CPU)
-# Quasi-logarithmic spacing with dense sampling in promising region (0.01-0.3)
-# Based on existing benchmarks: best around w_phys~0.1-0.2, w_bc~0.1-0.7
+# Default 2D sweep grid: 5x5 = 25 points. Centre it on whatever decade the
+# range probe found; the values below are only a starting spread.
+# (The old comment claimed 'best around w_phys~0.1-0.2' from earlier runs --
+#  those ran with the broken L_phys and delta, so the number meant nothing.)
 DEFAULT_W_PHYS = [0.0, 0.01, 0.05, 0.1, 0.3]
 DEFAULT_W_BC = [0.0, 0.01, 0.05, 0.1, 0.3]
 
