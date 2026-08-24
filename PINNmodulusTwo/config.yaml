@@ -1,4 +1,14 @@
 # Defaults for PINNmodulusTwo/train.py (every key is overridable on the CLI).
+#
+# These match what the benchmarks run. They used to differ (subsample 40 vs 2,
+# raw vs hybrid history, k_max 4 vs 2, no grad clipping), so `train.py` without
+# flags trained a DIFFERENT model than every benchmark in this folder -- and
+# the smoke test that gates the long runs exercised the raw history path, not
+# the hybrid one the benchmarks use.
+#
+# Note: subsample_time 2 makes a plain `train.py` run much slower than the old
+# default 40 (~20x more rollout steps). That is the honest cost of matching the
+# configuration the results are actually produced with.
 # train.py reads this file in _load_yaml_defaults(); smallBench.py and the two
 # benchmark scripts read the keys they share (device, seed, ...).
 
@@ -10,23 +20,23 @@ device: auto
 tf32: false
 
 # ---- data -------------------------------------------------------------------
-ops: [OP01, OP02, OP03]
-test_op: OP16
-subsample_time: 40
+ops: [OP01, OP02, OP03, OP04, OP05]
+test_op: OP07
+subsample_time: 2          # dt = 0.1s * subsample -> 0.2s (CFL-Grenze ~0.241s)
 
 # ---- model ------------------------------------------------------------------
 layer_size: 128
 num_layers: 4
-k_max: 4
-history_mode: raw          # raw | hybrid
-rate_lags: [5.0, 25.0]     # seconds, hybrid history mode only
+k_max: 2                   # nur im raw-Modus wirksam
+history_mode: hybrid       # raw | hybrid
+rate_lags: [5.0, 20.0]     # seconds, hybrid history mode only
 # Anchor lag of the hybrid history in seconds: the block is
 # [T(t-delta_grid), rate_1, ...] and the rate segments cascade back from
 # there. Independent of subsample_time - do not confuse the two.
-delta_grid: 0.2
+delta_grid: 0.2            # ONLY used when history_mode: hybrid
 time_deriv: bdf2           # bdf1 | bdf2 | autograd
-use_static: false
-use_forcing: false
+use_static: true
+use_forcing: true
 
 # ---- optimisation -----------------------------------------------------------
 epochs: 60
@@ -35,7 +45,7 @@ weight_decay: 0.0
 # src_gain/diff_gain learn this many times faster than the rest; at 1.0 they
 # stay at their 1.0 init and the source/diffusion scale gap is never corrected.
 gain_lr_mult: 25.0
-grad_clip: 0.0             # 0 disables clipping
+grad_clip: 1.0             # 0 disables clipping
 early_stopping_patience: 0 # 0 disables early stopping
 seed: 0
 

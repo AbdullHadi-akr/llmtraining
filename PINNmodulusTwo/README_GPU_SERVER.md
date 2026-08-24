@@ -181,11 +181,18 @@ Erwartete Ausgabe (Auszug):
 
 ```
 [device] cuda:0 NVIDIA A100-SXM4-40GB  39.6 GiB  sm_80  torch=2.5.1+cu121 cuda=12.1
-[CFL OK] Δt=4.000s, Δt_max≈...
-OPs=['OP01', 'OP02', 'OP03'] n_config=7 ...
-model params=...
-  epoch   1  L_data=...  L_phys_bal=...
+[CFL WARN] Δt=4.000s, Δt_max≈0.241s -> POTENTIALLY UNSTABLE
+  [WARN] --delta-grid 0.2s is below the data step 4s; ...
+OPs=['OP01', ...] n_config=7 ...
+model params=... delta_grid=0.2s gates=all-on ...
+  epoch   1  L_data=...  [12.4s/epoch, this run ~0 min left]
 ```
+
+**Die beiden Warnungen sind hier erwartet und harmlos.** `--subsample 40` ist
+absichtlich grob, damit der Check unter einer Minute bleibt; bei Δt=4 s liegt er
+über der CFL-Grenze und unter dem Ankerabstand. Dieser Schritt prüft
+ausschließlich, ob CUDA arbeitet — die inhaltliche Prüfung ist 6.2 und Kapitel 7,
+und die laufen mit den echten Einstellungen aus `config.yaml`.
 
 Parallel in einer zweiten Session `nvidia-smi` — der Python-Prozess muss dort
 mit belegtem Speicher auftauchen.
@@ -276,22 +283,20 @@ Auswahl), Test `OP07` (wird nur berichtet und fließt in keine Auswahl ein).
 
 Damit klar ist, woran man drehen kann und woran nicht.
 
-> ⚠️ **`config.yaml` und die Benchmarks haben unterschiedliche Defaults.** Wer
-> `train.py` ohne Flags startet, bekommt ein *anderes Modell* als die Benchmarks
-> — anderes Zeitraster, anderer History-Modus. Die Spalte „Bench" unten ist die,
-> die für Kapitel 7 und 8 gilt.
+`config.yaml` und die Benchmarks verwenden dieselben Werte — `train.py` ohne
+Flags trainiert also dasselbe Modell, das die Benchmarks vermessen.
 
 **Struktur — konfigurierbar, aber nicht trainiert:**
 
-| Flag | `config.yaml` | Bench | Bedeutung |
-|---|---|---|---|
-| `--subsample` | **40** | **2** | Datenraster: `dt = 0.1 s × subsample` → 0.2 s. Bestimmt die Rollout-Länge und damit die Laufzeit. CFL-Grenze ~0.241 s |
-| `--delta-grid` | `0.2` s | `0.2` s | **Anker** der History: der Block ist `[T(t−Δgrid), rate₁, …]`. Unabhängig von `--subsample` |
-| `--rate-lags` | **`5 25`** | **`5 20`** | kumulative Segmentlängen in Sekunden; jedes Segment beginnt, wo das vorige endete |
-| `--history-mode` | **`raw`** | **`hybrid`** | `hybrid` = Anker + Raten, `raw` = reiner Lag-Stapel |
-| `--k-max` | **4** | **2** | nur im `raw`-Modus wirksam; im `hybrid`-Modus folgt `k` aus der Zahl der `rate_lags` und das Flag wird ignoriert |
-| `--width` / `--depth` | `128` / `4` | `128` / `4` | MLP-Geometrie |
-| `--time-deriv` | `bdf2` | `bdf2` | Zeitableitung im Physik-Residuum |
+| Flag | Default | Bedeutung |
+|---|---|---|
+| `--subsample` | `2` | Datenraster: `dt = 0.1 s × subsample` → **0.2 s**. Bestimmt die Rollout-Länge und damit die Laufzeit. CFL-Grenze ~0.241 s |
+| `--history-mode` | `hybrid` | `hybrid` = Anker + Raten, `raw` = reiner Lag-Stapel |
+| `--delta-grid` | `0.2` s | **Anker** der History: `[T(t−Δgrid), rate₁, …]`, die Ratensegmente laufen von dort rückwärts. Unabhängig von `--subsample`. **Nur im `hybrid`-Modus wirksam** — im `raw`-Modus bestimmt stattdessen `δ` die Lag-Abstände |
+| `--rate-lags` | `5 20` | kumulative Segmentlängen in Sekunden; jedes Segment beginnt, wo das vorige endete. Nenner der Rate ist `Δgrid + eigene Segmentlänge` |
+| `--k-max` | `2` | nur im `raw`-Modus wirksam; im `hybrid`-Modus folgt `k` aus der Zahl der `rate_lags` und das Flag wird ignoriert |
+| `--width` / `--depth` | `128` / `4` | MLP-Geometrie |
+| `--time-deriv` | `bdf2` | Zeitableitung im Physik-Residuum |
 
 **Lernparameter** (die einzigen Dinge, die der Gradient anfasst): MLP-Gewichte,
 das per-Layer `β` des Swish, und die beiden Physik-Gains `src_gain`/`diff_gain`.
@@ -300,28 +305,22 @@ Lag-Gates. Wer sie optimieren will, sweept sie mit `benchmark_arch.py` (8.2).
 
 **Optimierung und Loss:**
 
-| Flag | `config.yaml` | Bench | Bedeutung |
-|---|---|---|---|
-| `--epochs` | `60` | `60` | in Kapitel 7 bewusst `20` |
-| `--lr` | `2e-3` | `2e-3` | Basis-Lernrate |
-| `--gain-lr-mult` | `25.0` | `25.0` | `src_gain`/`diff_gain` lernen 25× schneller, sonst bleiben sie bei 1.0 |
-| `--grad-clip` | **0** (aus) | **1.0** | maximale Gradientennorm |
-| `--w-phys` / `--w-bc` | `0.1` / `0.1` | gesweept | Gewichte von Physik- und BC-Term |
-| `--phys-norm` | `0` | `0` | `0` = adaptiver EMA, `>0` = fester Divisor |
-| `--batch-phys` / `--batch-bc` | `256` / `128` | `256` / `128` | Kollokationspunkte — hier liegt der GPU-Hebel |
-| `--seeds` | — | `0` | ein Trainingslauf je Seed, Bewertung über den Mittelwert (nur Benchmarks) |
+| Flag | Default | Bedeutung |
+|---|---|---|
+| `--epochs` | `60` | in Kapitel 7 bewusst `20` |
+| `--lr` | `2e-3` | Basis-Lernrate |
+| `--gain-lr-mult` | `25.0` | `src_gain`/`diff_gain` lernen 25× schneller, sonst bleiben sie bei 1.0 |
+| `--grad-clip` | `1.0` | maximale Gradientennorm |
+| `--w-phys` / `--w-bc` | `0.1` / `0.1`, in den Benchmarks gesweept | Gewichte von Physik- und BC-Term |
+| `--phys-norm` | `0` | `0` = adaptiver EMA, `>0` = fester Divisor |
+| `--batch-phys` / `--batch-bc` | `256` / `128` | Kollokationspunkte — hier liegt der GPU-Hebel |
+| `--seeds` | `0` | ein Trainingslauf je Seed, Bewertung über den Mittelwert (nur Benchmarks) |
 
-**Daten:** `--ops` (Training), `--val-op` (Auswahl), `--test-op` (nur Bericht).
+**Daten:** `--ops` (Training, `OP01–OP05`), `--val-op` (Auswahl, `OP06`),
+`--test-op` (nur Bericht, `OP07`). `--val-op` gibt es nur in den Benchmarks.
 
-`config.yaml` gilt für `train.py` und `smallBench.py`; die Benchmarks setzen ihre
-eigenen Defaults im Skript. Die CLI überschreibt beides pro Lauf. Wenn du
-`train.py` von Hand mit den Benchmark-Einstellungen laufen lassen willst:
-
-```bash
-python3 PINNmodulusTwo/train.py --subsample 2 --history-mode hybrid \
-  --rate-lags 5 20 --delta-grid 0.2 --grad-clip 1.0 \
-  --ops OP01 OP02 OP03 OP04 OP05 --device cuda
-```
+Die Defaults stehen in `PINNmodulusTwo/config.yaml` und lassen sich dort
+dauerhaft ändern; die CLI überschreibt sie pro Lauf.
 
 ---
 
@@ -333,7 +332,7 @@ Vollständig in **[Kapitel 6](#6-smoke-test)** beschrieben. Kurzfassung:
 cd ~/llmtraining
 source .venv/bin/activate
 
-python3 PINNmodulusTwo/train.py --epochs 2 --subsample 40 --device cuda
+python3 PINNmodulusTwo/train.py --epochs 2 --device cuda
 python3 PINNmodulusTwo/smallBench.py --epochs 5 --w-phys 0.0 0.1 --w-bc 0.1 --device cuda
 cat PINNmodulusTwo/artifacts/smallBench_results.txt
 ```

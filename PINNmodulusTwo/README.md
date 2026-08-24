@@ -3,7 +3,9 @@
 Implementation of **method #2** from the Notion page *"Battery Model with NVIDIA
 MODULUS"*: use Modulus as much as practical, but bring our **own recurrence** in
 PyTorch. Roughly a 50:50 Modulus / PyTorch split. **Temperature only** — `bc_V`
-is deliberately out of scope. Trains on **OP01, OP02, OP03**.
+is deliberately out of scope. Trains on **OP01–OP05**, validates on **OP06**
+(that is what benchmark selection ranks on) and reports **OP07**, which never
+takes part in any selection.
 
 ## What comes from Modulus vs. PyTorch
 
@@ -17,26 +19,27 @@ is deliberately out of scope. Trains on **OP01, OP02, OP03**.
 
 ## Files
 
-- `data.py` — loads OP01/02/03 from the cached `.npz` (JR1 heat = `q_source[:,0]`),
+- `data.py` — loads the OPs from the cached `.npz` (JR1 heat = `q_source[:,0]`),
   pooled z-score for temperature, shared `L_ref`/`T_span_ref` non-dimensionalisation,
   anisotropic Fourier tensor, and a per-timestep **config feature block** that
-  already supports time-varying **profiles** (constant for OP01-03).
+  already supports time-varying **profiles**.
 - `model.py` — `LearnableSwish`, `ModulusMLP` (Modulus `FCLayer`s), and
-  `RecurrentField`. The recurrence is deliberately **not** adaptive: `δ` (history
-  spacing) and `k` (number of lags) are fixed hyperparameters and every lag gate
-  is permanently on. Learned are the MLP weights, the per-layer swish `β`, the
-  physics gains `src_gain`/`diff_gain`, and — in `hybrid` history mode — the
-  `rate_lags` segment lengths.
+  `RecurrentField`. The recurrence is deliberately **not** adaptive: `δ`, `k`,
+  `delta_grid`, `rate_lags` and the lag gates are all fixed hyperparameters —
+  configurable, never trained. Learned are only the MLP weights, the per-layer
+  swish `β`, and the physics gains `src_gain`/`diff_gain`.
 - `physics.py` — nondimensional anisotropic heat residual; space via autograd,
   time via the finite-difference `(T(t) − T(t−δ))/δ` over the recurrence.
-- `train.py` — training loop on OP01/02/03 + evaluation, plots, metrics.
+- `train.py` — training loop + evaluation, plots, metrics.
 - `bench_common.py` — shared benchmark machinery: per-seed training, mean/std
   aggregation over seeds, the val/test split, and the seed-noise verdict. A
   benchmark only describes its own sweep axis.
 - `benchmark_wphys_wbc.py` — 2D sweep of the loss weights `w_phys` x `w_bc`.
-- `benchmark_arch.py` — width, depth and history lags, one axis at a time.
+- `benchmark_arch.py` — width, depth, history lags and anchor lag (`delta_grid`),
+  one axis at a time.
 - `smallBench.py` — 2-5 minute smoke test; run it before any long sweep.
-- `config.yaml` — hyperparameters (CLI overrides available).
+- `config.yaml` — hyperparameters, matching what the benchmarks run
+  (CLI overrides available).
 
 ## Why recurrence (profiles)
 
@@ -54,15 +57,24 @@ with `benchmark_arch.py` rather than expecting the model to find it.
 Hybrid history keeps the same raw interpolation for the physics residual, but
 feeds the network a more compact feature block:
 
-- `T(t-Δgrid)` as an absolute anchor.
-- One rate channel per entry in `rate_lags` (`5 s` and `20 s` in the benchmarks),
-  computed with per-endpoint padding and divided by the **nominal** segment
-  length. Dividing by the clamped elapsed span instead is a singularity: early in
-  the rollout that span collapses to one grid step and the rate explodes, which
-  is what made every sweep point diverge to NaN.
+- `T(t-Δgrid)` as an absolute anchor. `Δgrid` is `--delta-grid` (default
+  `0.2 s`), a free knob independent of `--subsample`, and used **only** in
+  hybrid mode -- raw mode spaces its lags by `δ` instead.
+- One rate channel per entry in `rate_lags` (`5 s` and `20 s` by default). The
+  segments are cumulative, each starting where the previous ended, and the
+  divisor is `Δgrid + that segment's own length`:
+
+      Rate 1: [T(t-Δgrid)   - T(t-Δgrid-5)]  / (Δgrid + 5)
+      Rate 2: [T(t-Δgrid-5) - T(t-Δgrid-25)] / (Δgrid + 20)
+
+  So the rate is the average slope from `t` out to the segment's far endpoint --
+  the same reference the anchor channel beside it uses. Dividing by the clamped
+  *elapsed* span instead is a singularity: early in the rollout that span
+  collapses to one grid step and the rate explodes, which is what made every
+  sweep point diverge to NaN.
 
 Set `history_mode: raw` if you want the original lag stack, or `history_mode:
-hybrid` if you want the anchor + rates layout.
+hybrid` (the default) for the anchor + rates layout.
 
 The physics term supports `time_deriv: bdf1`, `bdf2`, or `autograd`. `bdf2` is
 the default and remains the recommended choice when the history buffer is long
@@ -73,8 +85,14 @@ coupled to the hybrid feature layout.
 
 ```bash
 source .venv/bin/activate
-python3 PINNmodulusTwo/train.py --epochs 60 --subsample 40
+python3 PINNmodulusTwo/train.py --epochs 60
 ```
+
+Everything not passed comes from `config.yaml`, which now holds the same
+settings the benchmarks use — so a bare run trains the model the benchmarks
+measure. Note that `subsample: 2` makes this slow (~1.5–2.5 h at 60 epochs); use
+`--epochs 5` for a quick check, or `--subsample 40` for a pure "does it start"
+run.
 
 `--device` steht auf `auto`: läuft auf der GPU, wenn eine verfügbar ist, sonst
 auf der CPU. Explizit erzwingen mit `--device cuda` / `--device cuda:1` /
