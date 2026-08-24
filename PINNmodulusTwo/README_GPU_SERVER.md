@@ -253,13 +253,30 @@ verschwendete Rechenzeit.
 | # | Schritt | Laufzeit | Wozu | Weiter nur wenn |
 |---|---|---|---|---|
 | 1 | Smoke-Test | 2–5 min | läuft das Training überhaupt, ohne NaN | `ALL CHECKS PASSED` |
-| 2 | Seed-Streuung an einem Punkt | ~15 min | wie viel bewegt allein der Zufall | Streuung < erwartete Effekte |
-| 3 | Architektur-Benchmark | ~1,8 h | welcher Regler bewegt den Fehler | — |
-| 4 | Full Benchmark der Gewichte | ~5 h | bestes `(w_phys, w_bc)` | — |
+| 2 | Zeit pro Epoche messen | ~10 min | wie teuer ist ein Trainingslauf wirklich | — |
+| 3 | Seed-Streuung an einem Punkt | mehrere h | wie viel bewegt allein der Zufall | Streuung < erwartete Effekte |
+| 4 | Architektur-Benchmark | Tage | welcher Regler bewegt den Fehler | — |
+| 5 | Full Benchmark der Gewichte | Tage bis Wochen | bestes `(w_phys, w_bc)` | — |
 
-Laufzeiten auf Basis von **~2,9 min pro Training** (60 Epochen, 5 Trainings-OPs,
-`--subsample 2`, RTX 5090 Laptop). Die echte Zahl steht nach zwei Punkten in der
-`ETA`-Zeile des Logs.
+> ### ⚠️ Laufzeit — bitte vor dem ersten langen Lauf lesen
+>
+> Bei `--subsample 2` ist der Rollout ~7000 sequentielle Zeitschritte pro OP und
+> Epoche, und das dominiert alles andere. **Eine Epoche** über 5 Trainings-OPs
+> kostet grob 1,5–2,5 min, **ein Gitterpunkt mit 60 Epochen also 1,5–2,5 Stunden.**
+>
+> | Lauf | Trainings | Laufzeit |
+> |---|---|---|
+> | 5×5-Gitter, 1 Seed | 25 | ~1,5–2 Tage |
+> | 10×10-Gitter, 1 Seed | 100 | **~6–8 Tage** |
+> | Architektur, 12 Konfigs, 1 Seed | 12 | ~1 Tag |
+>
+> Mit Seeds multipliziert sich das entsprechend.
+>
+> Diese Spanne ist **geschätzt**, nicht gemessen: die einzige verfügbare Messung
+> stammt aus einem Lauf, der nach Epoche 1 abgebrochen ist — die dort gemeldeten
+> „2,9 min" waren Laden plus **eine** Epoche, nicht sechzig. Deshalb ist Schritt 2
+> unten der erste echte Messpunkt. Nimm die Tabelle nicht als gegeben, bevor du
+> ihn gemacht hast.
 
 **Datenaufteilung in allen Benchmarks:** Training `OP01–OP05`, Validierung `OP06`
 (entscheidet die Auswahl), Test `OP07` (wird nur berichtet und fließt in keine
@@ -289,7 +306,37 @@ zuerst betroffenen Loss-Term, siehe [Kapitel 9](#9-troubleshooting).
 
 ---
 
-### 7.2 Schritt 2 — Seed-Streuung an einem Gitterpunkt (~15 min)
+### 7.2 Schritt 2 — Zeit pro Epoche messen (~10 min)
+
+Bevor irgendetwas Langes startet: einen einzelnen kurzen Trainingslauf machen und
+die gemessene Zeit pro Epoche ablesen.
+
+```bash
+python3 PINNmodulusTwo/train.py --ops OP01 OP02 OP03 OP04 OP05 \
+  --subsample 2 --epochs 5 --history-mode hybrid --rate-lags 5 20 \
+  --grad-clip 1.0 --device cuda
+```
+
+Das Log meldet ab Epoche 1:
+
+```
+  epoch   1  L_data=...  [112.4s/epoch, this run ~7 min left]
+```
+
+Damit rechnest du selbst:
+
+```
+Sekunden/Epoche × 60 Epochen ÷ 3600        = Stunden pro Gitterpunkt
+Stunden/Punkt × Punkte × Seeds ÷ 24        = Tage für den Sweep
+```
+
+Bei 112 s/Epoche wären das 1,9 h pro Punkt — 100 Punkte also ~7,8 Tage. Wenn das
+zu viel ist, sind die Hebel in dieser Reihenfolge wirksam: weniger `--epochs`,
+kleineres Gitter, größeres `--subsample`.
+
+---
+
+### 7.3 Schritt 3 — Seed-Streuung an einem Gitterpunkt
 
 Der billigste Test mit dem größten Erkenntnisgewinn, und deshalb **vor** den
 langen Läufen. Er beantwortet: bewegt sich der Fehler zwischen zwei
@@ -312,7 +359,7 @@ Standardabweichung über die fünf Seeds.
 
 ---
 
-### 7.3 Schritt 3 — Architektur-Benchmark (~1,8 h)
+### 7.4 Schritt 4 — Architektur-Benchmark
 
 Misst Breite, Tiefe und History-Lags — Werte, die im Gewichte-Sweep ungemessen
 festliegen. Läuft **eine Achse nach der anderen** gegen eine gemeinsame
@@ -355,21 +402,25 @@ nicht, diesen Regler weiter zu drehen.
 
 **Laufzeit**
 
-| Umfang | Trainings | Laufzeit |
+| Umfang | Trainings | Laufzeit bei 2 h/Training |
 |---|---|---|
-| alle Achsen, 1 Seed | 12 | ~35 min |
-| alle Achsen, 3 Seeds | 36 | **~1,8 h** |
-| nur `lags`, 3 Seeds | 15 | ~45 min |
-| nur `width`, 3 Seeds | 9 | ~26 min |
+| nur `width`, 1 Seed | 3 | ~6 h |
+| nur `lags`, 1 Seed | 5 | ~10 h |
+| alle Achsen, 1 Seed | 12 | **~1 Tag** |
+| alle Achsen, 3 Seeds | 36 | ~3 Tage |
 
-> Die Werte gelten für `width=128`. Breitere Netze kosten mehr pro Schritt, aber
-> der Rollout ist latenzgebunden (~7000 sequentielle Zeitschritte), nicht
-> rechengebunden — `width=256` skaliert daher deutlich schwächer als die
-> vierfache FLOP-Zahl vermuten lässt.
+> Setze die in Schritt 2 gemessene Zeit pro Training ein, statt diese Tabelle zu
+> übernehmen. Die Werte gelten außerdem für `width=128`: breitere Netze kosten
+> mehr pro Schritt, aber der Rollout ist latenzgebunden (~7000 sequentielle
+> Zeitschritte), nicht rechengebunden — `width=256` skaliert daher schwächer als
+> die vierfache FLOP-Zahl vermuten lässt.
+>
+> Mit `--epochs 20` statt 60 drittelt sich alles. Für die Frage „welche Achse
+> bewegt überhaupt etwas" reicht das meist.
 
 ---
 
-### 7.4 Schritt 4 — Full Benchmark der Loss-Gewichte
+### 7.5 Schritt 5 — Full Benchmark der Loss-Gewichte
 
 Sucht das optimale Paar `(w_phys, w_bc)` auf einem 10×10-Gitter.
 
@@ -398,15 +449,18 @@ das Kommando ohne `nohup`/`&` (Detach mit `Ctrl-b`, dann `d`).
 | Test-OP (nur Bericht) | OP07 |
 | Seeds | 1 (`--seeds`, siehe 7.5) |
 | Epochen | 60 pro Gitterpunkt |
-| Laufzeit | ~2,9 min/Punkt → **~5 h** bei einem Seed |
+| Laufzeit | 1,5–2,5 h/Punkt → **~6–8 Tage** bei einem Seed |
 
-Ohne `--extended-grid` läuft das kleinere 5×5-Standardgitter (25 Punkte, ~1,2 h).
-Wenn Schritt 2 eine große Seed-Streuung gezeigt hat, ist das 5×5-Gitter mit drei
-Seeds (~3,6 h) die bessere Wahl als 10×10 mit einem.
+Ohne `--extended-grid` läuft das kleinere 5×5-Standardgitter (25 Punkte,
+~1,5–2 Tage). **Das 10×10-Gitter mit 60 Epochen ist in dieser Form kaum
+praktikabel** — realistisch ist eine Kombination aus kleinerem Gitter und
+weniger Epochen, z. B. `--epochs 20` auf dem 5×5-Gitter (~14 h). Wenn Schritt 3
+eine große Seed-Streuung gezeigt hat, ist ein kleines Gitter mit drei Seeds
+ohnehin aussagekräftiger als ein großes mit einem.
 
 ---
 
-### 7.5 Seeds — wie viele Läufe pro Gitterpunkt
+### 7.6 Seeds — wie viele Läufe pro Gitterpunkt
 
 Standard ist **ein** Seed pro Punkt. Damit ist nicht entscheidbar, ob der
 Unterschied zwischen zwei Zellen der Heatmap echt ist oder nur unterschiedliche
@@ -425,11 +479,11 @@ den Abstand des Siegers zum Zweitplatzierten mit der Seed-Streuung und sagt
 explizit, ob die Rangfolge belastbar ist oder im Rauschen liegt.
 
 > **Laufzeit skaliert linear.** 100 Punkte × 3 Seeds = 300 Trainings, also ~15 h
-> statt ~5 h.
+> statt einem.
 
 ---
 
-### 7.6 Erwartete Outputs
+### 7.7 Erwartete Outputs
 
 ```
 PINNmodulusTwo/artifacts/benchmark_wphys_wbc.csv               -> alle 100 Punkte
@@ -441,7 +495,7 @@ PINNmodulusTwo/artifacts/checkpoints_wphys_wbc/*.pt            -> 100 Modelle (m
 
 ---
 
-### 7.7 Monitoring
+### 7.8 Monitoring
 
 ```bash
 # Live mitlesen (Ctrl-C beendet nur tail, nicht den Benchmark)
@@ -453,7 +507,7 @@ grep "Training w_phys" benchmark_extended.log | tail -3
 
 # Restlaufzeit
 grep "ETA" benchmark_extended.log | tail -3
-#   Train time: 2.9 min | ETA: 223.3 min
+#   Train time: 118.3 min | ETA: 11712.0 min
 
 # Wie viele Ergebnisse stehen schon in der CSV? (steigt bis 101 = Header + 100)
 wc -l PINNmodulusTwo/artifacts/benchmark_wphys_wbc.csv
@@ -478,7 +532,7 @@ gegenseitig, also Artefakte pro Lauf wegsichern oder `--model-dir` setzen.
 
 ---
 
-### 7.8 Auswertung nach Abschluss
+### 7.9 Auswertung nach Abschluss
 
 ```bash
 cat PINNmodulusTwo/artifacts/benchmark_wphys_wbc_best.txt
@@ -521,7 +575,7 @@ du -sh PINNmodulusTwo/artifacts/checkpoints_wphys_wbc/
 
 ---
 
-### 7.9 Abbrechen und neu starten
+### 7.10 Abbrechen und neu starten
 
 ```bash
 kill $(cat benchmark.pid)
@@ -534,7 +588,7 @@ ps -p $(cat benchmark.pid)   # "No such process" = gestoppt
 
 ---
 
-### 7.10 Weiter mit den besten Gewichten
+### 7.11 Weiter mit den besten Gewichten
 
 ```bash
 # Werte aus benchmark_wphys_wbc_best.txt einsetzen
@@ -560,7 +614,7 @@ model.eval()
 
 ---
 
-### 7.11 Komplette Session zum Kopieren
+### 7.12 Komplette Session zum Kopieren
 
 ```bash
 # ---------------------------------------------------------------------------
@@ -576,7 +630,16 @@ cat PINNmodulusTwo/artifacts/smallBench_results.txt
 # NUR bei PASSED weitermachen.
 
 # ---------------------------------------------------------------------------
-# SCHRITT 2: SEED-STREUUNG an einem Punkt  (~15 min)
+# SCHRITT 2: ZEIT PRO EPOCHE MESSEN  (~10 min)  <- bestimmt alles Weitere
+# ---------------------------------------------------------------------------
+python3 PINNmodulusTwo/train.py --ops OP01 OP02 OP03 OP04 OP05 \
+  --subsample 2 --epochs 5 --history-mode hybrid --rate-lags 5 20 \
+  --grad-clip 1.0 --device cuda
+# Log: "[112.4s/epoch, this run ~7 min left]"
+# -> Sekunden/Epoche x 60 / 3600 = Stunden pro Gitterpunkt. Danach planen!
+
+# ---------------------------------------------------------------------------
+# SCHRITT 3: SEED-STREUUNG an einem Punkt  (mehrere Stunden)
 # ---------------------------------------------------------------------------
 python3 PINNmodulusTwo/benchmark_wphys_wbc.py \
   --w-phys 0.05 --w-bc 0.1 --seeds 0 1 2 3 4 --epochs 60 --device cuda
@@ -584,7 +647,7 @@ grep -A2 "BEST" PINNmodulusTwo/artifacts/benchmark_wphys_wbc_best.txt
 # Grosse Streuung -> in Schritt 3/4 mit --seeds 0 1 2 arbeiten.
 
 # ---------------------------------------------------------------------------
-# SCHRITT 3: ARCHITEKTUR-BENCHMARK  (~1.8 h)
+# SCHRITT 4: ARCHITEKTUR-BENCHMARK  (~1 Tag, mit --epochs 20 deutlich weniger)
 # ---------------------------------------------------------------------------
 nohup python3 PINNmodulusTwo/benchmark_arch.py --device cuda --seeds 0 1 2 \
   > benchmark_arch.log 2>&1 &
@@ -595,7 +658,7 @@ cat PINNmodulusTwo/artifacts/benchmark_arch_best.txt
 # Abschnitt "Span per axis" sagt, welche Achse ueberhaupt etwas bewegt.
 
 # ---------------------------------------------------------------------------
-# SCHRITT 4: FULL BENCHMARK der Gewichte  (~5 h)
+# SCHRITT 5: FULL BENCHMARK der Gewichte  (Tage - Umfang vorher rechnen!)
 # ---------------------------------------------------------------------------
 nohup python3 PINNmodulusTwo/benchmark_wphys_wbc.py --extended-grid --device cuda \
   > benchmark_extended.log 2>&1 &
@@ -612,12 +675,13 @@ tail -f benchmark_extended.log   # optional, Ctrl-C beendet nur das tail
 
 ---
 
-### 7.12 Checkliste
+### 7.13 Checkliste
 
 Vor dem Start:
 
 - [ ] venv aktiviert (`source .venv/bin/activate`)
 - [ ] Schritt 1 (Smoke-Test) gelaufen und PASSED
+- [ ] Schritt 2 gemacht: Zeit pro Epoche gemessen und Gesamtlaufzeit gerechnet
 - [ ] `ls data_cache/*.npz` zeigt OP01–OP07
 - [ ] genug Plattenplatz (~10–20 GB für die Checkpoints, `df -h`)
 - [ ] `nohup` oder `tmux` benutzt, damit der Lauf die SSH-Session überlebt

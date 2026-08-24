@@ -16,6 +16,11 @@ one axis at a time is a few dozen and tells you where the leverage is.
 Everything not on the swept axis is held at the CLI baseline, so every
 configuration is compared against the same reference point.
 
+RUNTIME: one configuration at 60 epochs costs 1.5-2.5 h (see
+benchmark_wphys_wbc.py for why), so the 12-configuration default is 1-1.5 days
+per seed. Use --axes to walk one axis at a time, and read the measured
+seconds-per-epoch the training log prints before planning a long run.
+
 Run:
     python3 PINNmodulusTwo/benchmark_arch.py --device cuda --seeds 0 1 2
 

@@ -30,13 +30,22 @@ Run:
     source .venv/bin/activate
     python3 PINNmodulusTwo/benchmark_wphys_wbc.py --extended-grid --device cuda
 
-Runtime, measured at ~2.9 min per training (60 epochs, 5 training OPs,
-subsample=2, RTX 5090 Laptop). It scales with grid size AND seed count:
-    5x5 grid,   1 seed  ->  25 trainings  ~1.2 h
-    10x10 grid, 1 seed  -> 100 trainings  ~4.8 h   (--extended-grid)
-    5x5 grid,   3 seeds ->  75 trainings  ~3.6 h
-    10x10 grid, 3 seeds -> 300 trainings  ~14.5 h
-On CPU the same runs take roughly six times as long.
+RUNTIME -- read this before starting a long run.
+
+At subsample=2 the rollout is ~7000 sequential steps per OP per epoch, and that
+dominates everything. One epoch over 5 training OPs costs roughly 1.5-2.5 min on
+an RTX 5090 Laptop, so ONE grid point at 60 epochs is 1.5-2.5 HOURS:
+    5x5 grid,   1 seed  ->  25 trainings  ~1.5-2 days
+    10x10 grid, 1 seed  -> 100 trainings  ~6-8 days   (--extended-grid)
+Multiply by the seed count on top of that.
+
+Do not take those numbers on faith: the log prints the measured seconds per
+epoch from the first epoch on ("[12.4s/epoch, this run ~124 min left]"). Read it
+once and compute the real total before committing days of GPU time.
+
+To bring it down, in order of effect: fewer --epochs, a coarser grid, or a
+larger --subsample (which shortens the rollout quadratically in wall time but
+changes the time resolution).
 
 The full test sequence, in the order that makes sense, is in
 README_GPU_SERVER.md section 7 -- run the smoke test and the seed-spread check

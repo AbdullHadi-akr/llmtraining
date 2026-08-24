@@ -17,6 +17,7 @@ For the GPU server setup see ``PINNmodulusTwo/README_GPU_SERVER.md``.
 from __future__ import annotations
 
 import argparse
+import time
 from pathlib import Path
 
 import numpy as np
@@ -239,6 +240,7 @@ def fit(args):
     bc_ema = None
 
     for epoch in range(1, args.epochs + 1):
+        epoch_start = time.time()
         model.train()
         ep_data, ep_phys, ep_bc = 0.0, 0.0, 0.0
         for op in ops:
@@ -378,10 +380,18 @@ def fit(args):
             else:
                 lags_str = ""
             # Show BALANCED losses (all ~O(1)) so user can compare fairly
+            # Per-epoch wall time and the resulting projection: a benchmark
+            # extrapolates its ETA from whole grid points, which is useless while
+            # the first one is still running -- and badly misleading if a run
+            # aborts early, because then the "per point" time is one epoch, not
+            # all of them.
+            epoch_s = time.time() - epoch_start
+            eta_min = (args.epochs - epoch) * epoch_s / 60.0
             print(
                 f"  epoch {epoch:3d}  L_data={ep_data:.4e}  L_phys_bal={ep_phys_bal:.4e}  "
                 f"L_bc_bal={ep_bc_bal:.4e}  delta={float(model.delta.detach()):.4g}  "
-                f"src_gain={sg:.3g}  diff_gain={dg:.3g}{lags_str}  betas={betas}",
+                f"src_gain={sg:.3g}  diff_gain={dg:.3g}{lags_str}  betas={betas}  "
+                f"[{epoch_s:.1f}s/epoch, this run ~{eta_min:.0f} min left]",
                 flush=True,
             )
         if early_stopping_patience > 0 and epochs_without_improvement >= early_stopping_patience:
