@@ -187,6 +187,26 @@ def _timepoint_maes(pred: np.ndarray, true: np.ndarray, time_idx: np.ndarray) ->
     return np.array([float(np.abs(pred[i] - true[i]).mean()) for i in time_idx], dtype=float)
 
 
+def _failed_result(w_phys: float) -> dict:
+    """Result row for a sweep point that diverged or crashed.
+
+    Kept in ``results`` so the per-point plots stay aligned with the sweep; the
+    NaNs simply show up as gaps.
+    """
+    nan = float("nan")
+    return dict(
+        w_phys=float(w_phys), intime_mae=nan, held_mae=nan,
+        L_data=nan, L_phys=nan, wL_data=nan, wL_phys=nan,
+        delta_s=nan, gates=[], src_gain=nan, diff_gain=nan,
+        n_params=0, test_time_maes=np.full(10, nan),
+        rate_lags_s=[], checkpoint="",
+    )
+
+
+_EMPTY_HIST = {"epoch": [], "L_data": [], "L_phys": [], "L_bc": [],
+               "L_phys_bal": [], "L_bc_bal": [], "delta": [], "aborted": True}
+
+
 def main() -> None:
     import matplotlib
     matplotlib.use("Agg")
@@ -220,8 +240,27 @@ def main() -> None:
     for w_phys in cli.w_phys:
         print(f"=== training w_phys = {w_phys} ===", flush=True)
         args = _make_args(cli, w_phys)
-        model, bundle, _packed, _dtn, hist = fit(args)
+        try:
+            model, bundle, _packed, _dtn, hist = fit(args)
+        except Exception as exc:  # one bad point must not kill the sweep
+            print(f"  [SKIP] w_phys={w_phys}: training failed ({exc})", flush=True)
+            results.append(_failed_result(w_phys))
+            histories.append({"w_phys": w_phys, "hist": _EMPTY_HIST})
+            continue
         model.eval()
+
+        # fit() aborts on NaN/Inf and records the failed epoch, so an empty
+        # history only happens for epochs=0. Either way there is no result here.
+        L_data_raw = float(hist["L_data"][-1]) if hist["L_data"] else float("nan")
+        L_phys_raw = float(hist["L_phys"][-1]) if hist["L_phys"] else float("nan")
+        if not np.isfinite(L_data_raw):
+            print(f"  [SKIP] w_phys={w_phys}: loss diverged (L_data={L_data_raw}) - "
+                  "recorded as NaN, sweep continues", flush=True)
+            failed = _failed_result(w_phys)
+            failed.update(L_data=L_data_raw, L_phys=L_phys_raw)
+            results.append(failed)
+            histories.append({"w_phys": w_phys, "hist": hist})
+            continue
 
         intime_maes = [
             _mae(_rollout_phys(model, op, bundle, device), op.T_lab, op.split_t, op.n_t)
@@ -234,10 +273,8 @@ def main() -> None:
         test_time_idx = np.linspace(0, held.n_t - 1, num=10, dtype=int)
         test_time_maes = _timepoint_maes(held_pred, held.T_lab, test_time_idx)
 
-        # Raw (un-weighted) losses at the final epoch, plus the WEIGHTED terms so
-        # w_phys*L_phys can be compared against w_data*L_data (same range = balanced).
-        L_data_raw = float(hist["L_data"][-1])
-        L_phys_raw = float(hist["L_phys"][-1])
+        # WEIGHTED terms so w_phys*L_phys can be compared against w_data*L_data
+        # (same range = balanced). The raw losses are read above.
         wL_data = 1.0 * L_data_raw
         wL_phys = float(w_phys) * L_phys_raw
 
@@ -319,7 +356,18 @@ def main() -> None:
     (ART_DIR / "benchmark_wphys.csv").write_text("\n".join(csv_lines) + "\n")
 
     # ---- best pick + summary table -------------------------------------------
-    best = min(results, key=lambda r: r["held_mae"])
+    usable = [r for r in results if np.isfinite(r["held_mae"])]
+    n_failed = len(results) - len(usable)
+    if not usable:
+        print(f"\nAll {len(results)} sweep points diverged - no result to rank.",
+              flush=True)
+        print("Check the [DATA WARN]/[ABORT] lines above, then retry with a smaller "
+              "--subsample or a stricter --grad-clip.", flush=True)
+        return
+    if n_failed:
+        print(f"\n{n_failed}/{len(results)} sweep points diverged and are recorded "
+              "as NaN.", flush=True)
+    best = min(usable, key=lambda r: r["held_mae"])
     if cli.save_models and cli.save_best_only:
         best_ckpt_path = model_dir / f"model_best_wphys_{_w_tag(best['w_phys'])}.pt"
         best_rec = next(r for r in results if r["w_phys"] == best["w_phys"])
@@ -473,8 +521,13 @@ def main() -> None:
 
     # ---- test-op boxplot -----------------------------------------------------
     fig2, ax3 = plt.subplots(1, 1, figsize=(10.5, 4.8))
-    box_data = [r["test_time_maes"] for r in results]
-    bp = ax3.boxplot(box_data, labels=labels, showmeans=True, whis=(0, 100), patch_artist=True)
+    box_data = [r["test_time_maes"] for r in usable]
+    box_labels = [str(r["w_phys"]) for r in usable]
+    # set_xticklabels instead of the boxplot(labels=...) kwarg, which was
+    # removed in matplotlib 3.11 (renamed to tick_labels in 3.9).
+    bp = ax3.boxplot(box_data, showmeans=True, whis=(0, 100), patch_artist=True)
+    ax3.set_xticks(range(1, len(box_data) + 1))
+    ax3.set_xticklabels(box_labels)
     for patch in bp["boxes"]:
         patch.set_facecolor("#d9e8ff")
         patch.set_alpha(0.75)

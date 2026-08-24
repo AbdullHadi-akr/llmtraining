@@ -126,6 +126,28 @@ def _to_tensor_ops(bundle, device):
     return packed
 
 
+def _check_finite_inputs(ops) -> None:
+    """Warn once if any per-OP input tensor holds NaN/Inf.
+
+    A loss that is already NaN in epoch 1 usually comes from the data, not from
+    the optimisation - this says which OP and which field, instead of leaving the
+    generic "CFL violation" guess as the only hint.
+    """
+    fields = ("xn", "cfg", "static", "forcing", "Tn", "Tn_ic", "Fo", "Qsrc", "tn")
+    bad = []
+    for op in ops:
+        for name in fields:
+            t = op[name]
+            if t.numel() and not torch.isfinite(t).all():
+                n_bad = int((~torch.isfinite(t)).sum())
+                bad.append(f"{op['op_id']}.{name} ({n_bad}/{t.numel()} non-finite)")
+    if bad:
+        print("  [DATA WARN] non-finite values in the inputs: " + ", ".join(bad),
+              flush=True)
+        print("  Training will very likely produce NaN losses. Check the cached "
+              ".npz bundles for these OPs.", flush=True)
+
+
 def fit(args):
     """Train on ``args.ops`` and return ``(model, bundle, ops_packed, dtn, history)``."""
     seed_everything(args.seed)
@@ -134,6 +156,7 @@ def fit(args):
 
     bundle = load_ops(op_ids=args.ops, subsample_time=args.subsample)
     ops = _to_tensor_ops(bundle, device)
+    _check_finite_inputs(ops)
     # Optional extra input features (default OFF: the richer features empirically
     # hurt the free-running rollout on this data). Zero-width when disabled.
     n_static = bundle.n_static if args.use_static else 0
@@ -184,6 +207,7 @@ def fit(args):
 
     history = {"epoch": [], "L_data": [], "L_phys": [], "L_bc": [], "delta": [],
                 "L_phys_bal": [], "L_bc_bal": []}  # balanced losses for fair comparison
+    history["aborted"] = False
     best_train_loss = float("inf")
     epochs_without_improvement = 0
     early_stopping_patience = int(getattr(args, "early_stopping_patience", 0))
@@ -267,6 +291,16 @@ def fit(args):
             print(f"  [ABORT] epoch {epoch}: loss exploded (L_data={ep_data:.4g}, L_phys={ep_phys:.4g})")
             print("  Possible causes: CFL violation (Δt too large), unstable IC, or bad hyperparams")
             print("  Try: --subsample 2 (for CFL-stable Δt=0.2s) or --grad-clip 1.0")
+            # Record the failed epoch so callers never see an empty history and
+            # the divergence stays visible downstream (CSV, plots) as NaN.
+            history["epoch"].append(epoch)
+            history["L_data"].append(ep_data)
+            history["L_phys"].append(ep_phys)
+            history["L_bc"].append(ep_bc)
+            history["L_phys_bal"].append(float("nan"))
+            history["L_bc_bal"].append(float("nan"))
+            history["delta"].append(float(model.delta.detach()))
+            history["aborted"] = True
             break
 
         # Compute balanced losses for fair logging (all ~O(1) when stable)

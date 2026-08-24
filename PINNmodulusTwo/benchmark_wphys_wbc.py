@@ -196,6 +196,40 @@ def _timepoint_maes(pred: np.ndarray, true: np.ndarray, time_idx: np.ndarray) ->
     return np.array([float(np.abs(pred[i] - true[i]).mean()) for i in time_idx], dtype=float)
 
 
+N_BOX_POINTS = 10
+
+# History shape returned by fit(); used as a placeholder when fit() itself failed.
+_EMPTY_HIST = {"epoch": [], "L_data": [], "L_phys": [], "L_bc": [],
+               "L_phys_bal": [], "L_bc_bal": [], "delta": [], "aborted": True}
+
+
+def _failed_result(w_phys: float, w_bc: float, train_time: float) -> dict:
+    """Result row for a grid point that diverged or crashed.
+
+    Every grid point must produce exactly one entry in ``results`` and
+    ``histories``: the convergence plot picks its corner points by position.
+    """
+    nan = float("nan")
+    return {
+        "w_phys": float(w_phys), "w_bc": float(w_bc),
+        "intime_mae": nan, "held_mae": nan,
+        "L_data": nan, "L_phys": nan, "L_bc": nan,
+        "delta_s": nan, "src_gain": nan, "diff_gain": nan,
+        "n_params": 0,
+        "rate_lags_s": [],
+        "train_time": train_time,
+        "checkpoint": "",
+        "test_time_maes": np.full(N_BOX_POINTS, nan),
+    }
+
+
+def _print_eta(idx: int, total_points: int, start_time_total: float,
+               train_time: float) -> None:
+    elapsed = time.time() - start_time_total
+    eta = (elapsed / idx) * (total_points - idx)
+    print(f"  Train time: {train_time/60:.1f} min | ETA: {eta/60:.1f} min", flush=True)
+
+
 def main() -> None:
     import matplotlib
     matplotlib.use("Agg")
@@ -241,9 +275,35 @@ def main() -> None:
         start_time = time.time()
 
         args = _make_args(cli, w_phys, w_bc)
-        model, bundle, _packed, _dtn, hist = fit(args)
+        try:
+            model, bundle, _packed, _dtn, hist = fit(args)
+        except Exception as exc:  # one bad grid point must not kill the sweep
+            train_time = time.time() - start_time
+            print(f"  [SKIP] w_phys={w_phys}, w_bc={w_bc}: training failed ({exc})",
+                  flush=True)
+            results.append(_failed_result(w_phys, w_bc, train_time))
+            histories.append({"w_phys": w_phys, "w_bc": w_bc, "hist": _EMPTY_HIST})
+            _print_eta(idx, total_points, start_time_total, train_time)
+            continue
         model.eval()
         train_time = time.time() - start_time
+
+        # fit() aborts on NaN/Inf and records the failed epoch, so an empty history
+        # only happens for epochs=0. Either way this point has no usable result.
+        L_data_raw = float(hist["L_data"][-1]) if hist["L_data"] else float("nan")
+        L_phys_raw = float(hist["L_phys"][-1]) if hist["L_phys"] else float("nan")
+        L_bc_raw = float(hist["L_bc"][-1]) if hist["L_bc"] else float("nan")
+
+        if not np.isfinite(L_data_raw):
+            print(f"  [SKIP] w_phys={w_phys}, w_bc={w_bc}: loss diverged "
+                  f"(L_data={L_data_raw}) - recorded as NaN, sweep continues",
+                  flush=True)
+            failed = _failed_result(w_phys, w_bc, train_time)
+            failed.update(L_data=L_data_raw, L_phys=L_phys_raw, L_bc=L_bc_raw)
+            results.append(failed)
+            histories.append({"w_phys": w_phys, "w_bc": w_bc, "hist": hist})
+            _print_eta(idx, total_points, start_time_total, train_time)
+            continue
 
         intime_maes = [
             _mae(_rollout_phys(model, op, bundle, device), op.T_lab, op.split_t, op.n_t)
@@ -254,12 +314,9 @@ def main() -> None:
         held_mae = _mae(held_pred, held.T_lab, 0, held.n_t)
         
         # Sample 10 time points for boxplot
-        test_time_idx = np.linspace(0, held.n_t - 1, num=10, dtype=int)
+        test_time_idx = np.linspace(0, held.n_t - 1, num=N_BOX_POINTS, dtype=int)
         test_time_maes = _timepoint_maes(held_pred, held.T_lab, test_time_idx)
 
-        L_data_raw = float(hist["L_data"][-1])
-        L_phys_raw = float(hist["L_phys"][-1])
-        L_bc_raw = float(hist["L_bc"][-1])
         intime = float(np.mean(intime_maes))
 
         delta_s = float(model.delta.detach()) * bundle.T_span_ref
@@ -327,12 +384,9 @@ def main() -> None:
         })
         histories.append({"w_phys": w_phys, "w_bc": w_bc, "hist": hist})
 
-        elapsed = time.time() - start_time_total
-        avg_time = elapsed / idx
-        eta = avg_time * (total_points - idx)
         print(f"  MAE(in-time)={intime:.3f}°C  MAE(held {cli.test_op})={held_mae:.3f}°C")
         print(f"  L_data={L_data_raw:.4g}  L_phys={L_phys_raw:.4g}  L_bc={L_bc_raw:.4g}")
-        print(f"  Train time: {train_time/60:.1f} min | ETA: {eta/60:.1f} min", flush=True)
+        _print_eta(idx, total_points, start_time_total, train_time)
 
     total_time = time.time() - start_time_total
     print(f"\n{'='*60}")
@@ -355,7 +409,19 @@ def main() -> None:
     (ART_DIR / "benchmark_wphys_wbc.csv").write_text("\n".join(csv_lines) + "\n")
 
     # ---- best pick + summary ------------------------------------------------
-    best = min(results, key=lambda r: r["held_mae"])
+    # Diverged points carry NaN and must not win the min() comparison.
+    usable = [r for r in results if np.isfinite(r["held_mae"])]
+    n_failed = len(results) - len(usable)
+    if not usable:
+        print(f"\nAll {len(results)} grid points diverged - no result to rank.", flush=True)
+        print(f"Raw values are in {ART_DIR / 'benchmark_wphys_wbc.csv'}.", flush=True)
+        print("Check the [DATA WARN]/[ABORT] lines above, then retry with a smaller "
+              "--subsample or a stricter --grad-clip.", flush=True)
+        return
+    if n_failed:
+        print(f"\n{n_failed}/{len(results)} grid points diverged and are recorded as NaN.",
+              flush=True)
+    best = min(usable, key=lambda r: r["held_mae"])
     if cli.save_models and cli.save_best_only:
         best_ckpt_path = model_dir / f"model_best_{_w_tag(best['w_phys'], best['w_bc'])}.pt"
         args_best = _make_args(cli, best["w_phys"], best["w_bc"])
@@ -409,6 +475,10 @@ def main() -> None:
         f"-> held-out {best['held_mae']:.3f}°C, in-time {best['intime_mae']:.3f}°C",
         f"Total runtime: {total_time/3600:.2f} hours ({total_time/60:.1f} min)",
     ]
+    if n_failed:
+        summary.append(
+            f"Diverged (recorded as NaN, excluded from the ranking): {n_failed}/{len(results)}"
+        )
     if cli.save_models:
         summary.append(f"Checkpoints dir: {model_dir}")
     (ART_DIR / "benchmark_wphys_wbc_best.txt").write_text("\n".join(summary) + "\n")
@@ -508,10 +578,14 @@ def main() -> None:
     fig2, ax2 = plt.subplots(1, 1, figsize=(14, 6))
     
     # Create labels for each (w_phys, w_bc) combination
-    box_labels = [f"p{r['w_phys']:.3g}\nb{r['w_bc']:.3g}" for r in results]
-    box_data = [r["test_time_maes"] for r in results]
+    box_labels = [f"p{r['w_phys']:.3g}\nb{r['w_bc']:.3g}" for r in usable]
+    box_data = [r["test_time_maes"] for r in usable]
     
-    bp = ax2.boxplot(box_data, labels=box_labels, showmeans=True, whis=(0, 100), patch_artist=True)
+    # set_xticklabels instead of the boxplot(labels=...) kwarg, which was
+    # removed in matplotlib 3.11 (renamed to tick_labels in 3.9).
+    bp = ax2.boxplot(box_data, showmeans=True, whis=(0, 100), patch_artist=True)
+    ax2.set_xticks(range(1, len(box_data) + 1))
+    ax2.set_xticklabels(box_labels)
     for patch in bp["boxes"]:
         patch.set_facecolor("#d9e8ff")
         patch.set_alpha(0.75)
@@ -527,7 +601,7 @@ def main() -> None:
         ax2.scatter(np.full(len(vals), i) + jitter, vals, s=20, color="#1f77b4", alpha=0.6, zorder=3)
 
     # Mark best point
-    best_idx = next(i for i, r in enumerate(results) if r["w_phys"] == best["w_phys"] and r["w_bc"] == best["w_bc"])
+    best_idx = next(i for i, r in enumerate(usable) if r["w_phys"] == best["w_phys"] and r["w_bc"] == best["w_bc"])
     ax2.scatter([best_idx + 1], [best["held_mae"]], s=300, marker="*", color="red", 
                 edgecolors="darkred", linewidths=1.5, zorder=10, label="Best (overall MAE)")
 
@@ -538,7 +612,7 @@ def main() -> None:
     ax2.legend(loc="upper right")
     
     # Rotate labels if too many
-    if len(results) > 16:
+    if len(usable) > 16:
         ax2.tick_params(axis="x", labelrotation=45, labelsize=8)
     
     fig2.tight_layout()
