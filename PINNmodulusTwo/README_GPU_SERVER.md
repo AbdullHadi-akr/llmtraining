@@ -255,8 +255,9 @@ verschwendete Rechenzeit.
 | 1 | Smoke-Test | 2–5 min | läuft das Training überhaupt, ohne NaN | `ALL CHECKS PASSED` |
 | 2 | Zeit pro Epoche messen | ~10 min | wie teuer ist ein Trainingslauf wirklich | — |
 | 3 | Seed-Streuung an einem Punkt | mehrere h | wie viel bewegt allein der Zufall | Streuung < erwartete Effekte |
-| 4 | Architektur-Benchmark | Tage | welcher Regler bewegt den Fehler | — |
-| 5 | Full Benchmark der Gewichte | Tage bis Wochen | bestes `(w_phys, w_bc)` | — |
+| 4 | Range-Probe der Gewichte | ~5–7 h | in welcher Dekade wirken die Gewichte | — |
+| 5 | Architektur-Benchmark | ~1 Tag | welcher Regler bewegt den Fehler | — |
+| 6 | 5×5-Gitter der Gewichte | ~1 Tag | bestes `(w_phys, w_bc)` | — |
 
 > ### ⚠️ Laufzeit — bitte vor dem ersten langen Lauf lesen
 >
@@ -380,7 +381,13 @@ python3 PINNmodulusTwo/benchmark_arch.py --axes lags --seeds 0 1 2 --device cuda
 | `width` | 64, 128, 256 | 3 |
 | `depth` | 2, 3, 4, 6 | 4 |
 | `lags` | 5+20, 2+10, 10+60, 5+20+60, 30 | 5 |
-| | **gesamt** | **12** |
+| `dgrid` | 0.2, 0.5, 1.0, 2.0 s | 4 |
+| | **gesamt** | **16** |
+
+`dgrid` ist der **Ankerabstand** der Hybrid-History: der Block ist
+`[T(t−Δgrid), rate₁, rate₂]`, und die Ratensegmente laufen von diesem Anker aus
+rückwärts. Bisher war er fest an den Datenraster-Schritt gekoppelt — jetzt ist er
+ein eigener Regler mit Default 0.2 s (also unverändertes Verhalten).
 
 Die Baseline (`--width 128 --depth 4 --rate-lags 5 20`) taucht in jeder Achse
 einmal auf. Das ist Absicht: jede Achse braucht ihren eigenen Bezugspunkt, und
@@ -420,7 +427,37 @@ nicht, diesen Regler weiter zu drehen.
 
 ---
 
-### 7.5 Schritt 5 — Full Benchmark der Loss-Gewichte
+### 7.5 Schritt 5 — Range-Probe: in welcher Dekade wirken die Gewichte?
+
+Bevor ein Gitter Stunden investiert, um Unterschiede *innerhalb* eines Bereichs
+aufzulösen, klärt die Probe, ob dieser Bereich überhaupt der richtige ist — und
+ob die Gewichte den Fehler überhaupt bewegen.
+
+Statt eines Gitters läuft ein **Kreuz** durch einen gemeinsamen Mittelpunkt:
+jedes Gewicht wird über die Dekaden `[0, 0.001, 0.01, 0.1, 1.0]` gefahren,
+während das andere im Zentrum steht. **9 Punkte statt 25.**
+
+```bash
+python3 PINNmodulusTwo/benchmark_wphys_wbc.py --probe --epochs 20 \
+  --seeds 0 1 2 --device cuda
+```
+
+`benchmark_wphys_wbc_best.txt` endet dann mit einem Verdikt pro Achse:
+
+```
+RANGE PROBE - per-axis verdict:
+  w_phys (at w_bc=0.1):
+    0->9.12  0.001->8.94  0.01->8.71  0.1->8.83  1->10.40
+    best w_phys=0.01 (val 8.710 °C), span over the decades = 1.690 °C
+    span exceeds the seed spread (0.210 °C) - worth a grid, centred on the best decade.
+```
+
+Liegt die Spannweite **unter** der Seed-Streuung, bewegt dieses Gewicht den
+Fehler nicht — dann spart man sich das Gitter dafür.
+
+---
+
+### 7.6 Schritt 6 — 5×5-Gitter der Loss-Gewichte
 
 Sucht das optimale Paar `(w_phys, w_bc)` auf einem 10×10-Gitter.
 
@@ -460,7 +497,7 @@ ohnehin aussagekräftiger als ein großes mit einem.
 
 ---
 
-### 7.6 Seeds — wie viele Läufe pro Gitterpunkt
+### 7.7 Seeds — wie viele Läufe pro Gitterpunkt
 
 Standard ist **ein** Seed pro Punkt. Damit ist nicht entscheidbar, ob der
 Unterschied zwischen zwei Zellen der Heatmap echt ist oder nur unterschiedliche
@@ -483,7 +520,7 @@ explizit, ob die Rangfolge belastbar ist oder im Rauschen liegt.
 
 ---
 
-### 7.7 Erwartete Outputs
+### 7.8 Erwartete Outputs
 
 ```
 PINNmodulusTwo/artifacts/benchmark_wphys_wbc.csv               -> alle 100 Punkte
@@ -495,7 +532,7 @@ PINNmodulusTwo/artifacts/checkpoints_wphys_wbc/*.pt            -> 100 Modelle (m
 
 ---
 
-### 7.8 Monitoring
+### 7.9 Monitoring
 
 ```bash
 # Live mitlesen (Ctrl-C beendet nur tail, nicht den Benchmark)
@@ -532,7 +569,7 @@ gegenseitig, also Artefakte pro Lauf wegsichern oder `--model-dir` setzen.
 
 ---
 
-### 7.9 Auswertung nach Abschluss
+### 7.10 Auswertung nach Abschluss
 
 ```bash
 cat PINNmodulusTwo/artifacts/benchmark_wphys_wbc_best.txt
@@ -575,7 +612,7 @@ du -sh PINNmodulusTwo/artifacts/checkpoints_wphys_wbc/
 
 ---
 
-### 7.10 Abbrechen und neu starten
+### 7.11 Abbrechen und neu starten
 
 ```bash
 kill $(cat benchmark.pid)
@@ -588,7 +625,7 @@ ps -p $(cat benchmark.pid)   # "No such process" = gestoppt
 
 ---
 
-### 7.11 Weiter mit den besten Gewichten
+### 7.12 Weiter mit den besten Gewichten
 
 ```bash
 # Werte aus benchmark_wphys_wbc_best.txt einsetzen
@@ -614,7 +651,7 @@ model.eval()
 
 ---
 
-### 7.12 Komplette Session zum Kopieren
+### 7.13 Komplette Session zum Kopieren
 
 ```bash
 # ---------------------------------------------------------------------------
@@ -648,6 +685,7 @@ grep -A2 "BEST" PINNmodulusTwo/artifacts/benchmark_wphys_wbc_best.txt
 
 # ---------------------------------------------------------------------------
 # SCHRITT 4: ARCHITEKTUR-BENCHMARK  (~1 Tag, mit --epochs 20 deutlich weniger)
+#            Achsen: width, depth, lags, dgrid
 # ---------------------------------------------------------------------------
 nohup python3 PINNmodulusTwo/benchmark_arch.py --device cuda --seeds 0 1 2 \
   > benchmark_arch.log 2>&1 &
@@ -658,7 +696,15 @@ cat PINNmodulusTwo/artifacts/benchmark_arch_best.txt
 # Abschnitt "Span per axis" sagt, welche Achse ueberhaupt etwas bewegt.
 
 # ---------------------------------------------------------------------------
-# SCHRITT 5: FULL BENCHMARK der Gewichte  (Tage - Umfang vorher rechnen!)
+# SCHRITT 5: RANGE-PROBE der Gewichte  (9 Punkte, ~5-7 h bei --epochs 20)
+# ---------------------------------------------------------------------------
+python3 PINNmodulusTwo/benchmark_wphys_wbc.py --probe --epochs 20 \
+  --seeds 0 1 2 --device cuda
+grep -A20 'RANGE PROBE' PINNmodulusTwo/artifacts/benchmark_wphys_wbc_best.txt
+# -> sagt je Gewicht, ob und in welcher Dekade es wirkt.
+
+# ---------------------------------------------------------------------------
+# SCHRITT 6: 5x5-GITTER der Gewichte, zentriert auf die gefundene Dekade
 # ---------------------------------------------------------------------------
 nohup python3 PINNmodulusTwo/benchmark_wphys_wbc.py --extended-grid --device cuda \
   > benchmark_extended.log 2>&1 &
@@ -675,13 +721,14 @@ tail -f benchmark_extended.log   # optional, Ctrl-C beendet nur das tail
 
 ---
 
-### 7.13 Checkliste
+### 7.14 Checkliste
 
 Vor dem Start:
 
 - [ ] venv aktiviert (`source .venv/bin/activate`)
 - [ ] Schritt 1 (Smoke-Test) gelaufen und PASSED
 - [ ] Schritt 2 gemacht: Zeit pro Epoche gemessen und Gesamtlaufzeit gerechnet
+- [ ] Range-Probe gelaufen: Gitter nur ueber die Dekade, die etwas bewegt
 - [ ] `ls data_cache/*.npz` zeigt OP01–OP07
 - [ ] genug Plattenplatz (~10–20 GB für die Checkpoints, `df -h`)
 - [ ] `nohup` oder `tmux` benutzt, damit der Lauf die SSH-Session überlebt

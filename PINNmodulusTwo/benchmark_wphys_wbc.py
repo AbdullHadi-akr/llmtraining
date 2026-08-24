@@ -9,7 +9,8 @@ Everything except w_phys and w_bc is fixed so the comparison is apples-to-apples
 
 Fixed hyperparameters (override on CLI if desired):
 - architecture: width=128, depth=4, per-layer learnable swish, weight-norm
-- recurrence: k_max=2, history_mode=hybrid, rate_lags=[5.0, 20.0]
+- recurrence: history_mode=hybrid, delta_grid=0.2s (anchor lag),
+  rate_lags=[5.0, 20.0] (cumulative segment lengths, all fixed)
 - optimization: Adam, lr=2e-3, epochs=60, device=auto (CUDA when available)
 - seeds: one training run per seed per grid point (--seeds, default [0]).
   Each point is scored by the MEAN over its seeds and carries the standard
@@ -20,21 +21,30 @@ Fixed hyperparameters (override on CLI if desired):
   subsample=2 (CFL-stable Δt=0.2s)
 - loss weights: w_data=1.0 (fixed), w_phys and w_bc swept
 
-Default sweep grid:
-- w_phys: [0.0, 0.001, 0.005, 0.01, 0.03, 0.05, 0.1, 0.2, 0.5, 1.0] (10 points)
-- w_bc: [0.0, 0.001, 0.005, 0.01, 0.03, 0.05, 0.1, 0.3, 0.7, 1.0] (10 points)
-- Total: 100 combinations
-- Quasi-log spacing samples densely in promising region (0.01-0.3)
+Two modes:
+
+--probe   RANGE PROBE, 9 points. A decade-spaced CROSS through a shared centre
+          rather than a grid: each weight is walked over [0, 1e-3, 1e-2, 1e-1, 1]
+          while the other sits at the centre. Answers "does this weight move the
+          error at all, and in which decade" -- run it BEFORE the grid, because
+          resolving a grid inside a range that turns out to be flat is the
+          expensive way to learn nothing.
+
+(default) GRID, 5x5 = 25 points over [0, 0.01, 0.05, 0.1, 0.3] per weight.
+          Use --w-phys/--w-bc to centre it on the decade the probe found.
+          --extended-grid gives 10x10; see the runtime note below first.
 
 Run:
     source .venv/bin/activate
-    python3 PINNmodulusTwo/benchmark_wphys_wbc.py --extended-grid --device cuda
+    python3 PINNmodulusTwo/benchmark_wphys_wbc.py --probe --epochs 20 --device cuda
+    python3 PINNmodulusTwo/benchmark_wphys_wbc.py --device cuda
 
 RUNTIME -- read this before starting a long run.
 
 At subsample=2 the rollout is ~7000 sequential steps per OP per epoch, and that
 dominates everything. One epoch over 5 training OPs costs roughly 1.5-2.5 min on
 an RTX 5090 Laptop, so ONE grid point at 60 epochs is 1.5-2.5 HOURS:
+    probe,      1 seed  ->   9 trainings  ~14-22 h   (~5-7 h at --epochs 20)
     5x5 grid,   1 seed  ->  25 trainings  ~1.5-2 days
     10x10 grid, 1 seed  -> 100 trainings  ~6-8 days   (--extended-grid)
 Multiply by the seed count on top of that.
@@ -86,9 +96,83 @@ ART_DIR.mkdir(parents=True, exist_ok=True)
 DEFAULT_W_PHYS = [0.0, 0.01, 0.05, 0.1, 0.3]
 DEFAULT_W_BC = [0.0, 0.01, 0.05, 0.1, 0.3]
 
-# Extended 10×10 grid (100 points, ~28 hours) - use with --extended-grid
+# Range probe: a CROSS through the baseline, not a grid. Decade-spaced, so it
+# answers "which order of magnitude matters at all" before a grid commits hours
+# to resolving differences inside a range that may be entirely flat.
+PROBE_W_PHYS = [0.0, 0.001, 0.01, 0.1, 1.0]
+PROBE_W_BC = [0.0, 0.001, 0.01, 0.1, 1.0]
+# The two baselines must be members of their own lists, so the arms of the cross
+# meet in a single shared point. Otherwise each axis is measured against a
+# different reference and the two are not comparable -- and the cross costs one
+# training more than it needs to.
+PROBE_BASE_W_PHYS = 0.01
+PROBE_BASE_W_BC = 0.1
+assert PROBE_BASE_W_PHYS in PROBE_W_PHYS and PROBE_BASE_W_BC in PROBE_W_BC
+
+# Extended 10×10 grid - use with --extended-grid
 EXTENDED_W_PHYS = [0.0, 0.001, 0.005, 0.01, 0.03, 0.05, 0.1, 0.2, 0.5, 1.0]
 EXTENDED_W_BC = [0.0, 0.001, 0.005, 0.01, 0.03, 0.05, 0.1, 0.3, 0.7, 1.0]
+
+
+def _report_probe(results, usable, cli, summary) -> None:
+    """Per-axis verdict for the range probe: which decade, and does it matter.
+
+    A weight only deserves a grid if moving it across decades moves the error by
+    more than the seeds do on their own. Otherwise the honest conclusion is that
+    this weight is not a useful knob here, and the grid budget belongs elsewhere.
+    """
+    lines = ["", "RANGE PROBE - per-axis verdict:"]
+    for axis, base_other, key, other_key in (
+        ("w_phys", PROBE_BASE_W_BC, "w_phys", "w_bc"),
+        ("w_bc", PROBE_BASE_W_PHYS, "w_bc", "w_phys"),
+    ):
+        rows = [r for r in usable if r[other_key] == base_other]
+        if len(rows) < 2:
+            continue
+        rows.sort(key=lambda r: r[key])
+        vals = [r["val_mae"] for r in rows]
+        span = max(vals) - min(vals)
+        noise = max((r["val_mae_std"] for r in rows), default=0.0)
+        best_row = min(rows, key=lambda r: r["val_mae"])
+        lines.append(f"  {axis} (at {other_key}={base_other}):")
+        lines.append("    " + "  ".join(
+            f"{r[key]:g}->{r['val_mae']:.2f}" for r in rows))
+        lines.append(f"    best {axis}={best_row[key]:g} "
+                     f"(val {best_row['val_mae']:.3f} °C), "
+                     f"span over the decades = {span:.3f} °C")
+        if len(cli.seeds) < 2:
+            lines.append("    seed spread unknown (single seed) - re-run the probe "
+                         "with --seeds 0 1 2 before trusting this.")
+        elif span < noise:
+            lines.append(f"    span is BELOW the seed spread ({noise:.3f} °C): this "
+                         f"weight does not move the error. Skip the grid for it.")
+        else:
+            lines.append(f"    span exceeds the seed spread ({noise:.3f} °C) - worth "
+                         f"a grid, centred on the best decade above.")
+    lines += ["",
+              "Next: run the 5x5 grid only over the decade(s) that mattered, e.g.",
+              "  --w-phys 0.01 0.03 0.05 0.1 0.3  --w-bc 0.01 0.03 0.05 0.1 0.3"]
+    (ART_DIR / "benchmark_wphys_wbc_best.txt").write_text(
+        "\n".join(summary + lines) + "\n")
+    print("\n".join(lines), flush=True)
+
+
+def build_pairs(cli) -> list:
+    """The (w_phys, w_bc) pairs to train.
+
+    Normally the full product of both lists. In probe mode a CROSS instead: each
+    axis is walked through the decades while the other sits at its baseline. That
+    is 2*n-1 points rather than n^2 and answers a different question -- not "which
+    cell is best" but "does this weight move the error at all, and in which
+    decade". Resolving a grid inside a range that turns out to be flat is the
+    expensive way to learn nothing.
+    """
+    if not cli.probe:
+        return [(p, b) for p in cli.w_phys for b in cli.w_bc]
+    base_p, base_b = PROBE_BASE_W_PHYS, PROBE_BASE_W_BC
+    pairs = [(p, base_b) for p in cli.w_phys]
+    pairs += [(base_p, b) for b in cli.w_bc if (base_p, b) not in pairs]
+    return pairs
 
 
 def _w_tag(w_phys: float, w_bc: float) -> str:
@@ -141,7 +225,9 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--history-mode", choices=["raw", "hybrid"], default="hybrid",
                    help="history mode (FIXED)")
     p.add_argument("--rate-lags", nargs="+", type=float, default=[5.0, 20.0],
-                   help="hybrid rate segments in seconds (FIXED initial values, learned)")
+                   help="hybrid rate segments in seconds (FIXED)")
+    p.add_argument("--delta-grid", type=float, default=0.2,
+                   help="anchor lag of the hybrid history in seconds (FIXED)")
     p.add_argument("--time-deriv", choices=["bdf1", "bdf2", "autograd"], default="bdf2",
                    help="time derivative method (FIXED)")
     p.add_argument("--use-static", action="store_true", default=True,
@@ -154,7 +240,13 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--w-bc", type=float, nargs="+", default=None,
                    help="BC weights to sweep (default: 5-point grid)")
     p.add_argument("--extended-grid", action="store_true",
-                   help="use extended 10×10 grid (~28h) instead of default 5×5 (~7h)")
+                   help="10×10 grid instead of the default 5×5. Costs days - read "
+                        "the runtime note in the module docstring first.")
+    p.add_argument("--probe", action="store_true",
+                   help="range probe instead of a grid: a decade-spaced CROSS "
+                        "through the baseline (9 points, not 25). Run this before "
+                        "the 5x5 grid to find out which decade of each weight "
+                        "matters at all - a grid inside a flat range buys nothing.")
     # Batching
     p.add_argument("--batch-data", type=int, default=2048)
     p.add_argument("--batch-phys", type=int, default=256)
@@ -171,7 +263,12 @@ def parse_args() -> argparse.Namespace:
     args = p.parse_args()
     
     # Apply grid defaults
-    if args.extended_grid:
+    if args.probe:
+        if args.w_phys is None:
+            args.w_phys = PROBE_W_PHYS
+        if args.w_bc is None:
+            args.w_bc = PROBE_W_BC
+    elif args.extended_grid:
         if args.w_phys is None:
             args.w_phys = EXTENDED_W_PHYS
         if args.w_bc is None:
@@ -210,8 +307,11 @@ def main() -> None:
     if cli.save_models:
         model_dir.mkdir(parents=True, exist_ok=True)
 
+    pairs_preview = build_pairs(cli)
+    mode = "RANGE PROBE (cross through the baseline)" if cli.probe else "GRID"
     header = [
-        "2D Physics+BC loss-weight benchmark (free-running rollout, NO teacher forcing)",
+        f"Physics+BC loss-weight benchmark - {mode}",
+        "free-running rollout, NO teacher forcing",
         f"train = {'+'.join(cli.ops)}   val (selection) = {cli.val_op}   "
         f"test (report only) = {cli.test_op}",
         "FIXED ARCHITECTURE (for fair comparison):",
@@ -221,25 +321,28 @@ def main() -> None:
         "TRAINING SETTINGS:",
         f"  lr={cli.lr}  epochs={cli.epochs}  dt={dt_s:.1f}s  "
         f"seeds={cli.seeds}  grad_clip={cli.grad_clip}",
-        f"  runs = {len(cli.w_phys)*len(cli.w_bc)} grid points x {len(cli.seeds)} "
-        f"seed(s) = {len(cli.w_phys)*len(cli.w_bc)*len(cli.seeds)} trainings",
+        f"  runs = {len(pairs_preview)} points x {len(cli.seeds)} "
+        f"seed(s) = {len(pairs_preview)*len(cli.seeds)} trainings",
         "LOSS WEIGHTS (SWEPT):",
         f"  w_data=1.0 (fixed)   phys_norm={cli.phys_norm} (adaptive EMA)",
         f"  w_phys sweep = {cli.w_phys}",
         f"  w_bc sweep = {cli.w_bc}",
-        f"Grid size: {len(cli.w_phys)} × {len(cli.w_bc)} = {len(cli.w_phys)*len(cli.w_bc)} points",
+        (f"Probe: w_phys swept at w_bc={PROBE_BASE_W_BC}, "
+         f"w_bc swept at w_phys={PROBE_BASE_W_PHYS}"
+         if cli.probe else
+         f"Grid size: {len(cli.w_phys)} × {len(cli.w_bc)} = "
+         f"{len(cli.w_phys)*len(cli.w_bc)} points"),
         "",
     ]
     print("\n".join(header), flush=True)
 
     results = []
     histories = []  # Store epoch histories for convergence plotting
-    total_points = len(cli.w_phys) * len(cli.w_bc)
+    pairs = build_pairs(cli)
+    total_points = len(pairs)
     start_time_total = time.time()
 
-    for idx, (w_phys, w_bc) in enumerate(
-        [(p, b) for p in cli.w_phys for b in cli.w_bc], start=1
-    ):
+    for idx, (w_phys, w_bc) in enumerate(pairs, start=1):
         print(f"\n{'='*60}")
         print(f"[{idx}/{total_points}] Training w_phys={w_phys}, w_bc={w_bc}"
               f"  ({len(cli.seeds)} seed{'s' if len(cli.seeds) > 1 else ''}: "
@@ -412,6 +515,10 @@ def main() -> None:
         summary.append(f"Checkpoints dir: {model_dir}")
     (ART_DIR / "benchmark_wphys_wbc_best.txt").write_text("\n".join(summary) + "\n")
     print("\n".join(summary[len(header):]), flush=True)
+
+    if cli.probe:
+        _report_probe(results, usable, cli, summary)
+        return
 
     # ---- 2D heatmap ---------------------------------------------------------
     w_phys_vals = sorted(set(r["w_phys"] for r in results))

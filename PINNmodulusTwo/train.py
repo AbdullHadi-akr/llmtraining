@@ -75,6 +75,10 @@ def parse_args() -> argparse.Namespace:
                    default=d.get("history_mode", "raw"))
     p.add_argument("--rate-lags", nargs="+", type=float,
                    default=d.get("rate_lags", [5.0, 25.0]))
+    p.add_argument("--delta-grid", type=float, default=d.get("delta_grid", 0.2),
+                   help="anchor lag of the hybrid history in SECONDS: the block is "
+                        "[T(t-delta_grid), rate_1, ...] and the rate segments "
+                        "cascade back from there. Independent of --subsample.")
     p.add_argument("--width", type=int, default=d.get("layer_size", 128))
     p.add_argument("--depth", type=int, default=d.get("num_layers", 4))
     p.add_argument("--lr", type=float, default=d.get("lr", 2e-3))
@@ -172,10 +176,23 @@ def fit(args):
         if not args.use_forcing:
             op["forcing"] = op["forcing"][:, :0]
     dtn = ops[0]["dtn"]
-    _check_cfl_stability(bundle, dtn * bundle.T_span_ref, device)
+    dt_s = dtn * bundle.T_span_ref
+    _check_cfl_stability(bundle, dt_s, device)
     phys_scale = bundle.phys_scale
     rate_lags_s = [float(v) for v in getattr(args, "rate_lags", [])]
     rate_lags_n = [v / bundle.T_span_ref for v in rate_lags_s]
+    delta_grid_s = float(getattr(args, "delta_grid", 0.0)) or dt_s
+    delta_grid_n = delta_grid_s / bundle.T_span_ref
+    if args.history_mode == "hybrid" and delta_grid_s < dt_s - 1e-9:
+        # The anchor would sit between two samples that the rollout has not
+        # produced yet, so the lookup clamps back to the last available step --
+        # silently making delta_grid behave as if it were dt_s.
+        print(
+            f"  [WARN] --delta-grid {delta_grid_s:g}s is below the data step "
+            f"{dt_s:g}s; the anchor cannot resolve finer than the grid and will "
+            f"effectively act as {dt_s:g}s.",
+            flush=True,
+        )
     print(
         f"OPs={args.ops} n_config={bundle.n_config} n_static={n_static} "
         f"n_forcing={n_forcing} dtn={dtn:.4g} "
@@ -192,7 +209,7 @@ def fit(args):
         k_max=args.k_max, history_mode=args.history_mode, rate_lags=rate_lags_n,
         layer_size=args.width, num_layers=args.depth,
         delta_seconds=1.0, dtn=dtn, t_span_ref=bundle.T_span_ref,
-        rate_scale=bundle.dTdt_scale,
+        rate_scale=bundle.dTdt_scale, delta_grid=delta_grid_n,
         use_autograd_time=(args.time_deriv == "autograd"),
     ).to(device)
     # src_gain / diff_gain correct a ~100x scale gap between the source and the
@@ -216,7 +233,8 @@ def fit(args):
     print(
         f"model params={n_params} k_max={model.k_max} (fixed) "
         f"delta=1.0s = {float(model.delta):.4g} normalised (fixed) "
-        f"gates=all-on history_mode={model.history_mode} rate_lags_s={rate_lags_s} "
+        f"delta_grid={delta_grid_s:g}s gates=all-on "
+        f"history_mode={model.history_mode} rate_lags_s={rate_lags_s} "
         f"width={args.width} depth={args.depth}",
         flush=True,
     )

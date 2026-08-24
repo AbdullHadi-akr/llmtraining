@@ -191,6 +191,7 @@ class RecurrentField(nn.Module):
         dtn: float = 1.0,
         t_span_ref: float = 1.0,
         rate_scale: float = 1.0,
+        delta_grid: float | None = None,
         weight_norm: bool = True,
         beta_init: float = 1.0,
         use_autograd_time: bool = False,
@@ -241,6 +242,14 @@ class RecurrentField(nn.Module):
             "_delta", torch.tensor(float(delta_seconds) / (float(t_span_ref) + 1e-30))
         )
         self.register_buffer("_dtn", torch.tensor(float(dtn)))
+        # Anchor lag of the hybrid history, in NORMALISED time. It used to be
+        # hardwired to the data grid step, which silently tied "how far back is
+        # the anchor" to "how finely is the trajectory sampled" -- two unrelated
+        # questions. Now it is its own knob; None keeps the old coupling.
+        self.register_buffer(
+            "_delta_grid",
+            torch.tensor(float(dtn if delta_grid is None else delta_grid)),
+        )
         self.rate_scale = float(rate_scale)
 
         self.log_src_gain = nn.Parameter(torch.zeros(()))
@@ -248,8 +257,22 @@ class RecurrentField(nn.Module):
 
     @property
     def delta(self) -> torch.Tensor:
-        """History spacing in NORMALISED time. Fixed hyperparameter, not learned."""
+        """Lag of the physics BDF stencil, NORMALISED. Fixed, not learned.
+
+        Distinct from :attr:`delta_grid`: this one only feeds ``history_at`` and
+        therefore the finite-difference time derivative in ``physics.py``.
+        """
         return self._delta
+
+    @property
+    def delta_grid(self) -> torch.Tensor:
+        """Anchor lag of the hybrid history, NORMALISED. Fixed, not learned.
+
+        The hybrid history is ``[T(t-delta_grid), rate_1, rate_2, ...]`` and the
+        rate segments cascade backwards from that same anchor point, so this sets
+        where the whole history block is rooted.
+        """
+        return self._delta_grid
 
     @property
     def rate_lags(self) -> torch.Tensor:
@@ -292,11 +315,12 @@ class RecurrentField(nn.Module):
     ) -> torch.Tensor:
         """Hybrid history: anchor T(t-Δgrid) plus disjoint rate segments.
 
-        rate_lags are CUMULATIVE segment lengths (not absolute boundaries):
-          - rate_lags = [5, 20] with Δgrid=1s gives:
-            - Anchor: T(t-1)
-            - Rate 1: (T(t-1) - T(t-1-5)) / span = (T(t-1) - T(t-6)) / 5
-            - Rate 2: (T(t-6) - T(t-6-20)) / span = (T(t-6) - T(t-26)) / 20
+rate_lags are CUMULATIVE segment lengths (not absolute boundaries), and each
+        segment starts where the previous one ended. With delta_grid=1s and
+        rate_lags=[5, 20]:
+            Anchor: T(t-1)
+            Rate 1: (T(t-1)  - T(t-6))  / 5      <- divided by the SEGMENT LENGTH,
+            Rate 2: (T(t-6)  - T(t-26)) / 20        not by the distance from t
 
         Per-endpoint padding: T(t) := T(0) if t < 0.
 
@@ -313,11 +337,11 @@ class RecurrentField(nn.Module):
         if self.k_max == 0:
             return tn_q.new_zeros((tn_q.shape[0], 0))
 
-        dtn_t = tn_q.new_tensor(float(dtn))
-        T_anchor = self._padded_lookup(Tn_seq, dtn, tn_q - dtn_t, p_idx)
+        dgrid = self._delta_grid.to(tn_q.dtype)
+        T_anchor = self._padded_lookup(Tn_seq, dtn, tn_q - dgrid, p_idx)
 
         rates = []
-        t_boundary = tn_q - dtn_t  # start at t - Δgrid (anchor point)
+        t_boundary = tn_q - dgrid  # start at t - delta_grid (the anchor point)
         for i in range(len(rate_lags)):
             seg_len = rate_lags[i]
             t_next = t_boundary - seg_len  # cumulative: subtract segment length

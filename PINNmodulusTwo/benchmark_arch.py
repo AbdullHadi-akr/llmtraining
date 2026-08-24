@@ -8,24 +8,29 @@ and the history lags stay fixed at values nobody measured. If the weight sweep
 turns out to rank within seed noise, that budget bought nothing; the same hours
 spent here answer questions that were never asked.
 
+Axes: width, depth, lags (the rate segments) and dgrid (the anchor lag of the
+hybrid history -- where the whole history block is rooted).
+
 This benchmark walks one axis at a time rather than a full product grid: the
 point is to find out which knob moves the error at all, not to optimise all of
-them jointly. A joint grid over width x depth x lags is a few hundred trainings;
-one axis at a time is a few dozen and tells you where the leverage is.
+them jointly. A joint grid over all four axes is several hundred trainings; one
+axis at a time is sixteen and tells you where the leverage is.
 
 Everything not on the swept axis is held at the CLI baseline, so every
 configuration is compared against the same reference point.
 
 RUNTIME: one configuration at 60 epochs costs 1.5-2.5 h (see
-benchmark_wphys_wbc.py for why), so the 12-configuration default is 1-1.5 days
-per seed. Use --axes to walk one axis at a time, and read the measured
+benchmark_wphys_wbc.py for why), so the 16-configuration default is 1-1.5 days
+per seed. --epochs 20 thirds that and is usually enough to see which axis moves
+the error. Use --axes to walk one axis at a time, and read the measured
 seconds-per-epoch the training log prints before planning a long run.
 
 Run:
     python3 PINNmodulusTwo/benchmark_arch.py --device cuda --seeds 0 1 2
 
-    # only the history lags, at the weights the loss sweep picked
-    python3 PINNmodulusTwo/benchmark_arch.py --axes lags --w-phys 0.05 --w-bc 0.1
+    # only the history layout, at the weights the loss sweep picked
+    python3 PINNmodulusTwo/benchmark_arch.py --axes lags dgrid \
+        --w-phys 0.05 --w-bc 0.1 --epochs 20
 
 Outputs (in PINNmodulusTwo/artifacts/):
     benchmark_arch.csv       - one row per configuration, mean over seeds + std
@@ -57,6 +62,7 @@ DEFAULT_WIDTHS = [64, 128, 256]
 DEFAULT_DEPTHS = [2, 3, 4, 6]
 # Hybrid history: cumulative segment lengths in seconds. The first entry is the
 # current default, the rest probe shorter and longer memory.
+DEFAULT_DELTA_GRIDS = [0.2, 0.5, 1.0, 2.0]
 DEFAULT_LAG_SETS = [
     [5.0, 20.0],
     [2.0, 10.0],
@@ -90,11 +96,15 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--subsample", type=int, default=2,
                    help="CFL-stable default: 2 -> dt=0.2s")
     # What to sweep
-    p.add_argument("--axes", nargs="+", choices=["width", "depth", "lags"],
-                   default=["width", "depth", "lags"],
+    p.add_argument("--axes", nargs="+",
+                   choices=["width", "depth", "lags", "dgrid"],
+                   default=["width", "depth", "lags", "dgrid"],
                    help="which axes to walk; each is explored against the baseline")
     p.add_argument("--widths", type=int, nargs="+", default=DEFAULT_WIDTHS)
     p.add_argument("--depths", type=int, nargs="+", default=DEFAULT_DEPTHS)
+    p.add_argument("--delta-grids", type=float, nargs="+",
+                   default=DEFAULT_DELTA_GRIDS,
+                   help="anchor lags in seconds to try on the dgrid axis")
     p.add_argument("--seeds", type=int, nargs="+", default=[0],
                    help="one training run per seed per configuration; each "
                         "configuration is scored by the MEAN over seeds")
@@ -103,6 +113,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--depth", type=int, default=4, help="baseline MLP depth")
     p.add_argument("--rate-lags", nargs="+", type=float, default=[5.0, 20.0],
                    help="baseline hybrid rate segments in seconds")
+    p.add_argument("--delta-grid", type=float, default=0.2,
+                   help="baseline anchor lag in seconds")
     p.add_argument("--w-phys", type=float, default=0.05,
                    help="physics weight, FIXED here (sweep it with benchmark_wphys_wbc)")
     p.add_argument("--w-bc", type=float, default=0.1, help="BC weight, FIXED here")
@@ -141,7 +153,9 @@ def build_configs(cli) -> list:
     gives a free read on how much the seeds alone move the same configuration.
     """
     base_lags = list(cli.rate_lags)
-    weights = {"w_phys": float(cli.w_phys), "w_bc": float(cli.w_bc)}
+    base = {"w_phys": float(cli.w_phys), "w_bc": float(cli.w_bc),
+            "delta_grid": float(cli.delta_grid)}
+    weights = base
     configs = []
     if "width" in cli.axes:
         for w in cli.widths:
@@ -158,6 +172,12 @@ def build_configs(cli) -> list:
             configs.append(("lags", _lag_label(lags),
                             {"width": cli.width, "depth": cli.depth,
                              "rate_lags": [float(v) for v in lags], **weights}))
+    if "dgrid" in cli.axes:
+        for dg in cli.delta_grids:
+            ov = {"width": cli.width, "depth": cli.depth,
+                  "rate_lags": base_lags, **weights}
+            ov["delta_grid"] = float(dg)
+            configs.append(("dgrid", f"{float(dg):g}", ov))
     return configs
 
 
@@ -166,6 +186,8 @@ def _is_baseline(row, cli) -> bool:
         return row["label"] == str(cli.width)
     if row["axis"] == "depth":
         return row["label"] == str(cli.depth)
+    if row["axis"] == "dgrid":
+        return row["label"] == f"{float(cli.delta_grid):g}"
     return row["label"] == _lag_label(cli.rate_lags)
 
 
@@ -209,7 +231,8 @@ def main() -> None:
 
         extra = {"axis": axis, "label": label,
                  "width": overrides["width"], "depth": overrides["depth"],
-                 "lags_s": _lag_label(overrides["rate_lags"])}
+                 "lags_s": _lag_label(overrides["rate_lags"]),
+                 "dgrid_s": float(overrides["delta_grid"])}
 
         per_seed = []
         for seed in cli.seeds:
@@ -245,13 +268,14 @@ def main() -> None:
 
     # ---- CSV ----------------------------------------------------------------
     csv_lines = [
-        "axis,label,width,depth,lags_s,n_params,L_data,L_phys,L_bc,"
+        "axis,label,width,depth,lags_s,dgrid_s,n_params,L_data,L_phys,L_bc,"
         "MAE_in_C,MAE_val_C,MAE_val_std_C,MAE_test_C,MAE_test_std_C,"
         "n_seeds,n_seeds_ok,src_gain,diff_gain,train_time_min"
     ]
     for r in results:
         csv_lines.append(
             f"{r['axis']},{r['label']},{r['width']},{r['depth']},\"{r['lags_s']}\","
+            f"{r['dgrid_s']:g},"
             f"{r['n_params']},{r['L_data']:.6f},{r['L_phys']:.6f},{r['L_bc']:.6f},"
             f"{r['intime_mae']:.4f},{r['val_mae']:.4f},{r['val_mae_std']:.4f},"
             f"{r['test_mae']:.4f},{r['test_mae_std']:.4f},"

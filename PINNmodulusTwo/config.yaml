@@ -20,6 +20,10 @@ num_layers: 4
 k_max: 4
 history_mode: raw          # raw | hybrid
 rate_lags: [5.0, 25.0]     # seconds, hybrid history mode only
+# Anchor lag of the hybrid history in seconds: the block is
+# [T(t-delta_grid), rate_1, ...] and the rate segments cascade back from
+# there. Independent of subsample_time - do not confuse the two.
+delta_grid: 0.2
 time_deriv: bdf2           # bdf1 | bdf2 | autograd
 use_static: false
 use_forcing: false
