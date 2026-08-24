@@ -9,9 +9,23 @@ Split of responsibilities (the Notion "~50:50 Modulus:PyTorch" method #2):
         - a per-layer *learnable swish*  ``x * sigmoid(beta * x)``  (beta learned per
             layer, exactly as described in the Notion page),
     - the temperature *history* channels  ``T_{t-delta}, ..., T_{t-k delta}``,
-    - a **learnable delta** (history spacing) via differentiable time
-      interpolation, and a soft **variable-k** gate so the model can switch lags
-      on/off instead of us hard-coding how many are useful.
+    - differentiable time interpolation of that history, so a history value can be
+      read at any time between two grid points.
+
+What is learned and what is not
+-------------------------------
+Deliberately fixed (configured once, never trained):
+
+* ``delta``  -- history spacing, a registered buffer, NOT a parameter.
+* ``k_max``  -- number of history channels. In hybrid mode it follows directly
+  from the number of ``rate_lags`` (k_max = 1 anchor + one channel per lag).
+* ``gates()`` -- returns all-ones. There is no soft lag gating: every history
+  channel is always fully on. The method is kept so logging and checkpoints keep
+  a stable shape.
+
+Learned: the MLP weights, the per-layer swish ``beta``, the physics gains
+``src_gain``/``diff_gain``, and (in hybrid mode) the ``rate_lags`` segment
+lengths.
 """
 
 from __future__ import annotations
@@ -129,14 +143,17 @@ def interp_history(
     Args:
         Tn_seq: (n_t, n_points) normalised temperature sequence for ONE OP.
         dtn: uniform spacing of the normalised time grid.
-        tq: (B,) query times in normalised units (may depend on a learnable delta).
+        tq: (B,) query times in normalised units (in hybrid mode these depend on
+            the learned rate_lags; delta itself is fixed).
         p_idx: (B,) point index for each query (history is per grid point).
 
     Returns:
         (B,) interpolated normalised temperature at ``(tq, p_idx)``.
 
     The bracketing indices are detached (non-differentiable), but the linear blend
-    weight is a smooth function of ``tq`` -- hence gradients flow into ``delta``.
+    weight is a smooth function of ``tq``, so gradients reach whatever produced
+    ``tq``. With ``delta`` fixed that matters only in hybrid mode, where the
+    learned ``rate_lags`` enter the query time.
     """
     n_t = Tn_seq.shape[0]
     pos = torch.clamp(tq / dtn, min=0.0, max=float(n_t - 1))
@@ -161,9 +178,11 @@ class RecurrentField(nn.Module):
     * ``config``  -- the (possibly time-varying) operating-point features.
     * ``history`` -- history channels built in either raw or hybrid mode.
 
-    History is read through the differentiable :func:`interp_history` so that
-    ``delta`` is learnable in raw mode. The history is ALWAYS the model's own
-    past predictions (never a ground-truth teacher signal): training feeds the
+    History is read through the differentiable :func:`interp_history`, which lets a
+    lag land between two grid points. ``delta`` and ``k_max`` are fixed
+    hyperparameters and ``gates()`` is all-ones -- see the module docstring for
+    the full list of what is learned. The history is ALWAYS the model's own past
+    predictions (never a ground-truth teacher signal): training feeds the
     free-running rollout buffer back in.
     """
 
@@ -188,6 +207,9 @@ class RecurrentField(nn.Module):
         super().__init__()
         self.history_mode = history_mode
         self._n_lags = len(rate_lags)
+        # In hybrid mode the channel count follows from the history layout itself
+        # (1 anchor + one rate per lag), so the ``k_max`` argument does not apply
+        # there -- callers passing one get it overridden on purpose.
         self.k_max = 1 + self._n_lags if history_mode == "hybrid" else k_max
         
         # Learnable rate_lags: store raw values, use softplus to ensure positive.
@@ -231,11 +253,10 @@ class RecurrentField(nn.Module):
 
         self.log_src_gain = nn.Parameter(torch.zeros(()))
         self.log_diff_gain = nn.Parameter(torch.zeros(()))
-        self.raw_cool = nn.Parameter(torch.tensor(-2.0))
-        self.amb = nn.Parameter(torch.zeros(()))
 
     @property
     def delta(self) -> torch.Tensor:
+        """History spacing in NORMALISED time. Fixed hyperparameter, not learned."""
         return self._delta
 
     @property
@@ -251,11 +272,12 @@ class RecurrentField(nn.Module):
     def diff_gain(self) -> torch.Tensor:
         return torch.exp(self.log_diff_gain)
 
-    @property
-    def cool(self) -> torch.Tensor:
-        return F.softplus(self.raw_cool)
-
     def gates(self) -> torch.Tensor:
+        """All-ones: every history channel is always on. There is no lag gating.
+
+        Kept as a method (rather than dropped) so the training log, ``metrics.txt``
+        and the benchmark checkpoints keep a stable, k_max-shaped field.
+        """
         return torch.ones(self.k_max, dtype=self._delta.dtype, device=self._delta.device)
 
     def _padded_lookup(
@@ -421,7 +443,8 @@ def rollout_train(
     The buffer is seeded with the measured IC and every step reads history from the
     model's OWN earlier predictions. History values are detached between steps
     (truncated BPTT): each step's gradient flows through its own field evaluation
-    and through the learnable ``delta``/gates, keeping memory bounded.
+    only, keeping memory bounded. ``delta`` and the gates are fixed, so no
+    gradient runs along the time axis through them.
     """
     n_t, P = tn.shape[0], xn.shape[0]
     p_idx = torch.arange(P, device=xn.device)

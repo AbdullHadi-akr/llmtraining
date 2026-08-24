@@ -21,7 +21,6 @@ k_max: 4
 history_mode: raw          # raw | hybrid
 rate_lags: [5.0, 25.0]     # seconds, hybrid history mode only
 time_deriv: bdf2           # bdf1 | bdf2 | autograd
-delta_init_steps: 1.0
 use_static: false
 use_forcing: false
 

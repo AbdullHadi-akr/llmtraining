@@ -22,7 +22,11 @@ is deliberately out of scope. Trains on **OP01, OP02, OP03**.
   anisotropic Fourier tensor, and a per-timestep **config feature block** that
   already supports time-varying **profiles** (constant for OP01-03).
 - `model.py` — `LearnableSwish`, `ModulusMLP` (Modulus `FCLayer`s), and
-  `RecurrentField` (recurrence with learnable `δ` and lag gates).
+  `RecurrentField`. The recurrence is deliberately **not** adaptive: `δ` (history
+  spacing) and `k` (number of lags) are fixed hyperparameters and every lag gate
+  is permanently on. Learned are the MLP weights, the per-layer swish `β`, the
+  physics gains `src_gain`/`diff_gain`, and — in `hybrid` history mode — the
+  `rate_lags` segment lengths.
 - `physics.py` — nondimensional anisotropic heat residual; space via autograd,
   time via the finite-difference `(T(t) − T(t−δ))/δ` over the recurrence.
 - `train.py` — training loop on OP01/02/03 + evaluation, plots, metrics.

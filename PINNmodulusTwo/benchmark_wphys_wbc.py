@@ -162,7 +162,7 @@ def _make_args(cli: argparse.Namespace, w_phys: float, w_bc: float) -> Namespace
         width=cli.width, depth=cli.depth, lr=cli.lr,
         w_data=1.0, w_phys=float(w_phys), w_bc=float(w_bc),
         batch_data=cli.batch_data, batch_phys=cli.batch_phys,
-        batch_bc=cli.batch_bc, delta_init_steps=1.0,
+        batch_bc=cli.batch_bc,
         weight_decay=cli.weight_decay, grad_clip=cli.grad_clip,
         early_stopping_patience=cli.early_stopping_patience,
         phys_norm=cli.phys_norm,

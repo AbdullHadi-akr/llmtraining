@@ -101,7 +101,6 @@ def _make_args(cli, w_phys: float) -> Args:
     args.batch_data = cli.batch_data
     args.batch_phys = cli.batch_phys
     args.batch_bc = cli.batch_bc
-    args.delta_init_steps = 1.0
     args.weight_decay = 0.0
     args.grad_clip = cli.grad_clip
     args.early_stopping_patience = 0

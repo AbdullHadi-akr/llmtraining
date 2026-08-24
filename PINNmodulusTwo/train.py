@@ -3,7 +3,9 @@
 
 Temperature only (bc_V is intentionally out of scope). The model uses a Modulus
 ``FCLayer`` MLP with a per-layer learnable swish, wrapped in a PyTorch recurrence
-whose history spacing ``delta`` and per-lag gates (variable ``k``) are learned.
+whose history spacing ``delta`` and lag count ``k`` are FIXED hyperparameters --
+they are configured, not learned. See ``model.RecurrentField`` for what the
+recurrence does and does not learn.
 
 Run (the device defaults to ``auto`` = CUDA when a GPU is available):
     source .venv/bin/activate
@@ -90,7 +92,6 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--batch-data", type=int, default=d.get("batch_data", 2048))
     p.add_argument("--batch-phys", type=int, default=d.get("batch_phys", 256))
     p.add_argument("--batch-bc", type=int, default=d.get("batch_bc", 128))
-    p.add_argument("--delta-init-steps", type=float, default=d.get("delta_init_steps", 1.0))
     p.add_argument("--use-static", action="store_true", default=d.get("use_static", False))
     p.add_argument("--use-forcing", action="store_true", default=d.get("use_forcing", False))
     p.add_argument("--seed", type=int, default=d.get("seed", 0))
@@ -196,8 +197,9 @@ def fit(args):
     )
     n_params = sum(p.numel() for p in model.parameters())
     print(
-        f"model params={n_params} k_max={model.k_max} delta=1.0s (fixed) "
-        f"history_mode={model.history_mode} rate_lags_s={rate_lags_s} "
+        f"model params={n_params} k_max={model.k_max} (fixed) "
+        f"delta=1.0s = {float(model.delta):.4g} normalised (fixed) "
+        f"gates=all-on history_mode={model.history_mode} rate_lags_s={rate_lags_s} "
         f"width={args.width} depth={args.depth}",
         flush=True,
     )
