@@ -62,11 +62,14 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--k-max", type=int, default=d.get("k_max", 2))
     p.add_argument("--history-mode", default=d.get("history_mode", "hybrid"))
     p.add_argument("--rate-lags", nargs="+", type=float, default=d.get("rate_lags", [5.0, 20.0]))
+    p.add_argument("--delta-grid", type=float, default=d.get("delta_grid", 0.2),
+                   help="anchor lag of the hybrid history in seconds")
     p.add_argument("--time-deriv", default=d.get("time_deriv", "bdf2"))
     p.add_argument("--lr", type=float, default=d.get("lr", 0.002))
     p.add_argument("--w-phys", type=float, nargs="+", default=[0.0, 0.1])
     p.add_argument("--w-bc", type=float, default=d.get("w_bc", 0.1))
     p.add_argument("--grad-clip", type=float, default=d.get("grad_clip", 1.0))
+    p.add_argument("--gain-lr-mult", type=float, default=d.get("gain_lr_mult", 25.0))
     p.add_argument("--batch-data", type=int, default=d.get("batch_data", 1024))
     p.add_argument("--batch-phys", type=int, default=d.get("batch_phys", 128))
     p.add_argument("--batch-bc", type=int, default=d.get("batch_bc", 64))
@@ -91,6 +94,11 @@ def _make_args(cli, w_phys: float) -> Args:
     args.k_max = cli.k_max
     args.history_mode = cli.history_mode
     args.rate_lags = cli.rate_lags
+    # fit() liest beide nur via getattr. Ohne diese Zeilen faellt delta_grid
+    # still auf den Datenschritt zurueck statt auf den konfigurierten Wert --
+    # bei subsample=2 zufaellig identisch, bei jedem anderen Wert nicht.
+    args.delta_grid = cli.delta_grid
+    args.gain_lr_mult = cli.gain_lr_mult
     args.time_deriv = cli.time_deriv
     args.width = cli.width
     args.depth = cli.depth
