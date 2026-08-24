@@ -11,7 +11,7 @@ is deliberately out of scope. Trains on **OP01, OP02, OP03**.
 |---|---|
 | `modulus.models.module.Module` base (save/load, device, meta) | Learnable swish `x·sigmoid(β·x)`, one **β per layer** |
 | `modulus.models.layers.FCLayer` (weight-norm linear blocks) | Recurrence: raw history or hybrid history (`T(t-Δgrid)` + rate segments) |
-| MLP function approximator for the field | **Learnable δ** via differentiable time interpolation |
+| MLP function approximator for the field | Differentiable time interpolation, so a lag may land between two grid points |
 | — | **Raw** or **hybrid** history mode via config/CLI |
 | — | Physics: autograd Hessian in space + **finite-difference in time** (`bdf1`/`bdf2`) or `autograd` |
 
@@ -30,6 +30,12 @@ is deliberately out of scope. Trains on **OP01, OP02, OP03**.
 - `physics.py` — nondimensional anisotropic heat residual; space via autograd,
   time via the finite-difference `(T(t) − T(t−δ))/δ` over the recurrence.
 - `train.py` — training loop on OP01/02/03 + evaluation, plots, metrics.
+- `bench_common.py` — shared benchmark machinery: per-seed training, mean/std
+  aggregation over seeds, the val/test split, and the seed-noise verdict. A
+  benchmark only describes its own sweep axis.
+- `benchmark_wphys_wbc.py` — 2D sweep of the loss weights `w_phys` x `w_bc`.
+- `benchmark_arch.py` — width, depth and history lags, one axis at a time.
+- `smallBench.py` — 2-5 minute smoke test; run it before any long sweep.
 - `config.yaml` — hyperparameters (CLI overrides available).
 
 ## Why recurrence (profiles)
@@ -39,17 +45,21 @@ same instantaneous config at some time `t` yet have very different temperatures
 because their *history* differed. Feeding the temperature history disambiguates
 these cases — this is the whole reason method #2 needs recurrence.
 
-`k` (how many history points) and `δ` (their spacing) are **learned** in the
-raw history mode: `δ` is a positive `softplus` parameter used through a
-differentiable interpolation of the history, and each lag has a sigmoid gate so
-unused lags fade to zero weight (effective, learned `k`).
+`k` (how many history points) and `δ` (their spacing) are **fixed
+hyperparameters**, not learned — as are the `rate_lags` in hybrid mode and the
+lag gates, which are permanently on. The history layout is configured once and
+stays put; only the network and the two physics gains train. Sweep the layout
+with `benchmark_arch.py` rather than expecting the model to find it.
 
 Hybrid history keeps the same raw interpolation for the physics residual, but
 feeds the network a more compact feature block:
 
 - `T(t-Δgrid)` as an absolute anchor.
-- Two rate channels from `rate_lags` (default `5 s` and `25 s`) computed with
-  per-endpoint padding and actual elapsed span.
+- One rate channel per entry in `rate_lags` (`5 s` and `20 s` in the benchmarks),
+  computed with per-endpoint padding and divided by the **nominal** segment
+  length. Dividing by the clamped elapsed span instead is a singularity: early in
+  the rollout that span collapses to one grid step and the rate explodes, which
+  is what made every sweep point diverge to NaN.
 
 Set `history_mode: raw` if you want the original lag stack, or `history_mode:
 hybrid` if you want the anchor + rates layout.

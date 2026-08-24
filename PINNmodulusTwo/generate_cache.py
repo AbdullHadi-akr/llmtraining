@@ -1,5 +1,13 @@
 #!/usr/bin/env python3
-"""Generate .npz cache files for OP05 and OP07 for PINNmodulusTwo."""
+"""Build the .npz OP bundles PINNmodulusTwo trains on.
+
+Usage:
+    python3 PINNmodulusTwo/generate_cache.py            # OP05 OP06 OP07
+    python3 PINNmodulusTwo/generate_cache.py OP08 OP09  # specific OPs
+
+Writes to the top-level ``data_cache/``. The raw-CSV assembly still comes from
+the legacy workflow -- this is the only place the active code depends on it.
+"""
 
 import dataclasses
 import sys
@@ -56,7 +64,9 @@ def generate_cache_for_ops(op_ids):
             traceback.print_exc()
 
 if __name__ == "__main__":
-    ops_to_process = ["OP05", "OP06", "OP07"]
+    # OP ids on the command line, e.g.:
+    #   python3 PINNmodulusTwo/generate_cache.py OP08
+    ops_to_process = sys.argv[1:] or ["OP05", "OP06", "OP07"]
     print(f"Generating .npz cache files for: {ops_to_process}")
     generate_cache_for_ops(ops_to_process)
-    print("\n✓ Done! Cache files created in PINNmodulusTwo/data_cache/")
+    print(f"\n✓ Done! Cache files created in {_PROJECT_ROOT / 'data_cache'}")

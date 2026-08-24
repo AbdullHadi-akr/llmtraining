@@ -495,7 +495,74 @@ Danach:
 
 ---
 
-## 8. Ergebnisse zurückholen
+## 8. Architektur-Benchmark (Breite, Tiefe, Lags)
+
+Der Gewichte-Sweep aus Schritt 7 kostet Stunden für zwei Zahlen, während Breite,
+Tiefe und die History-Lags auf ungemessenen Werten festliegen. Dieser Benchmark
+misst genau die.
+
+Er läuft **eine Achse nach der anderen** gegen eine gemeinsame Baseline, statt
+ein volles Produktgitter aufzuspannen: die Frage ist, welcher Regler den Fehler
+überhaupt bewegt, nicht deren gemeinsames Optimum. `width x depth x lags` wären
+mehrere hundert Trainings, achsenweise sind es zwölf.
+
+```bash
+cd ~/llmtraining
+source .venv/bin/activate
+
+# alle drei Achsen, drei Seeds
+nohup python3 PINNmodulusTwo/benchmark_arch.py --device cuda --seeds 0 1 2 \
+  > benchmark_arch.log 2>&1 &
+
+# nur die Lags, bei den Gewichten aus Schritt 7
+python3 PINNmodulusTwo/benchmark_arch.py --axes lags --w-phys 0.05 --w-bc 0.1 \
+  --seeds 0 1 2 --device cuda
+```
+
+| Achse | Werte | Konfigurationen |
+|---|---|---|
+| `width` | 64, 128, 256 | 3 |
+| `depth` | 2, 3, 4, 6 | 4 |
+| `lags` | 5+20, 2+10, 10+60, 5+20+60, 30 | 5 |
+| | **gesamt** | **12** |
+
+Die Baseline (`--width 128 --depth 4 --rate-lags 5 20`) taucht in jeder Achse
+einmal auf. Das ist Absicht: jede Achse braucht ihren eigenen Bezugspunkt, und
+dieselbe Konfiguration dreimal zu trainieren zeigt nebenbei, wie weit die Seeds
+allein streuen.
+
+### 8.1 Outputs
+
+```
+PINNmodulusTwo/artifacts/benchmark_arch.csv       -> eine Zeile pro Konfiguration
+PINNmodulusTwo/artifacts/benchmark_arch.png       -> ein Panel je Achse, Fehlerbalken = Seed-Streuung
+PINNmodulusTwo/artifacts/benchmark_arch_best.txt  -> Ranking, Baseline-Vergleich, Rausch-Verdikt
+```
+
+`benchmark_arch_best.txt` enthält den entscheidenden Abschnitt **"Span per
+axis"**: die Spannweite der Validierungs-MAE über jede Achse. Liegt sie unter der
+Seed-Streuung, steht dort *"this knob does not matter here"* — dann lohnt es
+nicht, diesen Regler weiter zu drehen.
+
+### 8.2 Laufzeit
+
+Referenz: ~2,9 min pro Training (60 Epochen, 6 Trainings-OPs, `--subsample 2`,
+RTX 5090 Laptop) aus dem Log von Schritt 7.
+
+| Umfang | Trainings | Laufzeit |
+|---|---|---|
+| alle Achsen, 1 Seed | 12 | ~35 min |
+| alle Achsen, 3 Seeds | 36 | **~1,8 h** |
+| nur `lags`, 3 Seeds | 15 | ~45 min |
+| nur `width`, 3 Seeds | 9 | ~26 min |
+
+> Die Werte gelten für `width=128`. Breitere Netze kosten mehr pro Schritt, aber
+> der Rollout ist latenzgebunden (~7000 sequentielle Zeitschritte), nicht
+> rechengebunden — `width=256` skaliert daher deutlich schwächer als die
+> vierfache FLOP-Zahl vermuten lässt. Die echte Zahl steht nach zwei
+> Konfigurationen in der `ETA`-Zeile des Logs.
+
+## 9. Ergebnisse zurückholen
 
 ```bash
 rsync -avz user@gpu-server:~/llmtraining/PINNmodulusTwo/artifacts/ ./artifacts/
@@ -520,7 +587,7 @@ dem Server gebraucht.
 
 ---
 
-## 9. Troubleshooting
+## 10. Troubleshooting
 
 | Symptom | Ursache / Abhilfe |
 |---|---|
