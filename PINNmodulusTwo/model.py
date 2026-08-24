@@ -16,6 +16,7 @@ Split of responsibilities (the Notion "~50:50 Modulus:PyTorch" method #2):
 
 from __future__ import annotations
 
+import math
 from typing import Sequence
 
 import torch
@@ -111,6 +112,12 @@ class ModulusMLP(Module):
         return [float(layer.activation_fn.beta.detach()) for layer in self.hidden]
 
 
+def _inv_softplus(y: float, floor: float = 1e-7) -> float:
+    """Inverse of ``softplus``: return ``x`` with ``softplus(x) == y``."""
+    y = max(float(y), floor)
+    return float(math.log(math.expm1(y)))
+
+
 def interp_history(
     Tn_seq: torch.Tensor,
     dtn: float,
@@ -172,6 +179,8 @@ class RecurrentField(nn.Module):
         num_layers: int = 4,
         delta_seconds: float = 1.0,
         dtn: float = 1.0,
+        t_span_ref: float = 1.0,
+        rate_scale: float = 1.0,
         weight_norm: bool = True,
         beta_init: float = 1.0,
         use_autograd_time: bool = False,
@@ -181,9 +190,13 @@ class RecurrentField(nn.Module):
         self._n_lags = len(rate_lags)
         self.k_max = 1 + self._n_lags if history_mode == "hybrid" else k_max
         
-        # Learnable rate_lags: store raw values, use softplus to ensure positive
-        # Initialize so that softplus(raw) ≈ desired lag values
-        raw_lags = [float(lag) for lag in rate_lags]  # softplus(x) ≈ x for x > 3
+        # Learnable rate_lags: store raw values, use softplus to ensure positive.
+        # ``rate_lags`` arrive in NORMALISED time, so they are tiny (5 s over a
+        # ~1500 s span is 3.4e-3) and the ``softplus(x) ≈ x`` shortcut does not
+        # hold anywhere near there -- softplus(3.4e-3) = 0.695, i.e. a 200x
+        # longer lag than requested. Invert softplus exactly instead:
+        #   raw = log(exp(lag) - 1) = log(expm1(lag))  ->  softplus(raw) == lag.
+        raw_lags = [_inv_softplus(float(lag)) for lag in rate_lags]
         self._raw_rate_lags = nn.Parameter(torch.tensor(raw_lags))
         self.n_config = n_config
         self.n_static = n_static
@@ -204,7 +217,17 @@ class RecurrentField(nn.Module):
         else:
             self.mlp_with_time = None
 
-        self.register_buffer("_delta", torch.tensor(float(delta_seconds)))
+        # ``_delta`` is consumed as NORMALISED time everywhere (history_at,
+        # heat_residual, and benchmark readback via delta * T_span_ref), so the
+        # seconds value has to be normalised on the way in. Storing the raw 1.0
+        # meant "one whole trajectory" (~1474 s) instead of one second: every
+        # BDF stencil then read the initial condition and divided by a step
+        # ~1500x too large, which silently invalidated L_phys.
+        self.register_buffer(
+            "_delta", torch.tensor(float(delta_seconds) / (float(t_span_ref) + 1e-30))
+        )
+        self.register_buffer("_dtn", torch.tensor(float(dtn)))
+        self.rate_scale = float(rate_scale)
 
         self.log_src_gain = nn.Parameter(torch.zeros(()))
         self.log_diff_gain = nn.Parameter(torch.zeros(()))
@@ -262,7 +285,16 @@ class RecurrentField(nn.Module):
             - Rate 2: (T(t-6) - T(t-6-20)) / span = (T(t-6) - T(t-26)) / 20
 
         Per-endpoint padding: T(t) := T(0) if t < 0.
-        Effective span: uses actual elapsed time after padding (not nominal).
+
+        The rate is divided by the NOMINAL segment length, never by the clamped
+        elapsed span. Dividing by the clamped span looks more "honest" early in
+        the rollout, but it is a singularity: at step 2 the clamped span is one
+        grid step (dtn = 1.4e-4 normalised at Δt = 0.2 s), so the one-step
+        prediction difference gets amplified ~7000x, fed back into the net, and
+        the rollout diverges to inf -> nan within a handful of steps. Using the
+        nominal length instead spreads a partially-filled window over its full
+        segment, which damps the rate towards 0 exactly where the history is
+        unknown and converges to the true rate once the window has filled.
         """
         if self.k_max == 0:
             return tn_q.new_zeros((tn_q.shape[0], 0))
@@ -279,12 +311,14 @@ class RecurrentField(nn.Module):
             T_end = self._padded_lookup(Tn_seq, dtn, t_boundary, p_idx)
             T_start = self._padded_lookup(Tn_seq, dtn, t_next, p_idx)
 
-            # Effective span after per-endpoint padding
-            t_end_actual = torch.clamp(t_boundary, min=0.0)
-            t_start_actual = torch.clamp(t_next, min=0.0)
-            actual_span = t_end_actual - t_start_actual
+            # Nominal segment length, floored at one grid step so the divisor can
+            # never collapse (softplus keeps seg_len > 0, but a learned lag may
+            # still drift below the time resolution we can actually resolve).
+            span = torch.clamp(seg_len, min=float(dtn))
 
-            rate = (T_end - T_start) / (actual_span + 1e-8)
+            # Normalised d T / d t: rate_scale keeps this channel O(1) so it sits
+            # on the same scale as the z-scored anchor channel next to it.
+            rate = (T_end - T_start) / (span * self.rate_scale)
             rates.append(rate)
             t_boundary = t_next  # next segment starts here
 

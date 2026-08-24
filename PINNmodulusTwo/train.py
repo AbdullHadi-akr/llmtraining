@@ -163,7 +163,8 @@ def fit(args):
         n_config=bundle.n_config, n_static=n_static, n_forcing=n_forcing,
         k_max=args.k_max, history_mode=args.history_mode, rate_lags=rate_lags_n,
         layer_size=args.width, num_layers=args.depth,
-        delta_seconds=1.0, dtn=dtn,
+        delta_seconds=1.0, dtn=dtn, t_span_ref=bundle.T_span_ref,
+        rate_scale=bundle.dTdt_scale,
         use_autograd_time=(args.time_deriv == "autograd"),
     ).to(device)
     opt = torch.optim.Adam(
@@ -233,20 +234,46 @@ def fit(args):
             L_bc = torch.mean(bc_res ** 2)
 
             # Balance L_phys and L_bc onto the data scale so weights are fair 0-1 knobs.
+            # A single non-finite sample would otherwise pin the EMA at nan for the
+            # rest of the run (0.9 * nan == nan), so only finite values update it.
             if phys_norm > 0.0:
                 phys_den = phys_norm
             else:
                 cur = float(L_phys.detach())
-                phys_ema = cur if phys_ema is None else 0.9 * phys_ema + 0.1 * cur
-                phys_den = phys_ema
+                if np.isfinite(cur):
+                    phys_ema = cur if phys_ema is None else 0.9 * phys_ema + 0.1 * cur
+                phys_den = phys_ema if phys_ema is not None else 1.0
             L_phys_bal = L_phys / (phys_den + 1e-8)
 
             # BC balancing similar to physics
             bc_cur = float(L_bc.detach())
-            bc_ema = bc_cur if bc_ema is None else 0.9 * bc_ema + 0.1 * bc_cur
-            L_bc_bal = L_bc / (bc_ema + 1e-8)
+            if np.isfinite(bc_cur):
+                bc_ema = bc_cur if bc_ema is None else 0.9 * bc_ema + 0.1 * bc_cur
+            L_bc_bal = L_bc / ((bc_ema if bc_ema is not None else 1.0) + 1e-8)
 
-            loss = args.w_data * L_data + args.w_phys * L_phys_bal + args.w_bc * L_bc_bal
+            # Only add terms that are actually switched on: ``0.0 * nan`` is nan,
+            # so a zero weight does NOT neutralise a non-finite term -- it would
+            # poison the whole loss, the gradients, and every later epoch. This is
+            # what made even the w_phys=0, w_bc=0 sweep point report L_data=nan.
+            loss = args.w_data * L_data
+            if args.w_phys != 0.0:
+                loss = loss + args.w_phys * L_phys_bal
+            if args.w_bc != 0.0:
+                loss = loss + args.w_bc * L_bc_bal
+
+            # Never let a non-finite loss reach the optimiser: clip_grad_norm_ does
+            # not rescue it (total_norm=nan -> clip_coef=nan -> all grads nan), so
+            # one bad step would permanently destroy the weights.
+            if not torch.isfinite(loss):
+                bad = [n for n, v in (("L_data", L_data), ("L_phys", L_phys),
+                                      ("L_bc", L_bc)) if not torch.isfinite(v)]
+                print(
+                    f"  [ABORT] epoch {epoch}, {op['op_id']}: non-finite loss; "
+                    f"first offending term(s): {', '.join(bad) or 'weighted sum'}",
+                    flush=True,
+                )
+                ep_data = float("nan")
+                break
 
             opt.zero_grad()
             loss.backward()
@@ -265,8 +292,10 @@ def fit(args):
         # Early NaN/inf detection - abort before wasting epochs
         if not np.isfinite(ep_data) or not np.isfinite(ep_phys):
             print(f"  [ABORT] epoch {epoch}: loss exploded (L_data={ep_data:.4g}, L_phys={ep_phys:.4g})")
-            print("  Possible causes: CFL violation (Δt too large), unstable IC, or bad hyperparams")
-            print("  Try: --subsample 2 (for CFL-stable Δt=0.2s) or --grad-clip 1.0")
+            print("  L_data non-finite means the free-running rollout diverged; check the")
+            print("  history channels feeding back into the net (--history-mode raw isolates it).")
+            print("  L_phys non-finite alone points at the residual: --time-deriv bdf1 or --w-phys 0.")
+            print("  Also worth trying: --grad-clip 1.0, a lower --lr, or a larger --subsample.")
             break
 
         # Compute balanced losses for fair logging (all ~O(1) when stable)

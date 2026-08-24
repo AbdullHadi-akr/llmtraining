@@ -287,6 +287,8 @@ def main() -> None:
                         "num_layers": args.depth,
                         "delta_seconds": 1.0,
                         "dtn": float(_dtn),
+                        "t_span_ref": float(bundle.T_span_ref),
+                        "rate_scale": float(bundle.dTdt_scale),
                         "use_autograd_time": (args.time_deriv == "autograd"),
                     },
                     "bundle_stats": {
@@ -374,6 +376,8 @@ def main() -> None:
                     "num_layers": args_best.depth,
                     "delta_seconds": 1.0,
                     "dtn": float(dtn_best),
+                    "t_span_ref": float(bundle_best.T_span_ref),
+                    "rate_scale": float(bundle_best.dTdt_scale),
                     "use_autograd_time": (args_best.time_deriv == "autograd"),
                 },
                 "bundle_stats": {
