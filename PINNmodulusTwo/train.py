@@ -332,7 +332,8 @@ def evaluate(model, bundle, ops, dtn, device, history) -> None:
     lines = ["Approach-2 recurrent Modulus PINN (temperature only)\n"]
     lines.append("evaluation = FREE-RUNNING ROLLOUT (no teacher forcing)\n")
     lines.append(f"history_mode(final) = {model.history_mode}\n")
-    lines.append(f"rate_lags(final, s) = {np.round(np.array(model.rate_lags) * bundle.T_span_ref, 3).tolist()}\n")
+    rate_lags_final = model.rate_lags.detach().cpu().numpy() * bundle.T_span_ref
+    lines.append(f"rate_lags(final, s) = {np.round(rate_lags_final, 3).tolist()}\n")
     lines.append(f"delta(final) = {float(model.delta):.5g} (normalised time)\n")
     lines.append(f"src_gain(final)  = {float(model.src_gain):.4g}\n")
     lines.append(f"diff_gain(final) = {float(model.diff_gain):.4g}\n")
