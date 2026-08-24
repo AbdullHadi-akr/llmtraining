@@ -16,7 +16,7 @@ Fixed hyperparameters (override on CLI if desired):
   deviation, so a difference between points can be read against the spread
   the initialisation alone produces. Runtime scales linearly with the seed
   count: 100 points x 3 seeds = 300 trainings.
-- data: train=OP01-OP06, val=OP07 (selection), test=OP08 (report only),
+- data: train=OP01-OP05, val=OP06 (selection), test=OP07 (report only),
   subsample=2 (CFL-stable Δt=0.2s)
 - loss weights: w_data=1.0 (fixed), w_phys and w_bc swept
 
@@ -26,17 +26,21 @@ Default sweep grid:
 - Total: 100 combinations
 - Quasi-log spacing samples densely in promising region (0.01-0.3)
 
-Run (CPU, in WSL):
-    cd /mnt/c/Users/M0245635/batterysurrogatemodell
-    source modulus_env/bin/activate
-    python3 PINNmodulusTwo/benchmark_wphys_wbc.py
+Run:
+    source .venv/bin/activate
+    python3 PINNmodulusTwo/benchmark_wphys_wbc.py --extended-grid --device cuda
 
-⚠️  WARNING: Expected runtime with default settings (OP01-OP06 train, 60 epochs, CPU):
-    ~17 minutes per sweep point × 100 points = ~28 HOURS total!
-    
-For faster testing:
-    --epochs 30 → ~14 hours
-    --w-phys 0.0 0.01 0.05 0.1 0.3 --w-bc 0.0 0.01 0.05 0.1 0.3 → 25 points, ~7 hours
+Runtime, measured at ~2.9 min per training (60 epochs, 5 training OPs,
+subsample=2, RTX 5090 Laptop). It scales with grid size AND seed count:
+    5x5 grid,   1 seed  ->  25 trainings  ~1.2 h
+    10x10 grid, 1 seed  -> 100 trainings  ~4.8 h   (--extended-grid)
+    5x5 grid,   3 seeds ->  75 trainings  ~3.6 h
+    10x10 grid, 3 seeds -> 300 trainings  ~14.5 h
+On CPU the same runs take roughly six times as long.
+
+The full test sequence, in the order that makes sense, is in
+README_GPU_SERVER.md section 7 -- run the smoke test and the seed-spread check
+before committing hours to this one.
 
 Outputs (in PINNmodulusTwo/artifacts/):
     benchmark_wphys_wbc.csv - one row per (w_phys, w_bc): mean rollout MAEs
@@ -100,10 +104,10 @@ def parse_args() -> argparse.Namespace:
     d = _load_yaml_defaults()
     p = argparse.ArgumentParser(description="2D physics+BC loss-weight benchmark")
     # Data
-    p.add_argument("--ops", nargs="+", default=["OP01", "OP02", "OP03", "OP04", "OP05", "OP06"])
-    p.add_argument("--val-op", default="OP07",
+    p.add_argument("--ops", nargs="+", default=["OP01", "OP02", "OP03", "OP04", "OP05"])
+    p.add_argument("--val-op", default="OP06",
                    help="OP used to SELECT the best (w_phys, w_bc)")
-    p.add_argument("--test-op", default="OP08",
+    p.add_argument("--test-op", default="OP07",
                    help="OP used only to REPORT the chosen point; never selected on")
     p.add_argument("--subsample", type=int, default=2, help="CFL-stable default: 2 -> Δt=0.2s")
     # Training

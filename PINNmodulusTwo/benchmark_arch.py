@@ -77,10 +77,10 @@ def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Architecture and history-lag benchmark")
     # Data
     p.add_argument("--ops", nargs="+",
-                   default=["OP01", "OP02", "OP03", "OP04", "OP05", "OP06"])
-    p.add_argument("--val-op", default="OP07",
+                   default=["OP01", "OP02", "OP03", "OP04", "OP05"])
+    p.add_argument("--val-op", default="OP06",
                    help="OP used to SELECT the best configuration")
-    p.add_argument("--test-op", default="OP08",
+    p.add_argument("--test-op", default="OP07",
                    help="OP used only to REPORT; never selected on")
     p.add_argument("--subsample", type=int, default=2,
                    help="CFL-stable default: 2 -> dt=0.2s")
