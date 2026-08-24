@@ -22,20 +22,18 @@ Deliberately fixed (configured once, never trained):
 * ``gates()`` -- returns all-ones. There is no soft lag gating: every history
   channel is always fully on. The method is kept so logging and checkpoints keep
   a stable shape.
+* ``rate_lags`` -- hybrid-mode segment lengths, also a buffer.
 
-Learned: the MLP weights, the per-layer swish ``beta``, the physics gains
-``src_gain``/``diff_gain``, and (in hybrid mode) the ``rate_lags`` segment
-lengths.
+Learned: the MLP weights, the per-layer swish ``beta``, and the physics gains
+``src_gain``/``diff_gain``. Nothing about the history layout is trained.
 """
 
 from __future__ import annotations
 
-import math
 from typing import Sequence
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 
 try:
     from modulus.models.layers import FCLayer
@@ -126,12 +124,6 @@ class ModulusMLP(Module):
         return [float(layer.activation_fn.beta.detach()) for layer in self.hidden]
 
 
-def _inv_softplus(y: float, floor: float = 1e-7) -> float:
-    """Inverse of ``softplus``: return ``x`` with ``softplus(x) == y``."""
-    y = max(float(y), floor)
-    return float(math.log(math.expm1(y)))
-
-
 def interp_history(
     Tn_seq: torch.Tensor,
     dtn: float,
@@ -143,17 +135,16 @@ def interp_history(
     Args:
         Tn_seq: (n_t, n_points) normalised temperature sequence for ONE OP.
         dtn: uniform spacing of the normalised time grid.
-        tq: (B,) query times in normalised units (in hybrid mode these depend on
-            the learned rate_lags; delta itself is fixed).
+        tq: (B,) query times in normalised units.
         p_idx: (B,) point index for each query (history is per grid point).
 
     Returns:
         (B,) interpolated normalised temperature at ``(tq, p_idx)``.
 
     The bracketing indices are detached (non-differentiable), but the linear blend
-    weight is a smooth function of ``tq``, so gradients reach whatever produced
-    ``tq``. With ``delta`` fixed that matters only in hybrid mode, where the
-    learned ``rate_lags`` enter the query time.
+    weight is a smooth function of ``tq``. The history layout is fixed, so no
+    gradient flows into the query time itself; the interpolation exists so a lag
+    may land between two grid points, not to train the lag.
     """
     n_t = Tn_seq.shape[0]
     pos = torch.clamp(tq / dtn, min=0.0, max=float(n_t - 1))
@@ -212,14 +203,15 @@ class RecurrentField(nn.Module):
         # there -- callers passing one get it overridden on purpose.
         self.k_max = 1 + self._n_lags if history_mode == "hybrid" else k_max
         
-        # Learnable rate_lags: store raw values, use softplus to ensure positive.
-        # ``rate_lags`` arrive in NORMALISED time, so they are tiny (5 s over a
-        # ~1500 s span is 3.4e-3) and the ``softplus(x) ≈ x`` shortcut does not
-        # hold anywhere near there -- softplus(3.4e-3) = 0.695, i.e. a 200x
-        # longer lag than requested. Invert softplus exactly instead:
-        #   raw = log(exp(lag) - 1) = log(expm1(lag))  ->  softplus(raw) == lag.
-        raw_lags = [_inv_softplus(float(lag)) for lag in rate_lags]
-        self._raw_rate_lags = nn.Parameter(torch.tensor(raw_lags))
+        # Fixed rate_lags: the segment lengths are configured, not trained, in line
+        # with delta / k_max / gates. Stored as a plain buffer in NORMALISED time,
+        # so what the CLI asks for is exactly what the history layout uses. (The
+        # earlier learnable version ran them through softplus, which silently
+        # turned a requested 5 s lag into 1024 s because softplus(x) ~ x does not
+        # hold for the tiny normalised values -- no softplus, no such failure.)
+        self.register_buffer(
+            "_rate_lags", torch.tensor([float(lag) for lag in rate_lags])
+        )
         self.n_config = n_config
         self.n_static = n_static
         self.n_forcing = n_forcing
@@ -261,8 +253,8 @@ class RecurrentField(nn.Module):
 
     @property
     def rate_lags(self) -> torch.Tensor:
-        """Learnable segment lengths (always positive via softplus)."""
-        return F.softplus(self._raw_rate_lags)
+        """Hybrid-history segment lengths in normalised time. Fixed, not learned."""
+        return self._rate_lags
 
     @property
     def src_gain(self) -> torch.Tensor:
@@ -327,15 +319,14 @@ class RecurrentField(nn.Module):
         rates = []
         t_boundary = tn_q - dtn_t  # start at t - Δgrid (anchor point)
         for i in range(len(rate_lags)):
-            seg_len = rate_lags[i]  # now a tensor (learnable)
+            seg_len = rate_lags[i]
             t_next = t_boundary - seg_len  # cumulative: subtract segment length
 
             T_end = self._padded_lookup(Tn_seq, dtn, t_boundary, p_idx)
             T_start = self._padded_lookup(Tn_seq, dtn, t_next, p_idx)
 
-            # Nominal segment length, floored at one grid step so the divisor can
-            # never collapse (softplus keeps seg_len > 0, but a learned lag may
-            # still drift below the time resolution we can actually resolve).
+            # Nominal segment length, floored at one grid step: a configured lag
+            # below the time resolution is not something we can resolve.
             span = torch.clamp(seg_len, min=float(dtn))
 
             # Normalised d T / d t: rate_scale keeps this channel O(1) so it sits

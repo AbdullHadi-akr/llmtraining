@@ -332,6 +332,28 @@ def load_ops(
     )
 
 
+def available_ops() -> List[str]:
+    """OP ids that actually have a cached ``.npz`` bundle, sorted."""
+    return sorted(p.stem for p in DATA_CACHE.glob("*.npz"))
+
+
+def require_ops(*op_ids: str) -> None:
+    """Fail fast if a requested OP has no cached bundle.
+
+    A benchmark resolves its held-out OPs only after training the first grid
+    point, so without this a typo costs a full training run before it surfaces.
+    """
+    have = set(available_ops())
+    missing = [op for op in dict.fromkeys(op_ids) if op and op not in have]
+    if missing:
+        raise SystemExit(
+            f"missing cached OP bundle(s): {', '.join(missing)}\n"
+            f"  looked in : {DATA_CACHE}\n"
+            f"  available : {', '.join(available_ops()) or '(none)'}\n"
+            f"  build them: python3 PINNmodulusTwo/generate_cache.py"
+        )
+
+
 def build_op(op_id: str, bundle: NormBundle, subsample_time: int = 40,
              train_frac: float | None = None) -> OPData:
     """Build one OPData for a HELD-OUT OP using ``bundle``'s training constants.

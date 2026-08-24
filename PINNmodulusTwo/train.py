@@ -78,6 +78,9 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--depth", type=int, default=d.get("num_layers", 4))
     p.add_argument("--lr", type=float, default=d.get("lr", 2e-3))
     p.add_argument("--weight-decay", type=float, default=d.get("weight_decay", 0.0))
+    p.add_argument("--gain-lr-mult", type=float, default=d.get("gain_lr_mult", 25.0),
+                   help="LR multiplier for src_gain/diff_gain; 1.0 = same LR as the "
+                        "rest (they then tend to stay stuck at their 1.0 init)")
     p.add_argument("--grad-clip", type=float, default=d.get("grad_clip", 0.0),
                    help="maximum gradient norm; 0 disables clipping")
     p.add_argument("--early-stopping-patience", type=int,
@@ -191,9 +194,22 @@ def fit(args):
         rate_scale=bundle.dTdt_scale,
         use_autograd_time=(args.time_deriv == "autograd"),
     ).to(device)
+    # src_gain / diff_gain correct a ~100x scale gap between the source and the
+    # diffusion term of the heat equation. At the base LR they barely move and sit
+    # at their init of 1.0 for the whole run, leaving the gap uncorrected, so they
+    # get their own group with a much higher LR. No weight decay on them: decaying
+    # log_gain towards 0 would pull gain back to 1.0, which is the very bias we are
+    # trying to escape.
+    gain_params = [model.log_src_gain, model.log_diff_gain]
+    gain_ids = {id(p) for p in gain_params}
+    base_params = [p for p in model.parameters() if id(p) not in gain_ids]
+    gain_lr_mult = float(getattr(args, "gain_lr_mult", 25.0))
+    weight_decay = float(getattr(args, "weight_decay", 0.0))
     opt = torch.optim.Adam(
-        model.parameters(), lr=args.lr,
-        weight_decay=float(getattr(args, "weight_decay", 0.0)),
+        [
+            {"params": base_params, "lr": args.lr, "weight_decay": weight_decay},
+            {"params": gain_params, "lr": args.lr * gain_lr_mult, "weight_decay": 0.0},
+        ]
     )
     n_params = sum(p.numel() for p in model.parameters())
     print(

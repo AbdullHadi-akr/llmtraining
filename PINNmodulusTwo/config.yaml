@@ -28,6 +28,9 @@ use_forcing: false
 epochs: 60
 lr: 2.0e-3
 weight_decay: 0.0
+# src_gain/diff_gain learn this many times faster than the rest; at 1.0 they
+# stay at their 1.0 init and the source/diffusion scale gap is never corrected.
+gain_lr_mult: 25.0
 grad_clip: 0.0             # 0 disables clipping
 early_stopping_patience: 0 # 0 disables early stopping
 seed: 0

@@ -66,7 +66,7 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from data import build_op
+from data import build_op, require_ops
 from device_utils import resolve_device
 from model import rollout
 from train import fit
@@ -118,6 +118,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--lr", type=float, default=d.get("lr", 2e-3))
     p.add_argument("--w-bc", type=float, default=d.get("w_bc", 0.1))
     p.add_argument("--weight-decay", type=float, default=d.get("weight_decay", 0.0))
+    p.add_argument("--gain-lr-mult", type=float, default=25.0,
+                   help="LR multiplier for src_gain/diff_gain (FIXED)")
     p.add_argument("--grad-clip", type=float, default=d.get("grad_clip", 0.0))
     p.add_argument("--early-stopping-patience", type=int,
                    default=d.get("early_stopping_patience", 0))
@@ -154,6 +156,7 @@ def _make_args(cli: argparse.Namespace, w_phys: float) -> Namespace:
         batch_data=cli.batch_data, batch_phys=cli.batch_phys,
         batch_bc=cli.batch_bc,
         weight_decay=cli.weight_decay, grad_clip=cli.grad_clip,
+        gain_lr_mult=cli.gain_lr_mult,
         early_stopping_patience=cli.early_stopping_patience,
         phys_norm=cli.phys_norm,
         use_static=cli.use_static, use_forcing=cli.use_forcing,
@@ -212,6 +215,7 @@ def main() -> None:
     import matplotlib.pyplot as plt
 
     cli = parse_args()
+    require_ops(*cli.ops, cli.test_op)
     device = resolve_device(cli.device)
     cli.device = str(device)  # hand the resolved device down to fit()
     dt_s = 0.1 * cli.subsample

@@ -2,7 +2,8 @@
 """Benchmark: 2D sweep of physics loss weight (w_phys) and BC loss weight (w_bc).
 
 Sweeps both w_phys and w_bc in a grid and scores every combination by the
-free-running autoregressive rollout MAE on held-out test OP.
+free-running autoregressive rollout MAE on a held-out VALIDATION OP; a second,
+never-selected-on TEST OP is reported alongside it.
 
 Everything except w_phys and w_bc is fixed so the comparison is apples-to-apples.
 
@@ -10,7 +11,8 @@ Fixed hyperparameters (override on CLI if desired):
 - architecture: width=128, depth=4, per-layer learnable swish, weight-norm
 - recurrence: k_max=2, history_mode=hybrid, rate_lags=[5.0, 20.0]
 - optimization: Adam, lr=2e-3, epochs=60, seed=0, device=auto (CUDA when available)
-- data: train=OP01-OP06, test=OP07, subsample=2 (CFL-stable Δt=0.2s)
+- data: train=OP01-OP06, val=OP07 (selection), test=OP08 (report only),
+  subsample=2 (CFL-stable Δt=0.2s)
 - loss weights: w_data=1.0 (fixed), w_phys and w_bc swept
 
 Default sweep grid:
@@ -33,7 +35,7 @@ For faster testing:
 
 Outputs (in PINNmodulusTwo/artifacts/):
     benchmark_wphys_wbc.csv - one row per (w_phys, w_bc) with rollout MAEs
-    benchmark_wphys_wbc_heatmap.png - 2D heatmap of held-out MAE
+    benchmark_wphys_wbc_heatmap.png - 2D heatmap of validation MAE
     benchmark_wphys_wbc_best.txt - best combination + summary table
     checkpoints_wphys_wbc/*.pt - per-sweep model checkpoints
 """
@@ -48,7 +50,7 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from data import build_op
+from data import build_op, require_ops
 from device_utils import resolve_device
 from model import rollout
 from train import fit
@@ -91,12 +93,17 @@ def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="2D physics+BC loss-weight benchmark")
     # Data
     p.add_argument("--ops", nargs="+", default=["OP01", "OP02", "OP03", "OP04", "OP05", "OP06"])
-    p.add_argument("--test-op", default="OP07")
+    p.add_argument("--val-op", default="OP07",
+                   help="OP used to SELECT the best (w_phys, w_bc)")
+    p.add_argument("--test-op", default="OP08",
+                   help="OP used only to REPORT the chosen point; never selected on")
     p.add_argument("--subsample", type=int, default=2, help="CFL-stable default: 2 -> Δt=0.2s")
     # Training
     p.add_argument("--epochs", type=int, default=60)
     p.add_argument("--lr", type=float, default=0.002)
     p.add_argument("--weight-decay", type=float, default=0.0)
+    p.add_argument("--gain-lr-mult", type=float, default=25.0,
+                   help="LR multiplier for src_gain/diff_gain (FIXED)")
     p.add_argument("--grad-clip", type=float, default=1.0)
     p.add_argument("--early-stopping-patience", type=int, default=0)
     p.add_argument("--seed", type=int, default=0)
@@ -133,7 +140,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--save-models", dest="save_models", action="store_true", default=True)
     p.add_argument("--no-save-models", dest="save_models", action="store_false")
     p.add_argument("--save-best-only", action="store_true",
-                   help="save only the best held-out model instead of all sweep points")
+                   help="save only the best (by validation MAE) model instead of all points")
     p.add_argument("--model-dir", default=str(ART_DIR / "checkpoints_wphys_wbc"))
     
     args = p.parse_args()
@@ -164,6 +171,7 @@ def _make_args(cli: argparse.Namespace, w_phys: float, w_bc: float) -> Namespace
         batch_data=cli.batch_data, batch_phys=cli.batch_phys,
         batch_bc=cli.batch_bc,
         weight_decay=cli.weight_decay, grad_clip=cli.grad_clip,
+        gain_lr_mult=cli.gain_lr_mult,
         early_stopping_patience=cli.early_stopping_patience,
         phys_norm=cli.phys_norm,
         use_static=cli.use_static, use_forcing=cli.use_forcing,
@@ -212,7 +220,7 @@ def _failed_result(w_phys: float, w_bc: float, train_time: float) -> dict:
     nan = float("nan")
     return {
         "w_phys": float(w_phys), "w_bc": float(w_bc),
-        "intime_mae": nan, "held_mae": nan,
+        "intime_mae": nan, "val_mae": nan, "test_mae": nan,
         "L_data": nan, "L_phys": nan, "L_bc": nan,
         "delta_s": nan, "src_gain": nan, "diff_gain": nan,
         "n_params": 0,
@@ -236,6 +244,7 @@ def main() -> None:
     import matplotlib.pyplot as plt
 
     cli = parse_args()
+    require_ops(*cli.ops, cli.val_op, cli.test_op)
     device = resolve_device(cli.device)
     cli.device = str(device)  # hand the resolved device down to fit()
     dt_s = 0.1 * cli.subsample
@@ -245,7 +254,8 @@ def main() -> None:
 
     header = [
         "2D Physics+BC loss-weight benchmark (free-running rollout, NO teacher forcing)",
-        f"train = {'+'.join(cli.ops)}   held-out test = {cli.test_op}",
+        f"train = {'+'.join(cli.ops)}   val (selection) = {cli.val_op}   "
+        f"test (report only) = {cli.test_op}",
         "FIXED ARCHITECTURE (for fair comparison):",
         f"  width={cli.width}  depth={cli.depth}  k_max={cli.k_max}  "
         f"history_mode={cli.history_mode}  rate_lags_init={cli.rate_lags}s",
@@ -309,13 +319,20 @@ def main() -> None:
             _mae(_rollout_phys(model, op, bundle, device), op.T_lab, op.split_t, op.n_t)
             for op in bundle.ops
         ]
-        held = build_op(cli.test_op, bundle, subsample_time=cli.subsample)
-        held_pred = _rollout_phys(model, held, bundle, device)
-        held_mae = _mae(held_pred, held.T_lab, 0, held.n_t)
-        
-        # Sample 10 time points for boxplot
-        test_time_idx = np.linspace(0, held.n_t - 1, num=N_BOX_POINTS, dtype=int)
-        test_time_maes = _timepoint_maes(held_pred, held.T_lab, test_time_idx)
+        # Selection OP: this is what min() ranks on.
+        val_data = build_op(cli.val_op, bundle, subsample_time=cli.subsample)
+        val_pred = _rollout_phys(model, val_data, bundle, device)
+        val_mae = _mae(val_pred, val_data.T_lab, 0, val_data.n_t)
+
+        # Reporting OP: never used to choose anything, so the number stays an
+        # honest held-out estimate for the point that selection lands on.
+        test_data = build_op(cli.test_op, bundle, subsample_time=cli.subsample)
+        test_pred = _rollout_phys(model, test_data, bundle, device)
+        test_mae = _mae(test_pred, test_data.T_lab, 0, test_data.n_t)
+
+        # Boxplot over time on the reporting OP.
+        test_time_idx = np.linspace(0, test_data.n_t - 1, num=N_BOX_POINTS, dtype=int)
+        test_time_maes = _timepoint_maes(test_pred, test_data.T_lab, test_time_idx)
 
         intime = float(np.mean(intime_maes))
 
@@ -357,6 +374,7 @@ def main() -> None:
                         "w_phys": float(w_phys),
                         "w_bc": float(w_bc),
                         "ops": list(args.ops),
+                        "val_op": cli.val_op,
                         "test_op": args.test_op,
                         "epochs": int(args.epochs),
                         "subsample": int(args.subsample),
@@ -371,7 +389,8 @@ def main() -> None:
             "w_phys": float(w_phys),
             "w_bc": float(w_bc),
             "intime_mae": intime,
-            "held_mae": held_mae,
+            "val_mae": val_mae,
+            "test_mae": test_mae,
             "L_data": L_data_raw,
             "L_phys": L_phys_raw,
             "L_bc": L_bc_raw,
@@ -386,7 +405,9 @@ def main() -> None:
         })
         histories.append({"w_phys": w_phys, "w_bc": w_bc, "hist": hist})
 
-        print(f"  MAE(in-time)={intime:.3f}°C  MAE(held {cli.test_op})={held_mae:.3f}°C")
+        print(f"  MAE(in-time)={intime:.3f}°C  "
+              f"MAE(val {cli.val_op})={val_mae:.3f}°C  "
+              f"MAE(test {cli.test_op})={test_mae:.3f}°C")
         print(f"  L_data={L_data_raw:.4g}  L_phys={L_phys_raw:.4g}  L_bc={L_bc_raw:.4g}")
         _print_eta(idx, total_points, start_time_total, train_time)
 
@@ -397,14 +418,14 @@ def main() -> None:
 
     # ---- CSV ----------------------------------------------------------------
     csv_lines = [
-        "w_phys,w_bc,L_data,L_phys,L_bc,MAE_in_C,MAE_test_C,"
+        "w_phys,w_bc,L_data,L_phys,L_bc,MAE_in_C,MAE_val_C,MAE_test_C,"
         "delta_s,src_gain,diff_gain,rate_lags_s,train_time_min,checkpoint"
     ]
     for r in results:
         lags_str = ";".join(f"{v:.6g}" for v in r["rate_lags_s"])
         csv_lines.append(
             f"{r['w_phys']},{r['w_bc']},{r['L_data']:.6f},{r['L_phys']:.6f},{r['L_bc']:.6f},"
-            f"{r['intime_mae']:.4f},{r['held_mae']:.4f},"
+            f"{r['intime_mae']:.4f},{r['val_mae']:.4f},{r['test_mae']:.4f},"
             f"{r['delta_s']:.6f},{r['src_gain']:.6f},{r['diff_gain']:.6f},"
             f"\"{lags_str}\",{r['train_time']/60:.2f},{r['checkpoint']}"
         )
@@ -412,7 +433,7 @@ def main() -> None:
 
     # ---- best pick + summary ------------------------------------------------
     # Diverged points carry NaN and must not win the min() comparison.
-    usable = [r for r in results if np.isfinite(r["held_mae"])]
+    usable = [r for r in results if np.isfinite(r["val_mae"])]
     n_failed = len(results) - len(usable)
     if not usable:
         print(f"\nAll {len(results)} grid points diverged - no result to rank.", flush=True)
@@ -423,7 +444,7 @@ def main() -> None:
     if n_failed:
         print(f"\n{n_failed}/{len(results)} grid points diverged and are recorded as NaN.",
               flush=True)
-    best = min(usable, key=lambda r: r["held_mae"])
+    best = min(usable, key=lambda r: r["val_mae"])
     if cli.save_models and cli.save_best_only:
         best_ckpt_path = model_dir / f"model_best_{_w_tag(best['w_phys'], best['w_bc'])}.pt"
         args_best = _make_args(cli, best["w_phys"], best["w_bc"])
@@ -455,6 +476,7 @@ def main() -> None:
                     "w_phys": float(best["w_phys"]),
                     "w_bc": float(best["w_bc"]),
                     "ops": list(args_best.ops),
+                    "val_op": cli.val_op,
                     "test_op": args_best.test_op,
                     "epochs": int(args_best.epochs),
                     "subsample": int(args_best.subsample),
@@ -465,18 +487,25 @@ def main() -> None:
         )
         best["checkpoint"] = str(best_ckpt_path)
 
-    th = f"{'w_phys':>7} {'w_bc':>7} | {'L_data':>10} {'L_phys':>10} {'L_bc':>10} | {'MAE_in':>7} {'MAE_test':>8}"
+    th = (f"{'w_phys':>7} {'w_bc':>7} | {'L_data':>10} {'L_phys':>10} {'L_bc':>10} | "
+          f"{'MAE_in':>7} {'MAE_val':>8} {'MAE_test':>9}")
     summary = header + [th, "-" * len(th)]
     for r in results:
         summary.append(
             f"{r['w_phys']:>7.3f} {r['w_bc']:>7.3f} | {r['L_data']:>10.4g} {r['L_phys']:>10.4g} "
-            f"{r['L_bc']:>10.4g} | {r['intime_mae']:>7.3f} {r['held_mae']:>8.3f}"
+            f"{r['L_bc']:>10.4g} | {r['intime_mae']:>7.3f} {r['val_mae']:>8.3f} "
+            f"{r['test_mae']:>9.3f}"
         )
     summary += [
         "",
         "MAE = mean |true - predicted| (°C) from free-running rollout.",
-        f"BEST (by held-out MAE): w_phys={best['w_phys']}, w_bc={best['w_bc']}  "
-        f"-> held-out {best['held_mae']:.3f}°C, in-time {best['intime_mae']:.3f}°C",
+        f"Selection ran on {cli.val_op} (MAE_val); {cli.test_op} (MAE_test) was never "
+        f"used to choose anything.",
+        f"BEST (by MAE_val): w_phys={best['w_phys']}, w_bc={best['w_bc']}",
+        f"  -> val {best['val_mae']:.3f}°C, test {best['test_mae']:.3f}°C, "
+        f"in-time {best['intime_mae']:.3f}°C",
+        "  Report the test number. MAE_val is optimistic: it is the minimum over "
+        f"{len(results)} grid points.",
         f"Total runtime: {total_time/3600:.2f} hours ({total_time/60:.1f} min)",
     ]
     if n_failed:
@@ -495,7 +524,7 @@ def main() -> None:
     for r in results:
         i = w_bc_vals.index(r["w_bc"])
         j = w_phys_vals.index(r["w_phys"])
-        heatmap[i, j] = r["held_mae"]
+        heatmap[i, j] = r["val_mae"]
 
     fig, ax = plt.subplots(1, 1, figsize=(10, 8))
     im = ax.imshow(heatmap, cmap="viridis", aspect="auto", origin="lower")
@@ -505,7 +534,7 @@ def main() -> None:
     ax.set_yticklabels([f"{v:.3g}" for v in w_bc_vals])
     ax.set_xlabel("w_phys (physics loss weight)")
     ax.set_ylabel("w_bc (boundary condition loss weight)")
-    ax.set_title(f"Held-out {cli.test_op} MAE (°C) — lower is better")
+    ax.set_title(f"Validation {cli.val_op} MAE (°C) — selection surface, lower is better")
     cbar = fig.colorbar(im, ax=ax)
     cbar.set_label("MAE [°C]")
 
@@ -552,7 +581,8 @@ def main() -> None:
         axes_conv[0].set_yscale("log")
         axes_conv[0].grid(True, alpha=0.3)
         axes_conv[0].legend(fontsize=8, ncol=2)
-        axes_conv[0].set_title(f"Convergence (subset): {'+'.join(cli.ops)} train, {cli.test_op} test", fontsize=12)
+        axes_conv[0].set_title(f"Convergence (subset): {'+'.join(cli.ops)} train, "
+                               f"{cli.val_op} val", fontsize=12)
         
         # Middle: physics loss
         if "L_phys" in h and len(h["L_phys"]) > 0:
@@ -606,8 +636,11 @@ def main() -> None:
 
     # Mark best point
     best_idx = next(i for i, r in enumerate(usable) if r["w_phys"] == best["w_phys"] and r["w_bc"] == best["w_bc"])
-    ax2.scatter([best_idx + 1], [best["held_mae"]], s=300, marker="*", color="red", 
-                edgecolors="darkred", linewidths=1.5, zorder=10, label="Best (overall MAE)")
+    # The axis shows test-op MAE, so mark the test value of the point that was
+    # selected on the validation OP -- not its validation MAE.
+    ax2.scatter([best_idx + 1], [best["test_mae"]], s=300, marker="*", color="red",
+                edgecolors="darkred", linewidths=1.5, zorder=10,
+                label=f"Selected on {cli.val_op} (test MAE shown)")
 
     ax2.set_xlabel("(w_phys, w_bc) combination", fontsize=11)
     ax2.set_ylabel("Held-out test-op MAE across 10 time points [°C]", fontsize=11)
