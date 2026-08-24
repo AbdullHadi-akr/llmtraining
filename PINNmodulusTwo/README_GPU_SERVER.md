@@ -272,6 +272,59 @@ Endwert eines Modells nicht. Kapitel 8 fährt dann mit 60 Epochen.
 Auswahl), Test `OP07` (wird nur berichtet und fließt in keine Auswahl ein).
 
 ---
+### 7.0 Was variabel ist — und was nicht
+
+Damit klar ist, woran man drehen kann und woran nicht.
+
+> ⚠️ **`config.yaml` und die Benchmarks haben unterschiedliche Defaults.** Wer
+> `train.py` ohne Flags startet, bekommt ein *anderes Modell* als die Benchmarks
+> — anderes Zeitraster, anderer History-Modus. Die Spalte „Bench" unten ist die,
+> die für Kapitel 7 und 8 gilt.
+
+**Struktur — konfigurierbar, aber nicht trainiert:**
+
+| Flag | `config.yaml` | Bench | Bedeutung |
+|---|---|---|---|
+| `--subsample` | **40** | **2** | Datenraster: `dt = 0.1 s × subsample` → 0.2 s. Bestimmt die Rollout-Länge und damit die Laufzeit. CFL-Grenze ~0.241 s |
+| `--delta-grid` | `0.2` s | `0.2` s | **Anker** der History: der Block ist `[T(t−Δgrid), rate₁, …]`. Unabhängig von `--subsample` |
+| `--rate-lags` | **`5 25`** | **`5 20`** | kumulative Segmentlängen in Sekunden; jedes Segment beginnt, wo das vorige endete |
+| `--history-mode` | **`raw`** | **`hybrid`** | `hybrid` = Anker + Raten, `raw` = reiner Lag-Stapel |
+| `--k-max` | **4** | **2** | nur im `raw`-Modus wirksam; im `hybrid`-Modus folgt `k` aus der Zahl der `rate_lags` und das Flag wird ignoriert |
+| `--width` / `--depth` | `128` / `4` | `128` / `4` | MLP-Geometrie |
+| `--time-deriv` | `bdf2` | `bdf2` | Zeitableitung im Physik-Residuum |
+
+**Lernparameter** (die einzigen Dinge, die der Gradient anfasst): MLP-Gewichte,
+das per-Layer `β` des Swish, und die beiden Physik-Gains `src_gain`/`diff_gain`.
+Die History-Struktur wird **nicht** gelernt — kein lernbares `δ`, keine
+Lag-Gates. Wer sie optimieren will, sweept sie mit `benchmark_arch.py` (8.2).
+
+**Optimierung und Loss:**
+
+| Flag | `config.yaml` | Bench | Bedeutung |
+|---|---|---|---|
+| `--epochs` | `60` | `60` | in Kapitel 7 bewusst `20` |
+| `--lr` | `2e-3` | `2e-3` | Basis-Lernrate |
+| `--gain-lr-mult` | `25.0` | `25.0` | `src_gain`/`diff_gain` lernen 25× schneller, sonst bleiben sie bei 1.0 |
+| `--grad-clip` | **0** (aus) | **1.0** | maximale Gradientennorm |
+| `--w-phys` / `--w-bc` | `0.1` / `0.1` | gesweept | Gewichte von Physik- und BC-Term |
+| `--phys-norm` | `0` | `0` | `0` = adaptiver EMA, `>0` = fester Divisor |
+| `--batch-phys` / `--batch-bc` | `256` / `128` | `256` / `128` | Kollokationspunkte — hier liegt der GPU-Hebel |
+| `--seeds` | — | `0` | ein Trainingslauf je Seed, Bewertung über den Mittelwert (nur Benchmarks) |
+
+**Daten:** `--ops` (Training), `--val-op` (Auswahl), `--test-op` (nur Bericht).
+
+`config.yaml` gilt für `train.py` und `smallBench.py`; die Benchmarks setzen ihre
+eigenen Defaults im Skript. Die CLI überschreibt beides pro Lauf. Wenn du
+`train.py` von Hand mit den Benchmark-Einstellungen laufen lassen willst:
+
+```bash
+python3 PINNmodulusTwo/train.py --subsample 2 --history-mode hybrid \
+  --rate-lags 5 20 --delta-grid 0.2 --grad-clip 1.0 \
+  --ops OP01 OP02 OP03 OP04 OP05 --device cuda
+```
+
+---
+
 ### 7.1 Schritt 1 — Smoke-Test (~8 min)
 
 Vollständig in **[Kapitel 6](#6-smoke-test)** beschrieben. Kurzfassung:
@@ -363,9 +416,15 @@ jedes Gewicht wird über die Dekaden `[0, 0.001, 0.01, 0.1, 1.0]` gefahren,
 während das andere im Zentrum steht. **9 Punkte statt 25.**
 
 ```bash
-python3 PINNmodulusTwo/benchmark_wphys_wbc.py --probe --epochs 20 \
-  --seeds 0 1 2 --device cuda
+# 9 Punkte x 1 Seed x 20 Epochen = 9 Trainings ~ 6 h
+python3 PINNmodulusTwo/benchmark_wphys_wbc.py --probe --epochs 20 --device cuda
 ```
+
+> **Ein Seed, mit Absicht.** `--seeds 0 1 2` wären 27 Trainings und damit ~18 h —
+> das sprengt die Nacht. Der Preis: das Verdikt kann die gefundenen Unterschiede
+> nicht vom Init-Rauschen trennen und sagt das auch (`seed spread unknown`). Die
+> Streuung klärt Schritt 8.1 separat. Für „welche Dekade überhaupt" reicht ein
+> Seed, solange die Spannweite deutlich ist.
 
 `benchmark_wphys_wbc_best.txt` endet dann mit einem Verdikt pro Achse:
 
