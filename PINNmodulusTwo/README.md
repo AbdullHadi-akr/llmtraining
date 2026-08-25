@@ -47,6 +47,9 @@ takes part in any selection.
   in a training log, and the next chance to notice is a multi-hour sweep.
 - `config.yaml` — hyperparameters, matching what the benchmarks run
   (CLI overrides available).
+- `ARCHITECTURE.md` — **[Kontrollfluss und Modellbeschreibung](ARCHITECTURE.md)**:
+  wie ein Lauf abläuft, was gelernt wird und was fest ist, wo man für eine
+  Erweiterung ansetzt, und welche Fallstricke schon einmal zugeschlagen haben.
 
 ## Why recurrence (profiles)
 

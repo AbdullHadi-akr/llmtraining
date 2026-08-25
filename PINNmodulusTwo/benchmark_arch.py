@@ -226,6 +226,9 @@ def main() -> None:
         f"baseline: width={cli.width} depth={cli.depth} "
         f"rate_lags={_lag_label(cli.rate_lags)}s",
         f"loss weights held FIXED: w_phys={cli.w_phys}  w_bc={cli.w_bc}",
+        f"loss balancing: loss_balance={cli.loss_balance} "
+        f"residual_norm={cli.residual_norm} "
+        f"forcing_energy={cli.forcing_energy} config_rates={cli.config_rates}",
         f"axes = {', '.join(cli.axes)}   seeds = {cli.seeds}",
         f"runs = {total} configurations x {len(cli.seeds)} seed(s) = {n_runs} trainings",
         f"epochs = {cli.epochs}  dt = {0.1*cli.subsample:.1f}s  lr = {cli.lr}",

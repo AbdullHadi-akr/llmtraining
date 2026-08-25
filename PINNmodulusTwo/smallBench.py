@@ -30,7 +30,7 @@ import matplotlib.pyplot as plt
 THIS_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(THIS_DIR))
 
-from data import build_op, load_ops
+from data import build_op
 from device_utils import resolve_device
 from model import rollout
 from train import fit
@@ -284,7 +284,13 @@ def main():
 
     if all_passed:
         print("\n✓ ALL CHECKS PASSED - Ready for full benchmark!")
-        print("  Run: python3 PINNmodulusTwo/benchmark_wphys_wbc.py --extended-grid")
+        # NOT the 10x10 grid: that is 100 trainings (~6-8 days) and it would
+        # sweep weights before anything has established what a weight means
+        # here. The balancing benchmark is ~4 h and settles that first.
+        print("  Next: python3 PINNmodulusTwo/benchmark_balance.py --part 1 "
+              "--epochs 20 --device cuda")
+        print("        (settles the loss balancing; the weight probe in "
+              "benchmark_wphys_wbc.py comes after it)")
     else:
         print("\n✗ SOME CHECKS FAILED - Review issues above before full benchmark")
 

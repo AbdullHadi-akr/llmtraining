@@ -100,9 +100,10 @@ python3 -c "import torch; print(torch.__version__, torch.version.cuda, torch.cud
 Erwartet z. B. `2.5.1+cu121 12.1 True NVIDIA A100-SXM4-40GB`.
 Steht dort `False` → siehe Troubleshooting unten.
 
-> Die `requirements.txt` im Repo-Root **nicht** verwenden: das ist ein
-> UTF-16-kodierter Windows-`pip freeze` (inklusive `pywinpty`) und installiert
-> die CPU-Wheels.
+> Es gibt nur noch `PINNmodulusTwo/requirements-gpu.txt`. Die alte
+> `requirements.txt` im Repo-Root ist gelöscht: ein UTF-16-kodierter
+> Windows-`pip freeze` (inklusive `pywinpty`), der die CPU-Wheels installierte.
+> Wer sie noch braucht, holt sie aus der Git-Historie.
 
 ---
 
@@ -341,6 +342,9 @@ beiden Schritte müssen in jedem Hyperparameter übereinstimmen.
 ---
 
 ## 7. Balancing-Benchmark — was die Gewichte überhaupt bedeuten (~7 h, zwei Sessions)
+
+Was intern passiert — Kontrollfluss, Modell, wo die Skalierung sitzt —
+steht in [ARCHITECTURE.md](ARCHITECTURE.md).
 
 **Vor Kapitel 8.** Eine Gewichte-Probe misst nur dann Gewichte, wenn die
 Skalierung darunter feststeht. Genau das klärt dieses Kapitel.

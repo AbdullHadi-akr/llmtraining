@@ -14,6 +14,12 @@ data_cache/         <- OP*.npz bundles (not in git, see below)
 legacy/             <- earlier approaches, kept for reference only
 ```
 
+Es gibt nur eine Abhängigkeitsliste: `PINNmodulusTwo/requirements-gpu.txt`. Die
+frühere `requirements.txt` im Root ist gelöscht — ein UTF-16-kodierter
+Windows-`pip freeze`, der die CPU-Wheels installierte und den die
+GPU-Anleitung ohnehin als Falle führte. Aus der Git-Historie holbar, falls
+jemand sie noch braucht.
+
 ### `PINNmodulusTwo/` — the active approach
 
 A recurrent PINN: a Modulus `FCLayer` MLP with a per-layer learnable swish,
@@ -21,8 +27,10 @@ wrapped in a PyTorch recurrence that feeds the model's own past predictions back
 in as temperature history. The loss combines a data term, the anisotropic heat
 residual, and the symmetry boundary condition `dT/dx = 0` at the cell centre.
 
-Start with [`PINNmodulusTwo/README.md`](PINNmodulusTwo/README.md); for the GPU
-server setup and the full benchmark session see
+Start with [`PINNmodulusTwo/README.md`](PINNmodulusTwo/README.md). Wie das Ganze
+intern abläuft — Kontrollfluss, Modell, Erweiterungspunkte — steht in
+[`PINNmodulusTwo/ARCHITECTURE.md`](PINNmodulusTwo/ARCHITECTURE.md); für das
+GPU-Server-Setup und die volle Benchmark-Session siehe
 [`PINNmodulusTwo/README_GPU_SERVER.md`](PINNmodulusTwo/README_GPU_SERVER.md).
 
 The recurrence is deliberately **not** adaptive: the history spacing `δ`, the lag

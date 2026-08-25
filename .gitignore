@@ -4,12 +4,13 @@
 # Keep directories traversable so unignore rules can match files inside
 !*/
 
-# Keep only source notebooks and README files
+# Keep only source notebooks and documentation
 !*.py
 !*.ipynb
 !README
 !README.*
 !README_*.md
+!ARCHITECTURE.md
 
 # Keep the PINNmodulusTwo server setup files tracked (config + deps)
 !PINNmodulusTwo/config.yaml

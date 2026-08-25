@@ -130,6 +130,11 @@ ART_DIR.mkdir(parents=True, exist_ok=True)
 # range probe found; the values below are only a starting spread.
 # (The old comment claimed 'best around w_phys~0.1-0.2' from earlier runs --
 #  those ran with the broken L_phys and delta, so the number meant nothing.)
+#
+# Under --loss-balance ema every term is divided by its own magnitude, so a
+# weight is a ratio between TERMS: 0.1 means "physics contributes a tenth of
+# what data does", and it means that in every epoch. The spread below therefore
+# walks from off to roughly a third -- which is where a regulariser belongs.
 DEFAULT_W_PHYS = [0.0, 0.01, 0.05, 0.1, 0.3]
 DEFAULT_W_BC = [0.0, 0.01, 0.05, 0.1, 0.3]
 
@@ -552,9 +557,15 @@ def build_header(cli, n_points: int, part: str | None = None) -> list:
         f"batch_bc={cli.batch_bc}",
         f"  runs = {n_points} points x {len(cli.seeds)} "
         f"seed(s) = {n_points*len(cli.seeds)} trainings",
+        "LOSS BALANCING (decides what a weight MEANS - see benchmark_balance.py):",
+        f"  loss_balance={cli.loss_balance}  ema_decay={cli.ema_decay}  "
+        f"residual_norm={cli.residual_norm}",
+        f"  phys_norm={cli.phys_norm}  bc_norm={cli.bc_norm}  "
+        f"data_floor={cli.data_floor}  balance_warmup={cli.balance_warmup}",
+        f"  forcing_energy={cli.forcing_energy}  config_rates={cli.config_rates}  "
+        f"subsample_mode={cli.subsample_mode}",
         "LOSS WEIGHTS (SWEPT):",
-        f"  w_data=1.0 (fixed)   phys_norm={cli.phys_norm} "
-        f"({'adaptive EMA' if not cli.phys_norm else 'fixed divisor'})",
+        "  w_data=1.0 (fixed)",
         f"  w_phys sweep = {cli.w_phys}",
         f"  w_bc sweep = {cli.w_bc}",
         (f"Probe: w_phys swept at w_bc={PROBE_BASE_W_BC}, "
