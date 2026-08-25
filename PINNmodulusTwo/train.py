@@ -3,7 +3,9 @@
 
 Temperature only (bc_V is intentionally out of scope). The model uses a Modulus
 ``FCLayer`` MLP with a per-layer learnable swish, wrapped in a PyTorch recurrence
-whose history spacing ``delta`` and per-lag gates (variable ``k``) are learned.
+whose history spacing ``delta`` and lag count ``k`` are FIXED hyperparameters --
+they are configured, not learned. See ``model.RecurrentField`` for what the
+recurrence does and does not learn.
 
 Run (the device defaults to ``auto`` = CUDA when a GPU is available):
     source .venv/bin/activate
@@ -15,6 +17,7 @@ For the GPU server setup see ``PINNmodulusTwo/README_GPU_SERVER.md``.
 from __future__ import annotations
 
 import argparse
+import time
 from pathlib import Path
 
 import numpy as np
@@ -72,10 +75,17 @@ def parse_args() -> argparse.Namespace:
                    default=d.get("history_mode", "raw"))
     p.add_argument("--rate-lags", nargs="+", type=float,
                    default=d.get("rate_lags", [5.0, 25.0]))
+    p.add_argument("--delta-grid", type=float, default=d.get("delta_grid", 0.2),
+                   help="anchor lag of the hybrid history in SECONDS: the block is "
+                        "[T(t-delta_grid), rate_1, ...] and the rate segments "
+                        "cascade back from there. Independent of --subsample.")
     p.add_argument("--width", type=int, default=d.get("layer_size", 128))
     p.add_argument("--depth", type=int, default=d.get("num_layers", 4))
     p.add_argument("--lr", type=float, default=d.get("lr", 2e-3))
     p.add_argument("--weight-decay", type=float, default=d.get("weight_decay", 0.0))
+    p.add_argument("--gain-lr-mult", type=float, default=d.get("gain_lr_mult", 25.0),
+                   help="LR multiplier for src_gain/diff_gain; 1.0 = same LR as the "
+                        "rest (they then tend to stay stuck at their 1.0 init)")
     p.add_argument("--grad-clip", type=float, default=d.get("grad_clip", 0.0),
                    help="maximum gradient norm; 0 disables clipping")
     p.add_argument("--early-stopping-patience", type=int,
@@ -90,7 +100,6 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--batch-data", type=int, default=d.get("batch_data", 2048))
     p.add_argument("--batch-phys", type=int, default=d.get("batch_phys", 256))
     p.add_argument("--batch-bc", type=int, default=d.get("batch_bc", 128))
-    p.add_argument("--delta-init-steps", type=float, default=d.get("delta_init_steps", 1.0))
     p.add_argument("--use-static", action="store_true", default=d.get("use_static", False))
     p.add_argument("--use-forcing", action="store_true", default=d.get("use_forcing", False))
     p.add_argument("--seed", type=int, default=d.get("seed", 0))
@@ -167,10 +176,23 @@ def fit(args):
         if not args.use_forcing:
             op["forcing"] = op["forcing"][:, :0]
     dtn = ops[0]["dtn"]
-    _check_cfl_stability(bundle, dtn * bundle.T_span_ref, device)
+    dt_s = dtn * bundle.T_span_ref
+    _check_cfl_stability(bundle, dt_s, device)
     phys_scale = bundle.phys_scale
     rate_lags_s = [float(v) for v in getattr(args, "rate_lags", [])]
     rate_lags_n = [v / bundle.T_span_ref for v in rate_lags_s]
+    delta_grid_s = float(getattr(args, "delta_grid", 0.0)) or dt_s
+    delta_grid_n = delta_grid_s / bundle.T_span_ref
+    if args.history_mode == "hybrid" and delta_grid_s < dt_s - 1e-9:
+        # The anchor would sit between two samples that the rollout has not
+        # produced yet, so the lookup clamps back to the last available step --
+        # silently making delta_grid behave as if it were dt_s.
+        print(
+            f"  [WARN] --delta-grid {delta_grid_s:g}s is below the data step "
+            f"{dt_s:g}s; the anchor cannot resolve finer than the grid and will "
+            f"effectively act as {dt_s:g}s.",
+            flush=True,
+        )
     print(
         f"OPs={args.ops} n_config={bundle.n_config} n_static={n_static} "
         f"n_forcing={n_forcing} dtn={dtn:.4g} "
@@ -186,16 +208,32 @@ def fit(args):
         n_config=bundle.n_config, n_static=n_static, n_forcing=n_forcing,
         k_max=args.k_max, history_mode=args.history_mode, rate_lags=rate_lags_n,
         layer_size=args.width, num_layers=args.depth,
-        delta_seconds=1.0, dtn=dtn,
+        delta_seconds=1.0, dtn=dtn, t_span_ref=bundle.T_span_ref,
+        rate_scale=bundle.dTdt_scale, delta_grid=delta_grid_n,
         use_autograd_time=(args.time_deriv == "autograd"),
     ).to(device)
+    # src_gain / diff_gain correct a ~100x scale gap between the source and the
+    # diffusion term of the heat equation. At the base LR they barely move and sit
+    # at their init of 1.0 for the whole run, leaving the gap uncorrected, so they
+    # get their own group with a much higher LR. No weight decay on them: decaying
+    # log_gain towards 0 would pull gain back to 1.0, which is the very bias we are
+    # trying to escape.
+    gain_params = [model.log_src_gain, model.log_diff_gain]
+    gain_ids = {id(p) for p in gain_params}
+    base_params = [p for p in model.parameters() if id(p) not in gain_ids]
+    gain_lr_mult = float(getattr(args, "gain_lr_mult", 25.0))
+    weight_decay = float(getattr(args, "weight_decay", 0.0))
     opt = torch.optim.Adam(
-        model.parameters(), lr=args.lr,
-        weight_decay=float(getattr(args, "weight_decay", 0.0)),
+        [
+            {"params": base_params, "lr": args.lr, "weight_decay": weight_decay},
+            {"params": gain_params, "lr": args.lr * gain_lr_mult, "weight_decay": 0.0},
+        ]
     )
     n_params = sum(p.numel() for p in model.parameters())
     print(
-        f"model params={n_params} k_max={model.k_max} delta=1.0s (fixed) "
+        f"model params={n_params} k_max={model.k_max} (fixed) "
+        f"delta=1.0s = {float(model.delta):.4g} normalised (fixed) "
+        f"delta_grid={delta_grid_s:g}s gates=all-on "
         f"history_mode={model.history_mode} rate_lags_s={rate_lags_s} "
         f"width={args.width} depth={args.depth}",
         flush=True,
@@ -220,6 +258,7 @@ def fit(args):
     bc_ema = None
 
     for epoch in range(1, args.epochs + 1):
+        epoch_start = time.time()
         model.train()
         ep_data, ep_phys, ep_bc = 0.0, 0.0, 0.0
         for op in ops:
@@ -257,20 +296,46 @@ def fit(args):
             L_bc = torch.mean(bc_res ** 2)
 
             # Balance L_phys and L_bc onto the data scale so weights are fair 0-1 knobs.
+            # A single non-finite sample would otherwise pin the EMA at nan for the
+            # rest of the run (0.9 * nan == nan), so only finite values update it.
             if phys_norm > 0.0:
                 phys_den = phys_norm
             else:
                 cur = float(L_phys.detach())
-                phys_ema = cur if phys_ema is None else 0.9 * phys_ema + 0.1 * cur
-                phys_den = phys_ema
+                if np.isfinite(cur):
+                    phys_ema = cur if phys_ema is None else 0.9 * phys_ema + 0.1 * cur
+                phys_den = phys_ema if phys_ema is not None else 1.0
             L_phys_bal = L_phys / (phys_den + 1e-8)
 
             # BC balancing similar to physics
             bc_cur = float(L_bc.detach())
-            bc_ema = bc_cur if bc_ema is None else 0.9 * bc_ema + 0.1 * bc_cur
-            L_bc_bal = L_bc / (bc_ema + 1e-8)
+            if np.isfinite(bc_cur):
+                bc_ema = bc_cur if bc_ema is None else 0.9 * bc_ema + 0.1 * bc_cur
+            L_bc_bal = L_bc / ((bc_ema if bc_ema is not None else 1.0) + 1e-8)
 
-            loss = args.w_data * L_data + args.w_phys * L_phys_bal + args.w_bc * L_bc_bal
+            # Only add terms that are actually switched on: ``0.0 * nan`` is nan,
+            # so a zero weight does NOT neutralise a non-finite term -- it would
+            # poison the whole loss, the gradients, and every later epoch. This is
+            # what made even the w_phys=0, w_bc=0 sweep point report L_data=nan.
+            loss = args.w_data * L_data
+            if args.w_phys != 0.0:
+                loss = loss + args.w_phys * L_phys_bal
+            if args.w_bc != 0.0:
+                loss = loss + args.w_bc * L_bc_bal
+
+            # Never let a non-finite loss reach the optimiser: clip_grad_norm_ does
+            # not rescue it (total_norm=nan -> clip_coef=nan -> all grads nan), so
+            # one bad step would permanently destroy the weights.
+            if not torch.isfinite(loss):
+                bad = [n for n, v in (("L_data", L_data), ("L_phys", L_phys),
+                                      ("L_bc", L_bc)) if not torch.isfinite(v)]
+                print(
+                    f"  [ABORT] epoch {epoch}, {op['op_id']}: non-finite loss; "
+                    f"first offending term(s): {', '.join(bad) or 'weighted sum'}",
+                    flush=True,
+                )
+                ep_data = float("nan")
+                break
 
             opt.zero_grad()
             loss.backward()
@@ -289,8 +354,10 @@ def fit(args):
         # Early NaN/inf detection - abort before wasting epochs
         if not np.isfinite(ep_data) or not np.isfinite(ep_phys):
             print(f"  [ABORT] epoch {epoch}: loss exploded (L_data={ep_data:.4g}, L_phys={ep_phys:.4g})")
-            print("  Possible causes: CFL violation (Δt too large), unstable IC, or bad hyperparams")
-            print("  Try: --subsample 2 (for CFL-stable Δt=0.2s) or --grad-clip 1.0")
+            print("  L_data non-finite means the free-running rollout diverged; check the")
+            print("  history channels feeding back into the net (--history-mode raw isolates it).")
+            print("  L_phys non-finite alone points at the residual: --time-deriv bdf1 or --w-phys 0.")
+            print("  Also worth trying: --grad-clip 1.0, a lower --lr, or a larger --subsample.")
             # Record the failed epoch so callers never see an empty history and
             # the divergence stays visible downstream (CSV, plots) as NaN.
             history["epoch"].append(epoch)
@@ -331,10 +398,18 @@ def fit(args):
             else:
                 lags_str = ""
             # Show BALANCED losses (all ~O(1)) so user can compare fairly
+            # Per-epoch wall time and the resulting projection: a benchmark
+            # extrapolates its ETA from whole grid points, which is useless while
+            # the first one is still running -- and badly misleading if a run
+            # aborts early, because then the "per point" time is one epoch, not
+            # all of them.
+            epoch_s = time.time() - epoch_start
+            eta_min = (args.epochs - epoch) * epoch_s / 60.0
             print(
                 f"  epoch {epoch:3d}  L_data={ep_data:.4e}  L_phys_bal={ep_phys_bal:.4e}  "
                 f"L_bc_bal={ep_bc_bal:.4e}  delta={float(model.delta.detach()):.4g}  "
-                f"src_gain={sg:.3g}  diff_gain={dg:.3g}{lags_str}  betas={betas}",
+                f"src_gain={sg:.3g}  diff_gain={dg:.3g}{lags_str}  betas={betas}  "
+                f"[{epoch_s:.1f}s/epoch, this run ~{eta_min:.0f} min left]",
                 flush=True,
             )
         if early_stopping_patience > 0 and epochs_without_improvement >= early_stopping_patience:

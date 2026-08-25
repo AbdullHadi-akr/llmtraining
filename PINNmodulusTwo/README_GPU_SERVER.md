@@ -181,11 +181,18 @@ Erwartete Ausgabe (Auszug):
 
 ```
 [device] cuda:0 NVIDIA A100-SXM4-40GB  39.6 GiB  sm_80  torch=2.5.1+cu121 cuda=12.1
-[CFL OK] Δt=4.000s, Δt_max≈...
-OPs=['OP01', 'OP02', 'OP03'] n_config=7 ...
-model params=...
-  epoch   1  L_data=...  L_phys_bal=...
+[CFL WARN] Δt=4.000s, Δt_max≈0.241s -> POTENTIALLY UNSTABLE
+  [WARN] --delta-grid 0.2s is below the data step 4s; ...
+OPs=['OP01', ...] n_config=7 ...
+model params=... delta_grid=0.2s gates=all-on ...
+  epoch   1  L_data=...  [12.4s/epoch, this run ~0 min left]
 ```
+
+**Die beiden Warnungen sind hier erwartet und harmlos.** `--subsample 40` ist
+absichtlich grob, damit der Check unter einer Minute bleibt; bei Δt=4 s liegt er
+über der CFL-Grenze und unter dem Ankerabstand. Dieser Schritt prüft
+ausschließlich, ob CUDA arbeitet — die inhaltliche Prüfung ist 6.2 und Kapitel 7,
+und die laufen mit den echten Einstellungen aus `config.yaml`.
 
 Parallel in einer zweiten Session `nvidia-smi` — der Python-Prozess muss dort
 mit belegtem Speicher auftauchen.
@@ -205,7 +212,7 @@ Was dabei passiert:
 
 - trainiert zwei Modelle: `w_phys=0.0` (data-only) und `w_phys=0.1` (mit Physik)
 - nur 5 Epochen, nur 2 OPs (OP01, OP02)
-- Test auf OP07 (held-out)
+- Test auf OP07 (held-out; im Full Benchmark ist OP07 der Val-OP)
 - Laufzeit: ~5 min auf CPU, auf der GPU entsprechend weniger
 
 Erwartete Outputs:
@@ -236,7 +243,7 @@ oder
 
 ### Entscheidung
 
-- **ALL CHECKS PASSED** → weiter zu Schritt 7.
+- **ALL CHECKS PASSED** → weiter zu [Kapitel 7](#7-erste-testreihe--läuft-in-7-stunden-durch).
 - **SOME CHECKS FAILED** → **stopp**, erst die Ursache klären:
   - Loss explodiert (inf/NaN) → CFL-Problem, `--subsample` verkleinern (z. B. `--subsample 2`)
   - Test-MAE > 20 °C → das Modell lernt nicht richtig
@@ -244,69 +251,478 @@ oder
 
 ---
 
-## 7. Full Benchmark (Extended Grid)
+## 7. Erste Testreihe — läuft in ~7 Stunden durch
 
-Sucht das optimale Paar `(w_phys, w_bc)` auf einem 10×10-Gitter. **Nur starten,
-wenn der Smoke-Test aus Schritt 6 PASSED ist.**
+Alles, was über Nacht fertig wird und danach entscheidet, ob und wie sich die
+großen Läufe aus [Kapitel 8](#8-große-benchmarks--tage) lohnen. Die Reihenfolge
+ist bindend: jeder Schritt ist ein Tor für den nächsten.
 
-### 7.1 Start
+| # | Schritt | Laufzeit | Weiter nur wenn |
+|---|---|---|---|
+| 1 | Smoke-Test | ~8 min | `ALL CHECKS PASSED` |
+| 2 | Zeit pro Epoche messen | ~10 min | — |
+| 3 | Range-Probe der Gewichte (`--epochs 20`) | ~6 h | — |
+| | **gesamt** | **~6,5 h** | |
+
+Der Trick, mit dem das in eine Nacht passt, ist `--epochs 20` statt 60. Für die
+Frage „in welcher Dekade wirkt ein Gewicht überhaupt" reicht das; für den
+Endwert eines Modells nicht. Kapitel 8 fährt dann mit 60 Epochen.
+
+> **Warum nicht mehr in 7 h?** Bei `--subsample 2` ist der Rollout ~7000
+> sequentielle Zeitschritte pro OP und Epoche. Eine Epoche über 5 Trainings-OPs
+> kostet grob **1,5–2,5 min**, ein Training mit 20 Epochen also ~40 min. Sieben
+> Stunden sind damit rund **zehn Trainings** — mehr ist in einer Nacht nicht
+> drin. Schritt 2 misst die echte Zahl; wenn sie deutlich abweicht, rechne das
+> Budget neu, bevor du Schritt 3 startest.
+
+**Datenaufteilung:** Training `OP01–OP05`, Validierung `OP06` (entscheidet die
+Auswahl), Test `OP07` (wird nur berichtet und fließt in keine Auswahl ein).
+
+---
+### 7.0 Was variabel ist — und was nicht
+
+Damit klar ist, woran man drehen kann und woran nicht.
+
+`config.yaml` und die Benchmarks verwenden dieselben Werte — `train.py` ohne
+Flags trainiert also dasselbe Modell, das die Benchmarks vermessen.
+
+**Struktur — konfigurierbar, aber nicht trainiert:**
+
+| Flag | Default | Bedeutung |
+|---|---|---|
+| `--subsample` | `2` | Datenraster: `dt = 0.1 s × subsample` → **0.2 s**. Bestimmt die Rollout-Länge und damit die Laufzeit. CFL-Grenze ~0.241 s |
+| `--history-mode` | `hybrid` | `hybrid` = Anker + Raten, `raw` = reiner Lag-Stapel |
+| `--delta-grid` | `0.2` s | **Anker** der History: `[T(t−Δgrid), rate₁, …]`, die Ratensegmente laufen von dort rückwärts. Unabhängig von `--subsample`. **Nur im `hybrid`-Modus wirksam** — im `raw`-Modus bestimmt stattdessen `δ` die Lag-Abstände |
+| `--rate-lags` | `5 20` | kumulative Segmentlängen in Sekunden; jedes Segment beginnt, wo das vorige endete. Nenner der Rate ist die **eigene Segmentlänge** (5 bzw. 20 s) — der Abstand der beiden Punkte, deren Differenz gebildet wird |
+| `--k-max` | `2` | nur im `raw`-Modus wirksam; im `hybrid`-Modus folgt `k` aus der Zahl der `rate_lags` und das Flag wird ignoriert |
+| `--width` / `--depth` | `128` / `4` | MLP-Geometrie |
+| `--time-deriv` | `bdf2` | Zeitableitung im Physik-Residuum |
+
+**Lernparameter** (die einzigen Dinge, die der Gradient anfasst): MLP-Gewichte,
+das per-Layer `β` des Swish, und die beiden Physik-Gains `src_gain`/`diff_gain`.
+Die History-Struktur wird **nicht** gelernt — kein lernbares `δ`, keine
+Lag-Gates. Wer sie optimieren will, sweept sie mit `benchmark_arch.py` (8.2).
+
+**Optimierung und Loss:**
+
+| Flag | Default | Bedeutung |
+|---|---|---|
+| `--epochs` | `60` | in Kapitel 7 bewusst `20` |
+| `--lr` | `2e-3` | Basis-Lernrate |
+| `--gain-lr-mult` | `25.0` | `src_gain`/`diff_gain` lernen 25× schneller, sonst bleiben sie bei 1.0 |
+| `--grad-clip` | `1.0` | maximale Gradientennorm |
+| `--w-phys` / `--w-bc` | `0.1` / `0.1`, in den Benchmarks gesweept | Gewichte von Physik- und BC-Term |
+| `--phys-norm` | `0` | `0` = adaptiver EMA, `>0` = fester Divisor |
+| `--batch-phys` / `--batch-bc` | `256` / `128` | Kollokationspunkte — hier liegt der GPU-Hebel |
+| `--seeds` | `0` | ein Trainingslauf je Seed, Bewertung über den Mittelwert (nur Benchmarks) |
+
+**Daten:** `--ops` (Training, `OP01–OP05`), `--val-op` (Auswahl, `OP06`),
+`--test-op` (nur Bericht, `OP07`). `--val-op` gibt es nur in den Benchmarks.
+
+Die Defaults stehen in `PINNmodulusTwo/config.yaml` und lassen sich dort
+dauerhaft ändern; die CLI überschreibt sie pro Lauf.
+
+---
+
+### 7.1 Schritt 1 — Smoke-Test (~8 min)
+
+Vollständig in **[Kapitel 6](#6-smoke-test)** beschrieben. Kurzfassung:
 
 ```bash
 cd ~/llmtraining
 source .venv/bin/activate
 
-nohup python3 PINNmodulusTwo/benchmark_wphys_wbc.py --extended-grid --device cuda \
-  > benchmark_extended.log 2>&1 &
+python3 PINNmodulusTwo/train.py --epochs 2 --device cuda
+python3 PINNmodulusTwo/smallBench.py --epochs 5 --w-phys 0.0 0.1 --w-bc 0.1 --device cuda
+cat PINNmodulusTwo/artifacts/smallBench_results.txt
+```
+
+Erwartung: `✓ ALL CHECKS PASSED - Ready for full benchmark!`
+
+Bei `[ABORT] ... loss exploded` **nicht** weitermachen — die Meldung nennt den
+zuerst betroffenen Loss-Term, siehe [Kapitel 10](#10-troubleshooting).
+
+---
+
+### 7.2 Schritt 2 — Zeit pro Epoche messen (~10 min)
+
+Bevor irgendetwas Langes startet: einen einzelnen kurzen Trainingslauf machen und
+die gemessene Zeit pro Epoche ablesen.
+
+```bash
+python3 PINNmodulusTwo/train.py --ops OP01 OP02 OP03 OP04 OP05 \
+  --subsample 2 --epochs 5 --history-mode hybrid --rate-lags 5 20 \
+  --grad-clip 1.0 --device cuda
+```
+
+Das Log meldet ab Epoche 1:
+
+```
+  epoch   1  L_data=...  [112.4s/epoch, this run ~7 min left]
+```
+
+Damit rechnest du selbst:
+
+```
+Sekunden/Epoche × 60 Epochen ÷ 3600        = Stunden pro Gitterpunkt
+Stunden/Punkt × Punkte × Seeds ÷ 24        = Tage für den Sweep
+```
+
+Bei 112 s/Epoche wären das 1,9 h pro Punkt — 100 Punkte also ~7,8 Tage. Wenn das
+zu viel ist, sind die Hebel in dieser Reihenfolge wirksam: weniger `--epochs`,
+kleineres Gitter, größeres `--subsample`.
+
+---
+
+#### Nebenbei: wie viel bringt die GPU hier eigentlich?
+
+Derselbe Lauf mit `--device cpu` beantwortet das in denselben zehn Minuten:
+
+```bash
+python3 PINNmodulusTwo/train.py --ops OP01 OP02 --subsample 2 --epochs 3 \
+  --history-mode hybrid --rate-lags 5 20 --grad-clip 1.0 --device cpu
+```
+
+Die Sekunden pro Epoche aus beiden Läufen ins Verhältnis setzen — **erwarte
+keinen großen Faktor.** Der Grund steckt in der Struktur der Last:
+
+| Anteil | parallelisierbar? | GPU-Gewinn |
+|---|---|---|
+| Rollout: ~7000 sequentielle Schritte je OP und Epoche | nein, jeder Schritt braucht den vorherigen | gering |
+| Python-Schleife und Kernel-Starts, ~37.000 Iterationen je Epoche | nein, identisch auf beiden | keiner |
+| MLP-Matmuls je Schritt (363 Punkte × 128 breit) | ja, aber winzig | klein |
+| Physik-Residuum (`--batch-phys`, doppeltes Autograd) | ja, echte Parallelarbeit | groß |
+
+Die GPU gewinnt dort, wo tatsächlich große Batches anfallen — beim
+Physik-Residuum. Der Rollout, der die Laufzeit dominiert, ist latenzgebunden und
+läuft auf beiden ähnlich schnell. Deshalb steht in der Troubleshooting-Tabelle
+auch „läuft auf der GPU kaum schneller" als *erwartbar*, nicht als Fehler.
+
+**Praktische Konsequenz:** wenn `nvidia-smi` viel freien Speicher zeigt, ist
+`--batch-phys 2048 --batch-bc 1024` der Hebel, der die GPU wirklich nutzt — nicht
+ein breiteres Netz.
+
+---
+
+### 7.3 Schritt 3 — Range-Probe: in welcher Dekade wirken die Gewichte? (~6 h)
+
+Bevor ein Gitter Stunden investiert, um Unterschiede *innerhalb* eines Bereichs
+aufzulösen, klärt die Probe, ob dieser Bereich überhaupt der richtige ist — und
+ob die Gewichte den Fehler überhaupt bewegen.
+
+Statt eines Gitters läuft ein **Kreuz** durch einen gemeinsamen Mittelpunkt:
+jedes Gewicht wird über die Dekaden `[0, 0.001, 0.01, 0.1, 1.0]` gefahren,
+während das andere im Zentrum steht. **9 Punkte statt 25.**
+
+```bash
+# 9 Punkte x 1 Seed x 20 Epochen = 9 Trainings ~ 6 h
+python3 PINNmodulusTwo/benchmark_wphys_wbc.py --probe --epochs 20 --device cuda
+```
+
+> **Ein Seed, mit Absicht.** `--seeds 0 1 2` wären 27 Trainings und damit ~18 h —
+> das sprengt die Nacht. Der Preis: das Verdikt kann die gefundenen Unterschiede
+> nicht vom Init-Rauschen trennen und sagt das auch (`seed spread unknown`). Die
+> Streuung klärt Schritt 8.1 separat. Für „welche Dekade überhaupt" reicht ein
+> Seed, solange die Spannweite deutlich ist.
+
+`benchmark_wphys_wbc_best.txt` endet dann mit einem Verdikt pro Achse:
+
+```
+RANGE PROBE - per-axis verdict:
+  w_phys (at w_bc=0.1):
+    0->9.12  0.001->8.94  0.01->8.71  0.1->8.83  1->10.40
+    best w_phys=0.01 (val 8.710 °C), span over the decades = 1.690 °C
+    span exceeds the seed spread (0.210 °C) - worth a grid, centred on the best decade.
+```
+
+Liegt die Spannweite **unter** der Seed-Streuung, bewegt dieses Gewicht den
+Fehler nicht — dann spart man sich das Gitter dafür.
+
+---
+
+### 7.4 Auswertung — was als Nächstes?
+
+```bash
+cat PINNmodulusTwo/artifacts/benchmark_wphys_wbc_best.txt
+```
+
+Am Ende steht das Verdikt je Achse. Daraus folgt direkt, was aus Kapitel 8 sich
+lohnt:
+
+| Befund in der Probe | Konsequenz |
+|---|---|
+| Spannweite über die Dekaden **groß**, klares Minimum | 5×5-Gitter (8.3), zentriert auf diese Dekade |
+| Spannweite **klein / flach** | Gitter für dieses Gewicht überspringen — es bewegt den Fehler nicht |
+| beide Gewichte flach | zuerst Architektur-Benchmark (8.2): das Problem liegt woanders |
+| Läufe divergiert (`[SKIP]`) | nicht weitermachen, [Kapitel 10](#10-troubleshooting) |
+
+Die Probe lief mit **einem** Seed, das Verdikt sagt deshalb „seed spread
+unknown". Ob die gefundenen Unterschiede echt sind, klärt Schritt 8.1.
+
+---
+
+### 7.5 Komplette Session zum Kopieren
+
+```bash
+# ---------------------------------------------------------------------------
+# SCHRITT 1: SMOKE-TEST  (~8 min)
+# ---------------------------------------------------------------------------
+cd ~/llmtraining
+source .venv/bin/activate
+
+python3 PINNmodulusTwo/smallBench.py --epochs 5 --w-phys 0.0 0.1 --w-bc 0.1 --device cuda
+cat PINNmodulusTwo/artifacts/smallBench_results.txt
+# Erwartung: "✓ ALL CHECKS PASSED - Ready for full benchmark!"
+# NUR bei PASSED weitermachen.
+
+# ---------------------------------------------------------------------------
+# SCHRITT 2: ZEIT PRO EPOCHE MESSEN  (~10 min)  <- bestimmt das Budget
+# ---------------------------------------------------------------------------
+python3 PINNmodulusTwo/train.py --ops OP01 OP02 OP03 OP04 OP05 \
+  --subsample 2 --epochs 5 --history-mode hybrid --rate-lags 5 20 \
+  --grad-clip 1.0 --device cuda
+# Log: "[112.4s/epoch, this run ~7 min left]"
+# 9 Punkte x 20 Epochen x (Sekunden/Epoche) / 3600 = Stunden fuer Schritt 3.
+# Deutlich ueber 7 h? Dann --epochs 10 nehmen.
+
+# ---------------------------------------------------------------------------
+# SCHRITT 3: RANGE-PROBE  (9 Punkte, ~6 h)  -> ueber Nacht
+# ---------------------------------------------------------------------------
+nohup python3 PINNmodulusTwo/benchmark_wphys_wbc.py --probe --epochs 20 \
+  --device cuda > probe.log 2>&1 &
+echo $! > probe.pid
+
+echo "PID:  $(cat probe.pid)"
+echo "Live: tail -f probe.log"
+echo "Stop: kill \$(cat probe.pid)"
+# Terminal kann jetzt geschlossen werden.
+
+# ---------------------------------------------------------------------------
+# AM NAECHSTEN MORGEN
+# ---------------------------------------------------------------------------
+grep -A20 'RANGE PROBE' PINNmodulusTwo/artifacts/benchmark_wphys_wbc_best.txt
+```
+
+---
+
+### 7.6 Checkliste
+
+Vor dem Start:
+
+- [ ] venv aktiviert (`source .venv/bin/activate`)
+- [ ] `ls data_cache/*.npz` zeigt OP01–OP07
+- [ ] Smoke-Test gelaufen und PASSED
+- [ ] Zeit pro Epoche gemessen und das 7-h-Budget nachgerechnet
+- [ ] `nohup` oder `tmux` benutzt, damit der Lauf die SSH-Session überlebt
+
+Danach:
+
+- [ ] Verdikt je Achse gelesen — welche Dekade, und bewegt sich überhaupt etwas?
+- [ ] entschieden, welcher Lauf aus Kapitel 8 als Nächstes kommt
+
+---
+
+## 8. Große Benchmarks — Tage
+
+Alles hier läuft mit **60 Epochen** und dauert Tage, nicht Stunden. Erst starten,
+wenn Kapitel 7 durch ist und die Probe gesagt hat, wo es sich lohnt.
+
+| Lauf | Trainings | Laufzeit |
+|---|---|---|
+| 8.1 Seed-Streuung an einem Punkt | 3–5 | ~6–10 h |
+| 8.2 Architektur-Benchmark (16 Konfigs) | 16 | ~1–1,5 Tage |
+| 8.3 5×5-Gitter der Gewichte | 25 | ~1,5–2 Tage |
+| 8.3 mit `--extended-grid` (10×10) | 100 | ~6–8 Tage |
+
+Mit Seeds multipliziert sich das entsprechend. `--epochs 20` drittelt alles und
+ist für Vergleiche zwischen Konfigurationen meist ausreichend.
+
+---
+### 8.1 Seed-Streuung an einem Gitterpunkt
+
+**Der erste Lauf dieses Kapitels**, weil er entscheidet, wie die anderen zu
+lesen sind. Er beantwortet: bewegt sich der Fehler zwischen zwei Konfigurationen
+mehr, als er sich zwischen zwei Zufalls-Initialisierungen *derselben*
+Konfiguration bewegt? Ist die Antwort nein, sind die Rangfolgen aller folgenden
+Läufe Rauschen — und ein feineres Gitter macht es nicht besser.
+
+```bash
+# 5 Seeds an einem Punkt, ~10 h. Mit --epochs 20 sind es ~3 h.
+python3 PINNmodulusTwo/benchmark_wphys_wbc.py \
+  --w-phys 0.05 --w-bc 0.1 --seeds 0 1 2 3 4 --epochs 60 --device cuda
+```
+
+Dann in `benchmark_wphys_wbc_best.txt` die Spalte `+/-` ansehen — das ist die
+Standardabweichung über die fünf Seeds.
+
+- **Streuung klein** (deutlich unter den Unterschieden, die du in einer Heatmap
+  vergleichen willst): die langen Sweeps liefern lesbare Rangfolgen.
+- **Streuung groß**: ein feineres Gitter bringt nichts, weil der Sieger ohnehin
+  vom Zufall bestimmt wird. Dann in 8.2 und 8.3 **mit `--seeds 0 1 2`**
+  arbeiten und die Gitter kleiner halten.
+
+---
+
+### 8.2 Architektur-Benchmark
+
+Misst Breite, Tiefe und History-Lags — Werte, die im Gewichte-Sweep ungemessen
+festliegen. Läuft **eine Achse nach der anderen** gegen eine gemeinsame
+Baseline, statt ein Produktgitter aufzuspannen: die Frage ist, welcher Regler den
+Fehler überhaupt bewegt. `width × depth × lags` wären mehrere hundert Trainings,
+achsenweise sind es zwölf.
+
+```bash
+nohup python3 PINNmodulusTwo/benchmark_arch.py --device cuda --seeds 0 1 2 \
+  > benchmark_arch.log 2>&1 &
+
+# oder nur eine Achse, z. B. die Lags:
+python3 PINNmodulusTwo/benchmark_arch.py --axes lags --seeds 0 1 2 --device cuda
+```
+
+| Achse | Werte | Konfigurationen |
+|---|---|---|
+| `width` | 64, 128, 256 | 3 |
+| `depth` | 2, 3, 4, 6 | 4 |
+| `lags` | 5+20, 2+10, 10+60, 5+20+60, 30 | 5 |
+| `dgrid` | 0.2, 0.5, 1.0, 2.0 s | 4 |
+| | **gesamt** | **16** |
+
+`dgrid` ist der **Ankerabstand** der Hybrid-History: der Block ist
+`[T(t−Δgrid), rate₁, rate₂]`, und die Ratensegmente laufen von diesem Anker aus
+rückwärts. Bisher war er fest an den Datenraster-Schritt gekoppelt — jetzt ist er
+ein eigener Regler mit Default 0.2 s (also unverändertes Verhalten).
+
+Die Baseline (`--width 128 --depth 4 --rate-lags 5 20`) taucht in jeder Achse
+einmal auf. Das ist Absicht: jede Achse braucht ihren eigenen Bezugspunkt, und
+dieselbe Konfiguration mehrfach zu trainieren zeigt nebenbei die reine
+Seed-Streuung.
+
+**Outputs**
+
+```
+PINNmodulusTwo/artifacts/benchmark_arch.csv       -> eine Zeile pro Konfiguration
+PINNmodulusTwo/artifacts/benchmark_arch.png       -> ein Panel je Achse, Fehlerbalken = Seed-Streuung
+PINNmodulusTwo/artifacts/benchmark_arch_best.txt  -> Ranking, Baseline-Vergleich, Rausch-Verdikt
+```
+
+Der entscheidende Abschnitt in `benchmark_arch_best.txt` heißt **"Span per
+axis"**: die Spannweite der Validierungs-MAE über jede Achse. Liegt sie unter der
+Seed-Streuung, steht dort *"this knob does not matter here"* — dann lohnt es
+nicht, diesen Regler weiter zu drehen.
+
+**Laufzeit**
+
+| Umfang | Trainings | Laufzeit bei 2 h/Training |
+|---|---|---|
+| nur `width`, 1 Seed | 3 | ~6 h |
+| nur `lags`, 1 Seed | 5 | ~10 h |
+| alle Achsen, 1 Seed | 12 | **~1 Tag** |
+| alle Achsen, 3 Seeds | 36 | ~3 Tage |
+
+> Setze die in 7.2 gemessene Zeit pro Training ein, statt diese Tabelle zu
+> übernehmen. Die Werte gelten außerdem für `width=128`: breitere Netze kosten
+> mehr pro Schritt, aber der Rollout ist latenzgebunden (~7000 sequentielle
+> Zeitschritte), nicht rechengebunden — `width=256` skaliert daher schwächer als
+> die vierfache FLOP-Zahl vermuten lässt.
+>
+> Mit `--epochs 20` statt 60 drittelt sich alles. Für die Frage „welche Achse
+> bewegt überhaupt etwas" reicht das meist.
+
+---
+
+### 8.3 5×5-Gitter der Loss-Gewichte
+
+Sucht das optimale Paar `(w_phys, w_bc)` auf dem 5×5-Standardgitter — zentriert
+auf die Dekade, die die Range-Probe aus 7.3 als wirksam ausgewiesen hat.
+
+```bash
+cd ~/llmtraining
+source .venv/bin/activate
+
+# Werte an die Dekade aus der Probe anpassen:
+nohup python3 PINNmodulusTwo/benchmark_wphys_wbc.py --device cuda \
+  --w-phys 0.003 0.01 0.03 0.1 0.3 --w-bc 0.03 0.1 0.3 0.7 1.0 \
+  > benchmark_grid.log 2>&1 &
 echo $! > benchmark.pid
 
-echo "Full Benchmark gestartet - PID $(cat benchmark.pid), Log: benchmark_extended.log"
+echo "Gitter gestartet - PID $(cat benchmark.pid), Log: benchmark_grid.log"
 ```
 
 Durch `nohup` läuft der Benchmark weiter, wenn das Terminal geschlossen wird.
 Wer lieber interaktiv mitliest, nimmt stattdessen `tmux new -s bench` und startet
 das Kommando ohne `nohup`/`&` (Detach mit `Ctrl-b`, dann `d`).
 
-### 7.2 Was läuft
-
 | Parameter | Wert |
 |---|---|
-| Grid | 10×10 = 100 Punkte (quasi-logarithmisch) |
-| `w_phys` | 0.0, 0.001, 0.005, 0.01, 0.03, 0.05, 0.1, 0.2, 0.5, 1.0 |
-| `w_bc` | 0.0, 0.001, 0.005, 0.01, 0.03, 0.05, 0.1, 0.3, 0.7, 1.0 |
-| Trainings-OPs | OP01–OP06 |
-| Test-OP | OP07 (held-out) |
+| Grid | 5×5 = 25 Punkte (Default) |
+| `w_phys` / `w_bc` | über `--w-phys` / `--w-bc` auf die gefundene Dekade legen |
+| Trainings-OPs | OP01–OP05 |
+| Val-OP (Auswahl) | OP06 |
+| Test-OP (nur Bericht) | OP07 |
+| Seeds | 1 (`--seeds`, siehe 8.4) |
 | Epochen | 60 pro Gitterpunkt |
-| Laufzeit | ~17 min/Punkt → **~28 h** (CPU-Referenzwert) |
+| Laufzeit | 1,5–2,5 h/Punkt → **~1,5–2 Tage** |
 
-Die ~28 h stammen aus CPU-Läufen. Die echte GPU-Laufzeit steht im Log: nach jedem
-Punkt wird `Train time: ... min | ETA: ... min` aus den tatsächlich gemessenen
-Zeiten ausgegeben. Nach zwei, drei Punkten weißt du, woran du bist.
+Mit `--epochs 20` sind es ~14 h. Wenn 8.1 eine große Seed-Streuung gezeigt hat,
+ist ein kleines Gitter mit drei Seeds aussagekräftiger als ein großes mit einem.
 
-Ohne `--extended-grid` läuft das kleinere 5×5-Standardgitter (25 Punkte, ~7 h auf CPU).
+**`--extended-grid`** schaltet auf 10×10 = 100 Punkte um, also **~6–8 Tage bei
+einem Seed**. Das lohnt praktisch nie: die Probe hat die Dekade bereits
+eingegrenzt, und 100 Punkte auf einem Seed liefern vor allem das Minimum aus 100
+Ziehungen — siehe das Rausch-Verdikt in 8.4.
 
-### 7.3 Erwartete Outputs
+---
+
+### 8.4 Seeds — wie viele Läufe pro Gitterpunkt
+
+Standard ist **ein** Seed pro Punkt. Damit ist nicht entscheidbar, ob der
+Unterschied zwischen zwei Zellen der Heatmap echt ist oder nur unterschiedliche
+Initialisierung: der Sweep berichtet das Minimum aus 100 Ziehungen, und ein Teil
+davon ist schlicht der glücklichste Startwert.
+
+```bash
+# drei Seeds pro Punkt: jeder Punkt wird über den Mittelwert bewertet
+python3 PINNmodulusTwo/benchmark_wphys_wbc.py --seeds 0 1 2 --device cuda
+```
+
+Jeder Punkt wird dann über den **Mittelwert** seiner Seeds bewertet und trägt die
+Standardabweichung mit (Spalten `MAE_val_std_C` / `MAE_test_std_C` in der CSV,
+Spalten `+/-` in der Tabelle). `benchmark_wphys_wbc_best.txt` vergleicht am Ende
+den Abstand des Siegers zum Zweitplatzierten mit der Seed-Streuung und sagt
+explizit, ob die Rangfolge belastbar ist oder im Rauschen liegt.
+
+> **Laufzeit skaliert linear.** 25 Punkte × 3 Seeds = 75 Trainings, also
+> ~4,5–6 Tage bei 60 Epochen — mit `--epochs 20` rund 1,7 Tage.
+
+---
+
+### 8.5 Erwartete Outputs
 
 ```
 PINNmodulusTwo/artifacts/benchmark_wphys_wbc.csv               -> alle 100 Punkte
-PINNmodulusTwo/artifacts/benchmark_wphys_wbc_heatmap.png       -> 2D-MAE-Heatmap
+PINNmodulusTwo/artifacts/benchmark_wphys_wbc_heatmap.png       -> 2D-MAE-Heatmap (Val)
 PINNmodulusTwo/artifacts/benchmark_wphys_wbc_convergence.png   -> Loss-Kurven (Ecken + Best)
 PINNmodulusTwo/artifacts/benchmark_wphys_wbc_best.txt          -> beste Kombination + Tabelle
 PINNmodulusTwo/artifacts/checkpoints_wphys_wbc/*.pt            -> 100 Modelle (mehrere GB!)
 ```
 
-### 7.4 Monitoring
+---
+
+### 8.6 Monitoring
+
+Gilt für jeden der Läufe oben — Log- und PID-Datei entsprechend ersetzen (`probe.log`/`probe.pid`, `benchmark_arch.log`, `benchmark_grid.log`).
 
 ```bash
 # Live mitlesen (Ctrl-C beendet nur tail, nicht den Benchmark)
-tail -f benchmark_extended.log
+tail -f benchmark_grid.log
 
 # Welcher Punkt läuft gerade?
-grep "Training w_phys" benchmark_extended.log | tail -3
+grep "Training w_phys" benchmark_grid.log | tail -3
 #   [23/100] Training w_phys=0.05, w_bc=0.1
 
 # Restlaufzeit
-grep "ETA" benchmark_extended.log | tail -3
-#   Train time: 16.8 min | ETA: 1155.0 min
+grep "ETA" benchmark_grid.log | tail -3
+#   Train time: 118.3 min | ETA: 11712.0 min
 
 # Wie viele Ergebnisse stehen schon in der CSV? (steigt bis 101 = Header + 100)
 wc -l PINNmodulusTwo/artifacts/benchmark_wphys_wbc.csv
@@ -329,7 +745,9 @@ parallele Läufe je einen Prozess pro Karte starten — `--device cuda:0`,
 alle Läufe schreiben nach `PINNmodulusTwo/artifacts/` und überschreiben sich
 gegenseitig, also Artefakte pro Lauf wegsichern oder `--model-dir` setzen.
 
-### 7.5 Auswertung nach Abschluss
+---
+
+### 8.7 Auswertung nach Abschluss
 
 ```bash
 cat PINNmodulusTwo/artifacts/benchmark_wphys_wbc_best.txt
@@ -338,27 +756,41 @@ cat PINNmodulusTwo/artifacts/benchmark_wphys_wbc_best.txt
 Erwartete Ausgabe (Ende der Datei):
 
 ```
-BEST (by held-out MAE): w_phys=0.1, w_bc=0.3  -> held-out 8.220°C, in-time 6.432°C
-Total runtime: 27.85 hours (1671.2 min)
+Selection ran on OP06 (MAE_val); OP07 (MAE_test) was never used to choose anything.
+BEST (by MAE_val): w_phys=0.1, w_bc=0.3
+  -> val 8.220°C, test 8.641°C, in-time 6.432°C
+  Report the test number. MAE_val is optimistic: it is the minimum over 100 grid points.
+  NOTE: one seed per point - the ranking cannot be separated from init noise.
+  Re-run with --seeds 0 1 2 to find out.
+Total runtime: 4.85 hours (291.2 min)
 Checkpoints dir: /home/user/llmtraining/PINNmodulusTwo/artifacts/checkpoints_wphys_wbc
 ```
 
-Die besten Werte sind immer Gitterpunkte aus 7.2.
+**Berichtet wird die Test-Zahl, nicht die Val-Zahl.** Die Val-MAE ist das Minimum
+über alle Gitterpunkte und damit zu optimistisch.
 
 ```bash
 # Plots
 ls -lh PINNmodulusTwo/artifacts/benchmark_wphys_wbc*.png
 
-# Top 10 nach held-out MAE (Spalte 7 = MAE_test_C; Spalte 6 ist die in-time MAE!)
+# Top 10 nach Val-MAE - das ist die Spalte, auf der ausgewaehlt wurde.
+# Spalten: 6=MAE_in_C  7=MAE_val_C  8=MAE_val_std_C  9=MAE_test_C  10=MAE_test_std_C
 head -1 PINNmodulusTwo/artifacts/benchmark_wphys_wbc.csv && \
   tail -n +2 PINNmodulusTwo/artifacts/benchmark_wphys_wbc.csv | sort -t',' -k7 -n | head -10
+
+# Dieselben Punkte mit ihrer Test-MAE (Spalte 9) - die Zahl, die berichtet wird.
+# Wenn die Reihenfolge hier stark von der obigen abweicht, ist die Auswahl instabil.
+tail -n +2 PINNmodulusTwo/artifacts/benchmark_wphys_wbc.csv | sort -t',' -k7 -n | \
+  head -10 | cut -d',' -f1,2,7,8,9,10
 
 # Checkpoints: Anzahl und Platzbedarf
 ls PINNmodulusTwo/artifacts/checkpoints_wphys_wbc/ | wc -l   # sollte 100 sein
 du -sh PINNmodulusTwo/artifacts/checkpoints_wphys_wbc/
 ```
 
-### 7.6 Abbrechen und neu starten
+---
+
+### 8.8 Abbrechen und neu starten
 
 ```bash
 kill $(cat benchmark.pid)
@@ -369,13 +801,15 @@ ps -p $(cat benchmark.pid)   # "No such process" = gestoppt
 
 **Es gibt keine Resume-Funktion** — ein Neustart beginnt wieder bei Punkt 1.
 
-### 7.7 Weiter mit den besten Gewichten
+---
+
+### 8.9 Weiter mit den besten Gewichten
 
 ```bash
 # Werte aus benchmark_wphys_wbc_best.txt einsetzen
 python3 PINNmodulusTwo/train.py \
     --epochs 100 --w-phys 0.1 --w-bc 0.3 --subsample 2 \
-    --ops OP01 OP02 OP03 OP04 OP05 OP06 --test-op OP07 --device cuda
+    --ops OP01 OP02 OP03 OP04 OP05 --test-op OP07 --device cuda
 ```
 
 Bestes Checkpoint laden (Dateiname folgt dem Schema `model_p<w_phys>_b<w_bc>.pt`,
@@ -393,60 +827,9 @@ model.eval()
 # ckpt["bundle_stats"] enthält T_mu / T_sigma / T_span_ref zum Rückskalieren
 ```
 
-### 7.8 Komplette Session zum Kopieren
-
-```bash
-# ---------------------------------------------------------------------------
-# TEIL 1: SMOKE TEST
-# ---------------------------------------------------------------------------
-cd ~/llmtraining
-source .venv/bin/activate
-
-python3 PINNmodulusTwo/train.py --epochs 2 --subsample 40 --device cuda
-python3 PINNmodulusTwo/smallBench.py --epochs 5 --w-phys 0.0 0.1 --w-bc 0.1 --device cuda
-cat PINNmodulusTwo/artifacts/smallBench_results.txt
-# Erwartung: "✓ ALL CHECKS PASSED - Ready for full benchmark!"
-
-# ---------------------------------------------------------------------------
-# TEIL 2: FULL BENCHMARK  -  nur bei PASSED starten!
-# ---------------------------------------------------------------------------
-nohup python3 PINNmodulusTwo/benchmark_wphys_wbc.py --extended-grid --device cuda \
-  > benchmark_extended.log 2>&1 &
-echo $! > benchmark.pid
-
-echo "PID:  $(cat benchmark.pid)"
-echo "Log:  benchmark_extended.log"
-echo "Live: tail -f benchmark_extended.log"
-echo "Stop: kill \$(cat benchmark.pid)"
-# Terminal kann jetzt geschlossen werden.
-
-tail -f benchmark_extended.log   # optional, Ctrl-C beendet nur das tail
-```
-
-### 7.9 Checkliste
-
-Vor dem Start:
-
-- [ ] venv aktiviert (`source .venv/bin/activate`)
-- [ ] Smoke-Test gelaufen und PASSED
-- [ ] genug Plattenplatz (~10–20 GB für die Checkpoints, `df -h`)
-- [ ] `nohup` oder `tmux` benutzt, damit der Lauf die SSH-Session überlebt
-
-Während des Laufs:
-
-- [ ] alle paar Stunden ins Log schauen (`tail benchmark_extended.log`)
-- [ ] Prozess läuft noch (`ps -p $(cat benchmark.pid)`)
-- [ ] GPU wird ausgelastet (`nvidia-smi`)
-
-Danach:
-
-- [ ] beste Kombination aus `benchmark_wphys_wbc_best.txt` notieren
-- [ ] Heatmap und Convergence-Plot ansehen
-- [ ] Production-Training mit den optimalen Gewichten starten
-
 ---
 
-## 8. Ergebnisse zurückholen
+## 9. Ergebnisse zurückholen
 
 ```bash
 rsync -avz user@gpu-server:~/llmtraining/PINNmodulusTwo/artifacts/ ./artifacts/
@@ -463,7 +846,7 @@ Enthält je nach gelaufenem Schritt:
 Das Benchmark-Log liegt dort, wo der Lauf gestartet wurde:
 
 ```bash
-rsync -avz user@gpu-server:~/llmtraining/benchmark_extended.log ./
+rsync -avz user@gpu-server:~/llmtraining/benchmark_grid.log ./
 ```
 
 Die Plots werden mit dem `Agg`-Backend erzeugt, es wird also kein X-Server auf
@@ -471,7 +854,7 @@ dem Server gebraucht.
 
 ---
 
-## 9. Troubleshooting
+## 10. Troubleshooting
 
 | Symptom | Ursache / Abhilfe |
 |---|---|
@@ -487,14 +870,14 @@ dem Server gebraucht.
 | `No space left on device` während des Benchmarks | Die 100 Checkpoints brauchen mehrere GB → mit `--no-save-models` (gar keine) oder `--save-best-only` (nur das beste Modell) neu starten. |
 | Benchmark startet nicht, "läuft schon" | Alten Prozess finden und beenden: `ps aux \| grep benchmark_wphys_wbc`, dann `kill <PID>`. |
 | Loss explodiert mitten im Benchmark | Lauf stoppen (`kill $(cat benchmark.pid)`) und mit stabileren Einstellungen neu starten: `--grad-clip 2.0 --lr 0.001`. |
-| Läuft auf der GPU kaum schneller | Erwartbar bei kleinen Batches: pro Epoche gibt es viele *sequentielle* Rollout-Schritte, die sich nicht parallelisieren lassen. Batchgrößen erhöhen (Schritt 7). |
+| Läuft auf der GPU kaum schneller | Erwartbar: pro Epoche gibt es ~7000 *sequentielle* Rollout-Schritte je OP, die sich nicht parallelisieren lassen. Batchgrößen erhöhen hilft nur dem Physik-Term (8.6). |
 
 ---
 
 ## Was der GPU-Umbau am Code geändert hat
 
 - `device_utils.py` (neu): `resolve_device()`, `seed_everything()`, `enable_tf32()`.
-- `train.py`, `smallBench.py`, `benchmark_wphys.py`, `benchmark_wphys_wbc.py`:
+- `train.py`, `smallBench.py`, `benchmark_wphys_wbc.py`:
   `--device` steht jetzt auf `auto` statt `cpu`; ein explizites `cuda` schlägt
   hart fehl, wenn keine GPU da ist, statt still auf die CPU zu wechseln.
 - `train.py`: zusätzliches `--tf32`-Flag, `torch.cuda.manual_seed_all()` beim Seeding.

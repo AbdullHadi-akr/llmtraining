@@ -9,9 +9,23 @@ Split of responsibilities (the Notion "~50:50 Modulus:PyTorch" method #2):
         - a per-layer *learnable swish*  ``x * sigmoid(beta * x)``  (beta learned per
             layer, exactly as described in the Notion page),
     - the temperature *history* channels  ``T_{t-delta}, ..., T_{t-k delta}``,
-    - a **learnable delta** (history spacing) via differentiable time
-      interpolation, and a soft **variable-k** gate so the model can switch lags
-      on/off instead of us hard-coding how many are useful.
+    - differentiable time interpolation of that history, so a history value can be
+      read at any time between two grid points.
+
+What is learned and what is not
+-------------------------------
+Deliberately fixed (configured once, never trained):
+
+* ``delta``  -- history spacing, a registered buffer, NOT a parameter.
+* ``k_max``  -- number of history channels. In hybrid mode it follows directly
+  from the number of ``rate_lags`` (k_max = 1 anchor + one channel per lag).
+* ``gates()`` -- returns all-ones. There is no soft lag gating: every history
+  channel is always fully on. The method is kept so logging and checkpoints keep
+  a stable shape.
+* ``rate_lags`` -- hybrid-mode segment lengths, also a buffer.
+
+Learned: the MLP weights, the per-layer swish ``beta``, and the physics gains
+``src_gain``/``diff_gain``. Nothing about the history layout is trained.
 """
 
 from __future__ import annotations
@@ -20,7 +34,6 @@ from typing import Sequence
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 
 try:
     from modulus.models.layers import FCLayer
@@ -122,14 +135,16 @@ def interp_history(
     Args:
         Tn_seq: (n_t, n_points) normalised temperature sequence for ONE OP.
         dtn: uniform spacing of the normalised time grid.
-        tq: (B,) query times in normalised units (may depend on a learnable delta).
+        tq: (B,) query times in normalised units.
         p_idx: (B,) point index for each query (history is per grid point).
 
     Returns:
         (B,) interpolated normalised temperature at ``(tq, p_idx)``.
 
     The bracketing indices are detached (non-differentiable), but the linear blend
-    weight is a smooth function of ``tq`` -- hence gradients flow into ``delta``.
+    weight is a smooth function of ``tq``. The history layout is fixed, so no
+    gradient flows into the query time itself; the interpolation exists so a lag
+    may land between two grid points, not to train the lag.
     """
     n_t = Tn_seq.shape[0]
     pos = torch.clamp(tq / dtn, min=0.0, max=float(n_t - 1))
@@ -154,9 +169,11 @@ class RecurrentField(nn.Module):
     * ``config``  -- the (possibly time-varying) operating-point features.
     * ``history`` -- history channels built in either raw or hybrid mode.
 
-    History is read through the differentiable :func:`interp_history` so that
-    ``delta`` is learnable in raw mode. The history is ALWAYS the model's own
-    past predictions (never a ground-truth teacher signal): training feeds the
+    History is read through the differentiable :func:`interp_history`, which lets a
+    lag land between two grid points. ``delta`` and ``k_max`` are fixed
+    hyperparameters and ``gates()`` is all-ones -- see the module docstring for
+    the full list of what is learned. The history is ALWAYS the model's own past
+    predictions (never a ground-truth teacher signal): training feeds the
     free-running rollout buffer back in.
     """
 
@@ -172,6 +189,9 @@ class RecurrentField(nn.Module):
         num_layers: int = 4,
         delta_seconds: float = 1.0,
         dtn: float = 1.0,
+        t_span_ref: float = 1.0,
+        rate_scale: float = 1.0,
+        delta_grid: float | None = None,
         weight_norm: bool = True,
         beta_init: float = 1.0,
         use_autograd_time: bool = False,
@@ -179,12 +199,20 @@ class RecurrentField(nn.Module):
         super().__init__()
         self.history_mode = history_mode
         self._n_lags = len(rate_lags)
+        # In hybrid mode the channel count follows from the history layout itself
+        # (1 anchor + one rate per lag), so the ``k_max`` argument does not apply
+        # there -- callers passing one get it overridden on purpose.
         self.k_max = 1 + self._n_lags if history_mode == "hybrid" else k_max
         
-        # Learnable rate_lags: store raw values, use softplus to ensure positive
-        # Initialize so that softplus(raw) ≈ desired lag values
-        raw_lags = [float(lag) for lag in rate_lags]  # softplus(x) ≈ x for x > 3
-        self._raw_rate_lags = nn.Parameter(torch.tensor(raw_lags))
+        # Fixed rate_lags: the segment lengths are configured, not trained, in line
+        # with delta / k_max / gates. Stored as a plain buffer in NORMALISED time,
+        # so what the CLI asks for is exactly what the history layout uses. (The
+        # earlier learnable version ran them through softplus, which silently
+        # turned a requested 5 s lag into 1024 s because softplus(x) ~ x does not
+        # hold for the tiny normalised values -- no softplus, no such failure.)
+        self.register_buffer(
+            "_rate_lags", torch.tensor([float(lag) for lag in rate_lags])
+        )
         self.n_config = n_config
         self.n_static = n_static
         self.n_forcing = n_forcing
@@ -204,21 +232,52 @@ class RecurrentField(nn.Module):
         else:
             self.mlp_with_time = None
 
-        self.register_buffer("_delta", torch.tensor(float(delta_seconds)))
+        # ``_delta`` is consumed as NORMALISED time everywhere (history_at,
+        # heat_residual, and benchmark readback via delta * T_span_ref), so the
+        # seconds value has to be normalised on the way in. Storing the raw 1.0
+        # meant "one whole trajectory" (~1474 s) instead of one second: every
+        # BDF stencil then read the initial condition and divided by a step
+        # ~1500x too large, which silently invalidated L_phys.
+        self.register_buffer(
+            "_delta", torch.tensor(float(delta_seconds) / (float(t_span_ref) + 1e-30))
+        )
+        self.register_buffer("_dtn", torch.tensor(float(dtn)))
+        # Anchor lag of the hybrid history, in NORMALISED time. It used to be
+        # hardwired to the data grid step, which silently tied "how far back is
+        # the anchor" to "how finely is the trajectory sampled" -- two unrelated
+        # questions. Now it is its own knob; None keeps the old coupling.
+        self.register_buffer(
+            "_delta_grid",
+            torch.tensor(float(dtn if delta_grid is None else delta_grid)),
+        )
+        self.rate_scale = float(rate_scale)
 
         self.log_src_gain = nn.Parameter(torch.zeros(()))
         self.log_diff_gain = nn.Parameter(torch.zeros(()))
-        self.raw_cool = nn.Parameter(torch.tensor(-2.0))
-        self.amb = nn.Parameter(torch.zeros(()))
 
     @property
     def delta(self) -> torch.Tensor:
+        """Lag of the physics BDF stencil, NORMALISED. Fixed, not learned.
+
+        Distinct from :attr:`delta_grid`: this one only feeds ``history_at`` and
+        therefore the finite-difference time derivative in ``physics.py``.
+        """
         return self._delta
 
     @property
+    def delta_grid(self) -> torch.Tensor:
+        """Anchor lag of the hybrid history, NORMALISED. Fixed, not learned.
+
+        The hybrid history is ``[T(t-delta_grid), rate_1, rate_2, ...]`` and the
+        rate segments cascade backwards from that same anchor point, so this sets
+        where the whole history block is rooted.
+        """
+        return self._delta_grid
+
+    @property
     def rate_lags(self) -> torch.Tensor:
-        """Learnable segment lengths (always positive via softplus)."""
-        return F.softplus(self._raw_rate_lags)
+        """Hybrid-history segment lengths in normalised time. Fixed, not learned."""
+        return self._rate_lags
 
     @property
     def src_gain(self) -> torch.Tensor:
@@ -228,11 +287,12 @@ class RecurrentField(nn.Module):
     def diff_gain(self) -> torch.Tensor:
         return torch.exp(self.log_diff_gain)
 
-    @property
-    def cool(self) -> torch.Tensor:
-        return F.softplus(self.raw_cool)
-
     def gates(self) -> torch.Tensor:
+        """All-ones: every history channel is always on. There is no lag gating.
+
+        Kept as a method (rather than dropped) so the training log, ``metrics.txt``
+        and the benchmark checkpoints keep a stable, k_max-shaped field.
+        """
         return torch.ones(self.k_max, dtype=self._delta.dtype, device=self._delta.device)
 
     def _padded_lookup(
@@ -255,36 +315,55 @@ class RecurrentField(nn.Module):
     ) -> torch.Tensor:
         """Hybrid history: anchor T(t-Δgrid) plus disjoint rate segments.
 
-        rate_lags are CUMULATIVE segment lengths (not absolute boundaries):
-          - rate_lags = [5, 20] with Δgrid=1s gives:
-            - Anchor: T(t-1)
-            - Rate 1: (T(t-1) - T(t-1-5)) / span = (T(t-1) - T(t-6)) / 5
-            - Rate 2: (T(t-6) - T(t-6-20)) / span = (T(t-6) - T(t-26)) / 20
+rate_lags are CUMULATIVE segment lengths (not absolute boundaries), and each
+        segment starts where the previous one ended. Each rate is divided by its
+        own segment length -- the actual distance between the two points being
+        differenced. With delta_grid=1s and rate_lags=[5, 20]:
+            Anchor: T(t-1)
+            Rate 1: (T(t-1)  - T(t-6))  / 5
+            Rate 2: (T(t-6)  - T(t-26)) / 20
+
+        ``delta_grid`` shifts where the whole window sits but is not part of any
+        span: the endpoints of rate 1 are 5 s apart no matter how far back the
+        anchor is.
 
         Per-endpoint padding: T(t) := T(0) if t < 0.
-        Effective span: uses actual elapsed time after padding (not nominal).
+
+        The rate is divided by the NOMINAL segment length, never by the clamped
+        elapsed span. Dividing by the clamped span looks more "honest" early in
+        the rollout, but it is a singularity: at step 2 the clamped span is one
+        grid step (dtn = 1.4e-4 normalised at Δt = 0.2 s), so the one-step
+        prediction difference gets amplified ~7000x, fed back into the net, and
+        the rollout diverges to inf -> nan within a handful of steps. Using the
+        nominal length instead spreads a partially-filled window over its full
+        segment, which damps the rate towards 0 exactly where the history is
+        unknown and converges to the true rate once the window has filled.
         """
         if self.k_max == 0:
             return tn_q.new_zeros((tn_q.shape[0], 0))
 
-        dtn_t = tn_q.new_tensor(float(dtn))
-        T_anchor = self._padded_lookup(Tn_seq, dtn, tn_q - dtn_t, p_idx)
+        dgrid = self._delta_grid.to(tn_q.dtype)
+        T_anchor = self._padded_lookup(Tn_seq, dtn, tn_q - dgrid, p_idx)
 
         rates = []
-        t_boundary = tn_q - dtn_t  # start at t - Δgrid (anchor point)
+        t_boundary = tn_q - dgrid  # start at t - delta_grid (the anchor point)
         for i in range(len(rate_lags)):
-            seg_len = rate_lags[i]  # now a tensor (learnable)
+            seg_len = rate_lags[i]
             t_next = t_boundary - seg_len  # cumulative: subtract segment length
 
             T_end = self._padded_lookup(Tn_seq, dtn, t_boundary, p_idx)
             T_start = self._padded_lookup(Tn_seq, dtn, t_next, p_idx)
 
-            # Effective span after per-endpoint padding
-            t_end_actual = torch.clamp(t_boundary, min=0.0)
-            t_start_actual = torch.clamp(t_next, min=0.0)
-            actual_span = t_end_actual - t_start_actual
+            # Span = the segment's own length. That is exactly how far apart the
+            # two endpoints of this difference are, so it is the divisor that
+            # turns the difference into a rate. delta_grid only shifts WHERE the
+            # window sits; it is not part of the window. Floored at one grid
+            # step: a span below the time resolution is not resolvable.
+            span = torch.clamp(seg_len, min=float(dtn))
 
-            rate = (T_end - T_start) / (actual_span + 1e-8)
+            # Normalised d T / d t: rate_scale keeps this channel O(1) so it sits
+            # on the same scale as the z-scored anchor channel next to it.
+            rate = (T_end - T_start) / (span * self.rate_scale)
             rates.append(rate)
             t_boundary = t_next  # next segment starts here
 
@@ -387,7 +466,8 @@ def rollout_train(
     The buffer is seeded with the measured IC and every step reads history from the
     model's OWN earlier predictions. History values are detached between steps
     (truncated BPTT): each step's gradient flows through its own field evaluation
-    and through the learnable ``delta``/gates, keeping memory bounded.
+    only, keeping memory bounded. ``delta`` and the gates are fixed, so no
+    gradient runs along the time axis through them.
     """
     n_t, P = tn.shape[0], xn.shape[0]
     p_idx = torch.arange(P, device=xn.device)
