@@ -30,6 +30,26 @@ Two modes:
           resolving a grid inside a range that turns out to be flat is the
           expensive way to learn nothing.
 
+          --probe-part 1|2 splits those 9 points into two shorter sessions along
+          the arms of the cross: part 1 walks w_phys (5 points, the shared centre
+          among them), part 2 walks w_bc (4 points). Same trainings, same total
+          time, in two sittings instead of one. A part run TRAINS AND SAVES --
+          the CSV, the settings block and the raw rows are written every time --
+          but it does not evaluate: the per-axis verdict weighs each arm against
+          the shared centre, which arm 2 does not contain, so a half cross would
+          compare an axis against itself.
+
+          --report-only is the evaluation step. It trains nothing, merges the
+          stored parts and writes the summary, the per-axis verdict and the
+          plots. It refuses an incomplete cross. The parts must agree on every
+          training setting; a mismatch is refused rather than merged, so that no
+          verdict is ever assembled from two different experiments.
+
+          The three steps, matching README_GPU_SERVER.md sections 7.1-7.3:
+              --probe --probe-part 1 --epochs 20 --device cuda   # 5 trainings
+              --probe --probe-part 2 --epochs 20 --device cuda   # 4 trainings
+              --probe --report-only  --epochs 20 --device cuda   # plots, no GPU
+
 (default) GRID, 5x5 = 25 points over [0, 0.01, 0.05, 0.1, 0.3] per weight.
           Use --w-phys/--w-bc to centre it on the decade the probe found.
           --extended-grid gives 10x10; see the runtime note below first.
@@ -45,6 +65,8 @@ At subsample=2 the rollout is ~7000 sequential steps per OP per epoch, and that
 dominates everything. One epoch over 5 training OPs costs roughly 1.5-2.5 min on
 an RTX 5090 Laptop, so ONE grid point at 60 epochs is 1.5-2.5 HOURS:
     probe,      1 seed  ->   9 trainings  ~14-22 h   (~5-7 h at --epochs 20)
+        split as --probe-part 1 -> 5 trainings (~3-4 h at --epochs 20)
+             and --probe-part 2 -> 4 trainings (~2.5-3 h at --epochs 20)
     5x5 grid,   1 seed  ->  25 trainings  ~1.5-2 days
     10x10 grid, 1 seed  -> 100 trainings  ~6-8 days   (--extended-grid)
 Multiply by the seed count on top of that.
@@ -55,23 +77,34 @@ once and compute the real total before committing days of GPU time.
 
 To bring it down, in order of effect: fewer --epochs, a coarser grid, or a
 larger --subsample (which shortens the rollout quadratically in wall time but
-changes the time resolution).
+changes the time resolution). Note that --subsample is capped by CFL stability
+at 2 (dt=0.2s against a limit of ~0.241s), so on this data it is not actually
+available. --probe-part does not shorten the probe, it only splits it.
 
 The full test sequence, in the order that makes sense, is in
 README_GPU_SERVER.md section 7 -- run the smoke test and the seed-spread check
 before committing hours to this one.
 
 Outputs (in PINNmodulusTwo/artifacts/):
-    benchmark_wphys_wbc.csv - one row per (w_phys, w_bc): mean rollout MAEs
-        over the seeds, their standard deviation, and how many seeds survived
-    benchmark_wphys_wbc_heatmap.png - 2D heatmap of validation MAE
-    benchmark_wphys_wbc_best.txt - best combination + summary table
+    benchmark_wphys_wbc.csv - one row per trained (w_phys, w_bc): mean rollout
+        MAEs over the seeds, their standard deviation, and how many seeds
+        survived. Written after every run, including an unfinished probe part.
+    benchmark_wphys_wbc_settings.txt - the full hyperparameter block that
+        produced those rows. Written after every run.
+    probe_parts.json - split-probe bookkeeping: the rows of each finished part,
+        waiting for the other one. Delete it to start a split probe over.
+    benchmark_wphys_wbc_best.txt - best combination + summary table + per-axis
+        verdict. Evaluation step only.
+    benchmark_wphys_wbc_probe.png - per-axis MAE over the decades (probe).
+    benchmark_wphys_wbc_probe_convergence.png - loss curves per probe point.
+    benchmark_wphys_wbc_heatmap.png - 2D heatmap of validation MAE (grid only).
     checkpoints_wphys_wbc/*.pt - per-sweep model checkpoints
 """
 
 from __future__ import annotations
 
 import argparse
+import json
 import time
 from pathlib import Path
 
@@ -158,6 +191,22 @@ def _report_probe(results, usable, cli, summary) -> None:
     print("\n".join(lines), flush=True)
 
 
+def probe_arms(cli) -> tuple[list, list]:
+    """The two arms of the probe cross, in the order they are trained.
+
+    Arm 1 walks w_phys at the w_bc baseline; arm 2 walks w_bc at the w_phys
+    baseline. The shared centre point belongs to arm 1 -- arm 2 skips it -- so
+    the arms are disjoint and 5 + 4 = 9 points, not 10.
+
+    Splitting here is what makes ``--probe-part`` possible: each arm is a
+    self-contained run, and the per-axis verdict needs both of them.
+    """
+    base_p, base_b = PROBE_BASE_W_PHYS, PROBE_BASE_W_BC
+    arm_phys = [(p, base_b) for p in cli.w_phys]
+    arm_bc = [(base_p, b) for b in cli.w_bc if (base_p, b) not in arm_phys]
+    return arm_phys, arm_bc
+
+
 def build_pairs(cli) -> list:
     """The (w_phys, w_bc) pairs to train.
 
@@ -167,13 +216,133 @@ def build_pairs(cli) -> list:
     cell is best" but "does this weight move the error at all, and in which
     decade". Resolving a grid inside a range that turns out to be flat is the
     expensive way to learn nothing.
+
+    ``--probe-part`` narrows this to one arm so the probe fits into two shorter
+    sessions instead of one long one. The evaluation still needs the whole cross,
+    so a part run stores its rows and defers the report (see ``save_probe_part``).
     """
     if not cli.probe:
         return [(p, b) for p in cli.w_phys for b in cli.w_bc]
-    base_p, base_b = PROBE_BASE_W_PHYS, PROBE_BASE_W_BC
-    pairs = [(p, base_b) for p in cli.w_phys]
-    pairs += [(base_p, b) for b in cli.w_bc if (base_p, b) not in pairs]
-    return pairs
+    arm_phys, arm_bc = probe_arms(cli)
+    part = getattr(cli, "probe_part", "all")
+    if part == "1":
+        return arm_phys
+    if part == "2":
+        return arm_bc
+    return arm_phys + arm_bc
+
+
+# --- Split probe: storing one part until the other one lands ---------------
+#
+# The per-axis verdict compares each arm against the SHARED centre point, so it
+# cannot be computed from one arm alone -- arm 2 does not even contain the
+# centre. A part run therefore writes its rows here and stops before the report;
+# whichever part completes the cross merges everything and reports once.
+PROBE_STATE_FILE = "probe_parts.json"
+PROBE_PART_LABEL = {"1": "1/2 (w_phys arm)", "2": "2/2 (w_bc arm)"}
+
+
+def _probe_signature(cli) -> dict:
+    """Settings the two parts must agree on for their rows to be comparable.
+
+    Merging an arm trained at 20 epochs with one trained at 10 would produce a
+    verdict built from two different experiments, and nothing in the output would
+    say so. Anything that changes what a training run means belongs in here.
+    """
+    return {
+        "ops": list(cli.ops), "val_op": cli.val_op, "test_op": cli.test_op,
+        "subsample": int(cli.subsample), "epochs": int(cli.epochs),
+        "seeds": list(cli.seeds), "lr": float(cli.lr),
+        "weight_decay": float(cli.weight_decay),
+        "gain_lr_mult": float(cli.gain_lr_mult),
+        "grad_clip": float(cli.grad_clip),
+        "width": int(cli.width), "depth": int(cli.depth),
+        "k_max": int(cli.k_max), "history_mode": str(cli.history_mode),
+        "rate_lags": [float(v) for v in cli.rate_lags],
+        "delta_grid": float(cli.delta_grid),
+        "time_deriv": str(cli.time_deriv),
+        "phys_norm": float(cli.phys_norm),
+        "batch_data": int(cli.batch_data),
+        "batch_phys": int(cli.batch_phys), "batch_bc": int(cli.batch_bc),
+        "w_phys": [float(v) for v in cli.w_phys],
+        "w_bc": [float(v) for v in cli.w_bc],
+    }
+
+
+def _jsonable(obj):
+    """Recursively turn numpy scalars/arrays into plain JSON types."""
+    if isinstance(obj, np.ndarray):
+        return obj.tolist()
+    if isinstance(obj, np.generic):
+        return obj.item()
+    if isinstance(obj, dict):
+        return {k: _jsonable(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_jsonable(v) for v in obj]
+    return obj
+
+
+def _pair_key(w_phys, w_bc) -> str:
+    """Stable dict key for a (w_phys, w_bc) pair across a JSON round-trip."""
+    return f"{float(w_phys):.6g}|{float(w_bc):.6g}"
+
+
+def save_probe_part(cli, part: str, results: list, histories: list) -> dict:
+    """Persist one arm's rows and return the full state (this part included).
+
+    A signature mismatch discards the stored parts rather than merging across
+    settings: a stale arm is worse than a missing one, because the merge would
+    still produce a plausible-looking verdict.
+    """
+    path = ART_DIR / PROBE_STATE_FILE
+    signature = _probe_signature(cli)
+    state = {}
+    if path.exists():
+        try:
+            state = json.loads(path.read_text())
+        except (json.JSONDecodeError, OSError) as exc:
+            print(f"  [probe] could not read {path.name} ({exc}) - starting over.",
+                  flush=True)
+            state = {}
+    if state.get("signature") not in (None, signature):
+        print("  [probe] stored part(s) ran with different settings - discarding "
+              "them; the other part has to be re-run to match this one.", flush=True)
+        state = {}
+    state["signature"] = signature
+    state.setdefault("parts", {})[part] = {
+        "results": [_jsonable(r) for r in results],
+        "histories": [_jsonable(h) for h in histories],
+    }
+    path.write_text(json.dumps(state, indent=1) + "\n")
+    print(f"  [probe] part {PROBE_PART_LABEL[part]} stored in {path}", flush=True)
+    return state
+
+
+def merge_probe_parts(cli, state: dict) -> tuple[list, list, list]:
+    """Collect the stored arms into cross order -> (results, histories, missing).
+
+    Order matches ``build_pairs`` with no part selected, so a split probe reports
+    exactly what a single-run probe would have.
+    """
+    rows, hists = {}, {}
+    for blob in state.get("parts", {}).values():
+        for r in blob.get("results", []):
+            row = dict(r)
+            row["test_time_maes"] = np.asarray(row["test_time_maes"], dtype=float)
+            rows[_pair_key(row["w_phys"], row["w_bc"])] = row
+        for h in blob.get("histories", []):
+            hists[_pair_key(h["w_phys"], h["w_bc"])] = h
+    arm_phys, arm_bc = probe_arms(cli)
+    results, histories, missing = [], [], []
+    for w_phys, w_bc in arm_phys + arm_bc:
+        key = _pair_key(w_phys, w_bc)
+        if key in rows:
+            results.append(rows[key])
+            histories.append(hists.get(
+                key, {"w_phys": w_phys, "w_bc": w_bc, "hist": EMPTY_HIST}))
+        else:
+            missing.append((w_phys, w_bc))
+    return results, histories, missing
 
 
 def _w_tag(w_phys: float, w_bc: float) -> str:
@@ -248,6 +417,17 @@ def parse_args() -> argparse.Namespace:
                         "through the baseline (9 points, not 25). Run this before "
                         "the 5x5 grid to find out which decade of each weight "
                         "matters at all - a grid inside a flat range buys nothing.")
+    p.add_argument("--report-only", action="store_true",
+                   help="train nothing: merge the stored probe parts and write "
+                        "the CSV, the summary, the per-axis verdict and the "
+                        "plots. This is the evaluation step of a split probe; it "
+                        "refuses to run on an incomplete cross. Probe mode only.")
+    p.add_argument("--probe-part", choices=["1", "2", "all"], default="all",
+                   help="split the probe into two shorter sessions: 1 = w_phys "
+                        "arm (5 points), 2 = w_bc arm (4 points), all = both in "
+                        "one run. A part run stores its rows and reports nothing; "
+                        "whichever part completes the cross writes the CSV, the "
+                        "summary and the per-axis verdict. Probe mode only.")
     # Batching
     p.add_argument("--batch-data", type=int, default=2048)
     p.add_argument("--batch-phys", type=int, default=256)
@@ -263,6 +443,13 @@ def parse_args() -> argparse.Namespace:
     
     args = p.parse_args()
     
+    if args.probe_part != "all" and not args.probe:
+        p.error("--probe-part only applies to --probe (the grid is not a cross)")
+    if args.report_only and not args.probe:
+        p.error("--report-only only applies to --probe (a grid reports in one run)")
+    if args.report_only and args.probe_part != "all":
+        p.error("--report-only evaluates the whole cross; drop --probe-part")
+
     # Apply grid defaults
     if args.probe:
         if args.w_phys is None:
@@ -281,6 +468,60 @@ def parse_args() -> argparse.Namespace:
             args.w_bc = DEFAULT_W_BC
     
     return args
+
+
+def build_header(cli, n_points: int, part: str | None = None) -> list:
+    """The settings block printed at the start and stored with every result.
+
+    Every hyperparameter that shapes a training run is listed here, including the
+    ones that are never swept. A result file that does not say what produced it
+    cannot be compared against anything later, and a split probe makes that worse:
+    its two halves are only meaningful together if they ran identically.
+
+    ``part`` names one arm of a split probe; pass None for the whole cross, which
+    is also what the merged report is written with.
+    """
+    dt_s = 0.1 * cli.subsample
+    mode = "RANGE PROBE (cross through the baseline)" if cli.probe else "GRID"
+    if part is not None:
+        mode += f" - PART {PROBE_PART_LABEL[part]}"
+    lines = [
+        f"Physics+BC loss-weight benchmark - {mode}",
+        "free-running rollout, NO teacher forcing",
+        f"train = {'+'.join(cli.ops)}   val (selection) = {cli.val_op}   "
+        f"test (report only) = {cli.test_op}",
+        "DATA / TIME GRID:",
+        f"  subsample={cli.subsample} -> dt={dt_s:.1f}s   "
+        f"delta_grid={cli.delta_grid}s   rate_lags={cli.rate_lags}s",
+        "FIXED ARCHITECTURE (for fair comparison):",
+        f"  width={cli.width}  depth={cli.depth}  k_max={cli.k_max}  "
+        f"history_mode={cli.history_mode}",
+        f"  time_deriv={cli.time_deriv}  use_static={cli.use_static}  "
+        f"use_forcing={cli.use_forcing}",
+        "TRAINING SETTINGS:",
+        f"  lr={cli.lr}  epochs={cli.epochs}  weight_decay={cli.weight_decay}  "
+        f"grad_clip={cli.grad_clip}",
+        f"  gain_lr_mult={cli.gain_lr_mult}  seeds={cli.seeds}  "
+        f"early_stopping_patience={cli.early_stopping_patience}",
+        f"  batch_data={cli.batch_data}  batch_phys={cli.batch_phys}  "
+        f"batch_bc={cli.batch_bc}",
+        f"  runs = {n_points} points x {len(cli.seeds)} "
+        f"seed(s) = {n_points*len(cli.seeds)} trainings",
+        "LOSS WEIGHTS (SWEPT):",
+        f"  w_data=1.0 (fixed)   phys_norm={cli.phys_norm} "
+        f"({'adaptive EMA' if not cli.phys_norm else 'fixed divisor'})",
+        f"  w_phys sweep = {cli.w_phys}",
+        f"  w_bc sweep = {cli.w_bc}",
+        (f"Probe: w_phys swept at w_bc={PROBE_BASE_W_BC}, "
+         f"w_bc swept at w_phys={PROBE_BASE_W_PHYS}"
+         + ("  |  this run trains one arm only; evaluation is a separate step"
+            if part is not None else "")
+         if cli.probe else
+         f"Grid size: {len(cli.w_phys)} x {len(cli.w_bc)} = "
+         f"{len(cli.w_phys)*len(cli.w_bc)} points"),
+        "",
+    ]
+    return lines
 
 
 def _make_args(cli: argparse.Namespace, w_phys: float, w_bc: float,
@@ -303,38 +544,18 @@ def main() -> None:
     require_ops(*cli.ops, cli.val_op, cli.test_op)
     device = resolve_device(cli.device)
     cli.device = str(device)  # hand the resolved device down to fit()
+    if cli.report_only:
+        run_report_only(cli, plt)
+        return
     dt_s = 0.1 * cli.subsample
     model_dir = Path(cli.model_dir)
     if cli.save_models:
         model_dir.mkdir(parents=True, exist_ok=True)
 
     pairs_preview = build_pairs(cli)
-    mode = "RANGE PROBE (cross through the baseline)" if cli.probe else "GRID"
-    header = [
-        f"Physics+BC loss-weight benchmark - {mode}",
-        "free-running rollout, NO teacher forcing",
-        f"train = {'+'.join(cli.ops)}   val (selection) = {cli.val_op}   "
-        f"test (report only) = {cli.test_op}",
-        "FIXED ARCHITECTURE (for fair comparison):",
-        f"  width={cli.width}  depth={cli.depth}  k_max={cli.k_max}  "
-        f"history_mode={cli.history_mode}  rate_lags_init={cli.rate_lags}s",
-        f"  time_deriv={cli.time_deriv}  use_static={cli.use_static}  use_forcing={cli.use_forcing}",
-        "TRAINING SETTINGS:",
-        f"  lr={cli.lr}  epochs={cli.epochs}  dt={dt_s:.1f}s  "
-        f"seeds={cli.seeds}  grad_clip={cli.grad_clip}",
-        f"  runs = {len(pairs_preview)} points x {len(cli.seeds)} "
-        f"seed(s) = {len(pairs_preview)*len(cli.seeds)} trainings",
-        "LOSS WEIGHTS (SWEPT):",
-        f"  w_data=1.0 (fixed)   phys_norm={cli.phys_norm} (adaptive EMA)",
-        f"  w_phys sweep = {cli.w_phys}",
-        f"  w_bc sweep = {cli.w_bc}",
-        (f"Probe: w_phys swept at w_bc={PROBE_BASE_W_BC}, "
-         f"w_bc swept at w_phys={PROBE_BASE_W_PHYS}"
-         if cli.probe else
-         f"Grid size: {len(cli.w_phys)} × {len(cli.w_bc)} = "
-         f"{len(cli.w_phys)*len(cli.w_bc)} points"),
-        "",
-    ]
+    split_probe = cli.probe and cli.probe_part != "all"
+    header = build_header(cli, len(pairs_preview),
+                          part=cli.probe_part if split_probe else None)
     print("\n".join(header), flush=True)
 
     results = []
@@ -408,10 +629,51 @@ def main() -> None:
 
     total_time = time.time() - start_time_total
     print(f"\n{'='*60}")
-    print(f"Total benchmark time: {total_time/3600:.2f} hours")
+    print(f"Part time: {total_time/3600:.2f} hours" if split_probe
+          else f"Total benchmark time: {total_time/3600:.2f} hours")
     print(f"{'='*60}\n")
 
-    # ---- CSV ----------------------------------------------------------------
+    if split_probe:
+        # A part run trains and SAVES, and stops there. Evaluation is its own
+        # step because the per-axis verdict weighs each arm against the shared
+        # centre point: arm 2 does not contain it, so a half cross would compare
+        # an axis against itself and still print a plausible number.
+        state = save_probe_part(cli, cli.probe_part, results, histories)
+        merged, _, missing = merge_probe_parts(cli, state)
+        csv_path = write_csv(merged)
+        set_path = write_settings(cli, len(merged), cli.probe_part)
+        print(f"Part {PROBE_PART_LABEL[cli.probe_part]} done - "
+              f"{len(merged)} of {len(merged) + len(missing)} points trained.",
+              flush=True)
+        print(f"  results saved: {csv_path}", flush=True)
+        print(f"  settings saved: {set_path}", flush=True)
+        if missing:
+            other = "2" if cli.probe_part == "1" else "1"
+            print("  still to train: " + ", ".join(
+                f"(w_phys={a:g}, w_bc={b:g})" for a, b in missing), flush=True)
+            print(f"\nNext - the other part, with these same flags:\n"
+                  f"  python3 {Path(__file__).name} --probe --probe-part {other} "
+                  f"--epochs {cli.epochs} --device {cli.device}", flush=True)
+            print("  (a settings mismatch discards the stored part instead of "
+                  "merging it)", flush=True)
+        else:
+            print(f"\nThe cross is complete. Plots and verdict:\n"
+                  f"  python3 {Path(__file__).name} --probe --report-only "
+                  f"--epochs {cli.epochs} --device {cli.device}", flush=True)
+        return
+
+    evaluate(cli, results, histories, total_time, plt)
+
+
+
+def write_csv(results: list) -> Path:
+    """One row per trained point. Written after EVERY run, complete or not.
+
+    This is the raw record: a part run that trains five points and then stops
+    still has five real results, and losing them to a crash before the second
+    part would cost hours. The evaluation files are the ones that wait for the
+    full cross -- the CSV does not.
+    """
     csv_lines = [
         "w_phys,w_bc,L_data,L_phys,L_bc,MAE_in_C,MAE_val_C,MAE_val_std_C,"
         "MAE_test_C,MAE_test_std_C,n_seeds,n_seeds_ok,"
@@ -427,7 +689,167 @@ def main() -> None:
             f"{r['delta_s']:.6f},{r['src_gain']:.6f},{r['diff_gain']:.6f},"
             f"\"{lags_str}\",{r['train_time']/60:.2f},{r['checkpoint']}"
         )
-    (ART_DIR / "benchmark_wphys_wbc.csv").write_text("\n".join(csv_lines) + "\n")
+    path = ART_DIR / "benchmark_wphys_wbc.csv"
+    path.write_text("\n".join(csv_lines) + "\n")
+    return path
+
+
+def write_settings(cli, n_points: int, part: str | None) -> Path:
+    """Drop the full hyperparameter block next to the results, as a file.
+
+    The console scrolls away and a CSV carries no settings, so without this a
+    result folder cannot say what produced it. Rewritten by every run, including
+    the parts, which is safe because a mismatch between parts is refused earlier.
+    """
+    path = ART_DIR / "benchmark_wphys_wbc_settings.txt"
+    path.write_text("\n".join(build_header(cli, n_points, part)) + "\n")
+    return path
+
+
+def run_report_only(cli, plt) -> None:
+    """Evaluate stored probe parts without training anything (README step 7.3).
+
+    Refuses an incomplete cross rather than reporting on it: the per-axis verdict
+    weighs each arm against the shared centre point, so a half cross would
+    compare an axis against itself and still print a confident-looking number.
+    """
+    path = ART_DIR / PROBE_STATE_FILE
+    if not path.exists():
+        print(f"No stored probe parts at {path} - run --probe-part 1 and 2 first.",
+              flush=True)
+        raise SystemExit(1)
+    try:
+        state = json.loads(path.read_text())
+    except (json.JSONDecodeError, OSError) as exc:
+        print(f"Cannot read {path}: {exc}", flush=True)
+        raise SystemExit(1)
+    stored = state.get("signature") or {}
+    current = _probe_signature(cli)
+    differing = [k for k in current if stored.get(k) != current[k]]
+    if stored and differing:
+        print("The stored parts ran with different settings than this command:",
+              flush=True)
+        for k in differing:
+            print(f"  {k}: stored {stored.get(k)!r} vs here {current[k]!r}", flush=True)
+        print("Pass the same flags the parts ran with (they are recorded in "
+              f"{ART_DIR / 'benchmark_wphys_wbc_settings.txt'}).", flush=True)
+        raise SystemExit(1)
+    results, histories, missing = merge_probe_parts(cli, state)
+    if missing:
+        print(f"{len(missing)} of {len(results) + len(missing)} points are still "
+              f"missing - nothing to evaluate yet:", flush=True)
+        for w_phys, w_bc in missing:
+            print(f"  (w_phys={w_phys:g}, w_bc={w_bc:g})", flush=True)
+        arm_phys, _ = probe_arms(cli)
+        todo = "1" if set(missing) & set(arm_phys) else "2"
+        print(f"\nRun the missing part first:\n  python3 {Path(__file__).name} "
+              f"--probe --probe-part {todo} --epochs {cli.epochs} "
+              f"--device {cli.device}", flush=True)
+        raise SystemExit(1)
+    total_time = sum(r["train_time"] for r in results)
+    print("\n".join(build_header(cli, len(results))), flush=True)
+    print(f"Evaluating {len(results)} stored points (no training in this step). "
+          f"Combined training time of the parts: {total_time/3600:.2f} hours.\n",
+          flush=True)
+    evaluate(cli, results, histories, total_time, plt)
+
+
+def plot_probe(results: list, histories: list, cli, best: dict, plt) -> list:
+    """Plots for the cross: one panel per axis, plus the convergence curves.
+
+    The cross has no surface to draw, so the grid's heatmap makes no sense here.
+    What the probe actually answers is per-axis -- "does this weight move the
+    error, and where" -- so each arm gets its own panel, read against the shared
+    centre point that both arms have in common.
+
+    Decade values include 0, which no log axis can show, so the points sit at
+    even positions and the real values become the tick labels. That keeps the
+    zero-weight case on the same plot as the rest instead of dropping it.
+    """
+    saved = []
+    fig, axes = plt.subplots(1, 2, figsize=(13, 5), sharey=True)
+    for ax, (axis, other_key, base_other) in zip(axes, (
+            ("w_phys", "w_bc", PROBE_BASE_W_BC),
+            ("w_bc", "w_phys", PROBE_BASE_W_PHYS))):
+        rows = [r for r in results if r[other_key] == base_other]
+        rows.sort(key=lambda r: r[axis])
+        if not rows:
+            continue
+        pos = list(range(len(rows)))
+        val = [r["val_mae"] for r in rows]
+        test = [r["test_mae"] for r in rows]
+        val_err = [r["val_mae_std"] for r in rows]
+        ax.errorbar(pos, val, yerr=val_err, marker="o", markersize=6, linewidth=2,
+                    capsize=4, label=f"val {cli.val_op} (selection)")
+        ax.plot(pos, test, marker="s", markersize=5, linewidth=1.5, alpha=0.7,
+                linestyle="--", label=f"test {cli.test_op} (report only)")
+        finite = [(i, v) for i, v in zip(pos, val) if np.isfinite(v)]
+        if finite:
+            bi, bv = min(finite, key=lambda t: t[1])
+            ax.scatter([bi], [bv], s=220, facecolors="none", edgecolors="red",
+                       linewidths=2.5, zorder=5, label="best on this axis")
+            span = max(v for _, v in finite) - bv
+            ax.set_title(f"{axis} at {other_key}={base_other:g}\n"
+                         f"span over the decades = {span:.3f} °C", fontsize=11)
+        ax.set_xticks(pos)
+        ax.set_xticklabels([f"{r[axis]:g}" for r in rows])
+        ax.set_xlabel(axis, fontsize=11)
+        ax.grid(True, alpha=0.3)
+        ax.legend(fontsize=9)
+    axes[0].set_ylabel("rollout MAE [°C], lower is better", fontsize=11)
+    fig.suptitle(f"Range probe - {'+'.join(cli.ops)} train, {cli.epochs} epochs, "
+                 f"dt={0.1*cli.subsample:.1f}s, seeds={cli.seeds}", fontsize=12)
+    fig.tight_layout()
+    path = ART_DIR / "benchmark_wphys_wbc_probe.png"
+    fig.savefig(path, dpi=150)
+    plt.close(fig)
+    saved.append(path)
+
+    usable_hist = [h for h in histories if h.get("hist", {}).get("epoch")]
+    if usable_hist:
+        fig2, axc = plt.subplots(3, 1, figsize=(12, 10), sharex=True)
+        for item in usable_hist:
+            h = item["hist"]
+            is_best = (item["w_phys"] == best["w_phys"]
+                       and item["w_bc"] == best["w_bc"])
+            label = (f"p={item['w_phys']:.3g}, b={item['w_bc']:.3g}"
+                     + (" *BEST" if is_best else ""))
+            lw = 2.5 if is_best else 1.2
+            for ax, key, marker in ((axc[0], "L_data", "o"),
+                                    (axc[1], "L_phys", "s"),
+                                    (axc[2], "L_bc", "^")):
+                if h.get(key):
+                    ax.plot(h["epoch"], h[key], marker=marker, markersize=3,
+                            linewidth=lw, alpha=0.85, label=label)
+        for ax, name in zip(axc, ("L_data (MSE)", "L_phys (unweighted)",
+                                  "L_bc (unweighted)")):
+            ax.set_ylabel(name, fontsize=11)
+            ax.set_yscale("log")
+            ax.grid(True, alpha=0.3)
+            ax.legend(fontsize=7, ncol=3)
+        axc[0].set_title(f"Range-probe convergence - {'+'.join(cli.ops)} train, "
+                         f"{cli.val_op} val", fontsize=12)
+        axc[2].set_xlabel("Epoch", fontsize=11)
+        fig2.tight_layout()
+        path2 = ART_DIR / "benchmark_wphys_wbc_probe_convergence.png"
+        fig2.savefig(path2, dpi=150, bbox_inches="tight")
+        plt.close(fig2)
+        saved.append(path2)
+    return saved
+
+
+def evaluate(cli, results: list, histories: list, total_time: float, plt) -> None:
+    """Turn a complete set of result rows into CSV, summary, verdict and plots.
+
+    Separated from the training loop so a split probe can be evaluated in its
+    own step, from stored rows, without retraining anything. The header is
+    rebuilt here from the full row count, so a report merged out of two parts
+    describes the whole cross rather than whichever part happened to run last.
+    """
+    model_dir = Path(cli.model_dir)
+    header = build_header(cli, len(results))
+    write_csv(results)
+    write_settings(cli, len(results), None)
 
     # ---- best pick + summary ------------------------------------------------
     # Diverged points carry NaN and must not win the min() comparison.
@@ -519,6 +941,13 @@ def main() -> None:
 
     if cli.probe:
         _report_probe(results, usable, cli, summary)
+        plots = plot_probe(results, histories, cli, best, plt)
+        print(f"\n  Saved: {ART_DIR/'benchmark_wphys_wbc.csv'}")
+        print(f"         {ART_DIR/'benchmark_wphys_wbc_best.txt'}")
+        print(f"         {ART_DIR/'benchmark_wphys_wbc_settings.txt'}")
+        for path in plots:
+            print(f"         {path}")
+        print("", flush=True)
         return
 
     # ---- 2D heatmap ---------------------------------------------------------
