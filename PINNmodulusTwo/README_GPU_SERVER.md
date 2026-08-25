@@ -61,13 +61,23 @@ Im Zweifel: den neuesten Treiber installieren und `cu124` nehmen.
 ```bash
 git clone <repo-url> llmtraining
 cd llmtraining
-git checkout claude/nvidia-gpu-server-setup-phnzof
+git checkout main
 
 sudo apt install -y python3-venv python3-dev build-essential
 python3 -m venv .venv
 source .venv/bin/activate
 pip install --upgrade pip
 ```
+
+> **Das Repo liegt schon auf dem Server?** Dann zuerst den Stand holen — die
+> Flags in den Befehlen dieser Anleitung gibt es nur auf einem aktuellen `main`:
+>
+> ```bash
+> cd ~/llmtraining && git checkout main && git pull origin main
+> ```
+>
+> Bricht ein Aufruf später mit `error: unrecognized arguments: ...` ab, ist genau
+> das die Ursache — der Code auf dem Server ist älter als diese Anleitung.
 
 ---
 
@@ -84,8 +94,7 @@ pip install -r PINNmodulusTwo/requirements-gpu.txt
 Verifikation:
 
 ```bash
-python3 -c "import torch; print(torch.__version__, torch.version.cuda, \
-torch.cuda.is_available(), torch.cuda.get_device_name(0))"
+python3 -c "import torch; print(torch.__version__, torch.version.cuda, torch.cuda.is_available(), torch.cuda.get_device_name(0))"
 ```
 
 Erwartet z. B. `2.5.1+cu121 12.1 True NVIDIA A100-SXM4-40GB`.
@@ -112,9 +121,7 @@ in `model.py` gibt bei fehlendem Paket eine Meldung mit genau diesem Hinweis aus
 NGC-Container-Image benutzen, dort ist alles vorinstalliert:
 
 ```bash
-docker run --gpus all -it --rm \
-  -v "$PWD":/workspace -w /workspace \
-  nvcr.io/nvidia/modulus/modulus:24.09 bash
+docker run --gpus all -it --rm -v "$PWD":/workspace -w /workspace nvcr.io/nvidia/modulus/modulus:24.09 bash
 ```
 
 (Voraussetzung: `nvidia-container-toolkit` installiert, dann testet
@@ -136,13 +143,9 @@ Nach dem `git clone` fehlen also zwei Ordner:
 Vom lokalen Rechner aus (Pfade anpassen):
 
 ```bash
-rsync -avz --progress \
-  ~/batterysurrogatemodell/PINNmodulusTwo/data_cache/ \
-  user@gpu-server:~/llmtraining/PINNmodulusTwo/data_cache/
+rsync -avz --progress ~/batterysurrogatemodell/PINNmodulusTwo/data_cache/ user@gpu-server:~/llmtraining/PINNmodulusTwo/data_cache/
 
-rsync -avz --progress \
-  ~/batterysurrogatemodell/PINNmodulusTwo/material_properties/ \
-  user@gpu-server:~/llmtraining/PINNmodulusTwo/material_properties/
+rsync -avz --progress ~/batterysurrogatemodell/PINNmodulusTwo/material_properties/ user@gpu-server:~/llmtraining/PINNmodulusTwo/material_properties/
 ```
 
 Prüfen (auf dem Server):
@@ -180,9 +183,7 @@ python3 PINNmodulusTwo/smallBench.py --epochs 5 --w-phys 0.0 0.1 --w-bc 0.1 --de
 cat PINNmodulusTwo/artifacts/smallBench_results.txt
 
 # 6.3  wie lange dauert eine Epoche?  (~10 min)
-python3 PINNmodulusTwo/train.py --ops OP01 OP02 OP03 OP04 OP05 \
-  --subsample 2 --epochs 5 --history-mode hybrid --rate-lags 5 20 \
-  --delta-grid 0.2 --grad-clip 1.0 --device cuda
+python3 PINNmodulusTwo/train.py --ops OP01 OP02 OP03 OP04 OP05 --subsample 2 --epochs 5 --history-mode hybrid --rate-lags 5 20 --delta-grid 0.2 --grad-clip 1.0 --device cuda
 ```
 
 **Weiter zu [Kapitel 7](#7-range-probe-der-loss-gewichte--in-drei-schritten) nur, wenn:**
@@ -311,8 +312,7 @@ Stunden/Punkt × Punkte × Seeds ÷ 24  = Tage für den Sweep
 Derselbe Lauf mit `--device cpu` beantwortet das:
 
 ```bash
-python3 PINNmodulusTwo/train.py --ops OP01 OP02 --subsample 2 --epochs 3 \
-  --history-mode hybrid --rate-lags 5 20 --grad-clip 1.0 --device cpu
+python3 PINNmodulusTwo/train.py --ops OP01 OP02 --subsample 2 --epochs 3 --history-mode hybrid --rate-lags 5 20 --grad-clip 1.0 --device cpu
 ```
 
 Die Sekunden pro Epoche aus beiden Läufen ins Verhältnis setzen — **erwarte
@@ -457,8 +457,7 @@ cd ~/llmtraining
 source .venv/bin/activate
 
 # 5 Punkte x 1 Seed x 20 Epochen = 5 Trainings ~ 3,5 h
-nohup python3 PINNmodulusTwo/benchmark_wphys_wbc.py --probe --probe-part 1 \
-  --epochs 20 --device cuda > probe_part1.log 2>&1 &
+nohup python3 PINNmodulusTwo/benchmark_wphys_wbc.py --probe --probe-part 1 --epochs 20 --device cuda > probe_part1.log 2>&1 &
 echo $! > probe.pid
 ```
 
@@ -505,8 +504,7 @@ cd ~/llmtraining
 source .venv/bin/activate
 
 # 4 Punkte x 1 Seed x 20 Epochen = 4 Trainings ~ 2,5 h
-nohup python3 PINNmodulusTwo/benchmark_wphys_wbc.py --probe --probe-part 2 \
-  --epochs 20 --device cuda > probe_part2.log 2>&1 &
+nohup python3 PINNmodulusTwo/benchmark_wphys_wbc.py --probe --probe-part 2 --epochs 20 --device cuda > probe_part2.log 2>&1 &
 echo $! > probe.pid
 ```
 
@@ -541,8 +539,7 @@ Trainiert nichts. Liest die gespeicherten Ergebnisse beider Arme, fügt sie zum
 vollständigen Kreuz zusammen und erzeugt **erst jetzt** Verdikt und Plots.
 
 ```bash
-python3 PINNmodulusTwo/benchmark_wphys_wbc.py --probe --report-only \
-  --epochs 20 --device cpu
+python3 PINNmodulusTwo/benchmark_wphys_wbc.py --probe --report-only --epochs 20 --device cpu
 ```
 
 `--device cpu` ist hier in Ordnung — es wird nicht gerechnet, das Flag geht nur
@@ -647,9 +644,7 @@ cat PINNmodulusTwo/artifacts/smallBench_results.txt
 # ---------------------------------------------------------------------------
 # 6.3  WIE LANGE DAUERT EINE EPOCHE?  (~10 min)  <- bestimmt das Budget
 # ---------------------------------------------------------------------------
-python3 PINNmodulusTwo/train.py --ops OP01 OP02 OP03 OP04 OP05 \
-  --subsample 2 --epochs 5 --history-mode hybrid --rate-lags 5 20 \
-  --delta-grid 0.2 --grad-clip 1.0 --device cuda
+python3 PINNmodulusTwo/train.py --ops OP01 OP02 OP03 OP04 OP05 --subsample 2 --epochs 5 --history-mode hybrid --rate-lags 5 20 --delta-grid 0.2 --grad-clip 1.0 --device cuda
 # Log: "[112.4s/epoch, this run ~7 min left]"
 # Sekunden/Epoche x 20 x 5 / 3600 = Stunden fuer 7.1
 # Sekunden/Epoche x 20 x 4 / 3600 = Stunden fuer 7.2
@@ -658,8 +653,7 @@ python3 PINNmodulusTwo/train.py --ops OP01 OP02 OP03 OP04 OP05 \
 # ---------------------------------------------------------------------------
 # 7.1  RANGE-PROBE, w_phys-ARM  (5 Punkte, ~3,5 h)
 # ---------------------------------------------------------------------------
-nohup python3 PINNmodulusTwo/benchmark_wphys_wbc.py --probe --probe-part 1 \
-  --epochs 20 --device cuda > probe_part1.log 2>&1 &
+nohup python3 PINNmodulusTwo/benchmark_wphys_wbc.py --probe --probe-part 1 --epochs 20 --device cuda > probe_part1.log 2>&1 &
 echo $! > probe.pid
 
 echo "PID:  $(cat probe.pid)"
@@ -682,16 +676,14 @@ cat PINNmodulusTwo/artifacts/benchmark_wphys_wbc_settings.txt
 # ---------------------------------------------------------------------------
 # 7.2  RANGE-PROBE, w_bc-ARM  (4 Punkte, ~2,5 h)
 # ---------------------------------------------------------------------------
-nohup python3 PINNmodulusTwo/benchmark_wphys_wbc.py --probe --probe-part 2 \
-  --epochs 20 --device cuda > probe_part2.log 2>&1 &
+nohup python3 PINNmodulusTwo/benchmark_wphys_wbc.py --probe --probe-part 2 --epochs 20 --device cuda > probe_part2.log 2>&1 &
 echo $! > probe.pid
 echo "Live: tail -f probe_part2.log"
 
 # ---------------------------------------------------------------------------
 # 7.3  AUSWERTUNG UND PLOTS  (~1 min, kein Training)
 # ---------------------------------------------------------------------------
-python3 PINNmodulusTwo/benchmark_wphys_wbc.py --probe --report-only \
-  --epochs 20 --device cpu
+python3 PINNmodulusTwo/benchmark_wphys_wbc.py --probe --report-only --epochs 20 --device cpu
 
 grep -A20 'RANGE PROBE' PINNmodulusTwo/artifacts/benchmark_wphys_wbc_best.txt
 ls -lh PINNmodulusTwo/artifacts/benchmark_wphys_wbc_probe*.png
@@ -757,8 +749,7 @@ Läufe Rauschen — und ein feineres Gitter macht es nicht besser.
 
 ```bash
 # 5 Seeds an einem Punkt, ~10 h. Mit --epochs 20 sind es ~3 h.
-python3 PINNmodulusTwo/benchmark_wphys_wbc.py \
-  --w-phys 0.05 --w-bc 0.1 --seeds 0 1 2 3 4 --epochs 60 --device cuda
+python3 PINNmodulusTwo/benchmark_wphys_wbc.py --w-phys 0.05 --w-bc 0.1 --seeds 0 1 2 3 4 --epochs 60 --device cuda
 ```
 
 Dann in `benchmark_wphys_wbc_best.txt` die Spalte `+/-` ansehen — das ist die
@@ -781,8 +772,7 @@ Fehler überhaupt bewegt. `width × depth × lags` wären mehrere hundert Traini
 achsenweise sind es zwölf.
 
 ```bash
-nohup python3 PINNmodulusTwo/benchmark_arch.py --device cuda --seeds 0 1 2 \
-  > benchmark_arch.log 2>&1 &
+nohup python3 PINNmodulusTwo/benchmark_arch.py --device cuda --seeds 0 1 2 > benchmark_arch.log 2>&1 &
 
 # oder nur eine Achse, z. B. die Lags:
 python3 PINNmodulusTwo/benchmark_arch.py --axes lags --seeds 0 1 2 --device cuda
@@ -850,9 +840,7 @@ cd ~/llmtraining
 source .venv/bin/activate
 
 # Werte an die Dekade aus der Probe anpassen:
-nohup python3 PINNmodulusTwo/benchmark_wphys_wbc.py --device cuda \
-  --w-phys 0.003 0.01 0.03 0.1 0.3 --w-bc 0.03 0.1 0.3 0.7 1.0 \
-  > benchmark_grid.log 2>&1 &
+nohup python3 PINNmodulusTwo/benchmark_wphys_wbc.py --device cuda --w-phys 0.003 0.01 0.03 0.1 0.3 --w-bc 0.03 0.1 0.3 0.7 1.0 > benchmark_grid.log 2>&1 &
 echo $! > benchmark.pid
 
 echo "Gitter gestartet - PID $(cat benchmark.pid), Log: benchmark_grid.log"
@@ -987,13 +975,11 @@ ls -lh PINNmodulusTwo/artifacts/benchmark_wphys_wbc*.png
 
 # Top 10 nach Val-MAE - das ist die Spalte, auf der ausgewaehlt wurde.
 # Spalten: 6=MAE_in_C  7=MAE_val_C  8=MAE_val_std_C  9=MAE_test_C  10=MAE_test_std_C
-head -1 PINNmodulusTwo/artifacts/benchmark_wphys_wbc.csv && \
-  tail -n +2 PINNmodulusTwo/artifacts/benchmark_wphys_wbc.csv | sort -t',' -k7 -n | head -10
+head -1 PINNmodulusTwo/artifacts/benchmark_wphys_wbc.csv && tail -n +2 PINNmodulusTwo/artifacts/benchmark_wphys_wbc.csv | sort -t',' -k7 -n | head -10
 
 # Dieselben Punkte mit ihrer Test-MAE (Spalte 9) - die Zahl, die berichtet wird.
 # Wenn die Reihenfolge hier stark von der obigen abweicht, ist die Auswahl instabil.
-tail -n +2 PINNmodulusTwo/artifacts/benchmark_wphys_wbc.csv | sort -t',' -k7 -n | \
-  head -10 | cut -d',' -f1,2,7,8,9,10
+tail -n +2 PINNmodulusTwo/artifacts/benchmark_wphys_wbc.csv | sort -t',' -k7 -n | head -10 | cut -d',' -f1,2,7,8,9,10
 
 # Checkpoints: Anzahl und Platzbedarf
 ls PINNmodulusTwo/artifacts/checkpoints_wphys_wbc/ | wc -l   # sollte 100 sein
@@ -1019,9 +1005,7 @@ ps -p $(cat benchmark.pid)   # "No such process" = gestoppt
 
 ```bash
 # Werte aus benchmark_wphys_wbc_best.txt einsetzen
-python3 PINNmodulusTwo/train.py \
-    --epochs 100 --w-phys 0.1 --w-bc 0.3 --subsample 2 \
-    --ops OP01 OP02 OP03 OP04 OP05 --test-op OP07 --device cuda
+python3 PINNmodulusTwo/train.py --epochs 100 --w-phys 0.1 --w-bc 0.3 --subsample 2 --ops OP01 OP02 OP03 OP04 OP05 --test-op OP07 --device cuda
 ```
 
 Bestes Checkpoint laden (Dateiname folgt dem Schema `model_p<w_phys>_b<w_bc>.pt`,
@@ -1070,6 +1054,7 @@ dem Server gebraucht.
 
 | Symptom | Ursache / Abhilfe |
 |---|---|
+| `train.py: error: unrecognized arguments: --delta-grid 0.2` (oder `--gain-lr-mult`, `--test-op`, …) | Der Code auf dem Server ist älter als diese Anleitung — das Flag gibt es dort noch nicht. `git checkout main && git pull origin main`, dann `python3 PINNmodulusTwo/train.py --help` gegenprüfen. Der Aufruf in `usage:` listet immer genau die Flags, die dein Checkout kennt. |
 | `torch.cuda.is_available()` → `False` | CPU-Wheel installiert (`torch.version.cuda` ist `None`) → torch neu vom `cu12x`-Index installieren. Oder Treiber fehlt/zu alt → Schritt 1. |
 | `--device cuda ... torch.cuda.is_available() is False` | Genau derselbe Fall — die Fehlermeldung nennt Torch- und CUDA-Version zum Abgleich. |
 | `CUDA error: no kernel image is available` | GPU zu neu für das Wheel (z. B. RTX 50xx mit `cu121`) → `cu128`-Index nehmen. |
