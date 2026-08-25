@@ -24,8 +24,18 @@ import torch
 from data import build_op
 from model import rollout
 
-# How many uniformly spaced time points the per-configuration boxplots sample.
-N_BOX_POINTS = 10
+# Boxplot sampling on the held-out test OP. One box per sampled time point, and
+# what it summarises is the SENSORS: at a given moment the OP has one absolute
+# error per sensor, so the box is the middle 50% of sensors, the line the median
+# sensor, and the dots the sensors past 1.5 IQR.
+#
+# Random time points rather than uniformly spaced ones, because an OP has
+# structure in time (load steps, cooling phases) that an even grid can sample in
+# step with. Drawn from a fixed seed, because every configuration has to be
+# scored at the SAME moments -- boxes taken from different points of the
+# trajectory are not comparable, and nothing in the plot would reveal it.
+N_BOX_TIMES = 10
+BOX_TIME_SEED = 20240517
 
 # History shape returned by fit(); used as a placeholder when fit() itself failed.
 EMPTY_HIST = {"epoch": [], "L_data": [], "L_phys": [], "L_bc": [],
@@ -81,11 +91,24 @@ def mae(pred, true, lo, hi) -> float:
     return float(np.abs(pred[lo:hi] - true[lo:hi]).mean())
 
 
-def timepoint_maes(pred: np.ndarray, true: np.ndarray,
-                   time_idx: np.ndarray) -> np.ndarray:
-    """Mean absolute error at each selected time index, averaged over space."""
-    return np.array([float(np.abs(pred[i] - true[i]).mean()) for i in time_idx],
-                    dtype=float)
+def box_time_idx(n_t: int) -> np.ndarray:
+    """The fixed random time points every configuration is scored at."""
+    rng = np.random.default_rng(BOX_TIME_SEED)
+    n = min(N_BOX_TIMES, int(n_t))
+    return np.sort(rng.choice(int(n_t), size=n, replace=False))
+
+
+def box_errors(pred: np.ndarray, true: np.ndarray,
+               time_idx: np.ndarray) -> np.ndarray:
+    """Absolute error at the sampled times, kept per sensor -> (n_times, n_sensors).
+
+    Deliberately NOT reduced here. A mean over the sensors would turn each time
+    point into a single number and throw away the only thing the boxplot is for:
+    at a moment where the mean error looks acceptable, a handful of sensors can
+    still be far off, and that shows up as a long upper whisker rather than in
+    the mean.
+    """
+    return np.abs(pred[time_idx] - true[time_idx]).astype(float)
 
 
 def failed_result(extra: dict, train_time: float, n_seeds: int = 1) -> dict:
@@ -105,7 +128,10 @@ def failed_result(extra: dict, train_time: float, n_seeds: int = 1) -> dict:
         "rate_lags_s": [],
         "train_time": train_time,
         "checkpoint": "",
-        "test_time_maes": np.full(N_BOX_POINTS, nan),
+        # Empty rather than NaN-filled: the sensor count is not known here, and
+        # a diverged point is excluded from the plots anyway.
+        "test_box_errors": np.zeros((0, 0)),
+        "test_box_times_s": np.zeros(0),
     }
     row.update(extra)
     return row
@@ -153,8 +179,9 @@ def train_one_seed(cli, overrides: dict, seed: int, device, fit,
     test_pred = rollout_phys(model, test_data, bundle, device)
     test_mae = mae(test_pred, test_data.T_lab, 0, test_data.n_t)
 
-    idx = np.linspace(0, test_data.n_t - 1, num=N_BOX_POINTS, dtype=int)
-    test_time_maes = timepoint_maes(test_pred, test_data.T_lab, idx)
+    box_idx = box_time_idx(test_data.n_t)
+    test_box_errors = box_errors(test_pred, test_data.T_lab, box_idx)
+    test_box_times_s = np.asarray(test_data.t, dtype=float)[box_idx]
 
     checkpoint = ""
     if checkpoint_path is not None:
@@ -213,7 +240,8 @@ def train_one_seed(cli, overrides: dict, seed: int, device, fit,
                 np.array(model.rate_lags.detach().cpu().numpy()) * bundle.T_span_ref
             ).astype(float).tolist(),
             "checkpoint": checkpoint,
-            "test_time_maes": test_time_maes,
+            "test_box_errors": test_box_errors,
+            "test_box_times_s": test_box_times_s,
         },
         hist,
     )
@@ -254,7 +282,9 @@ def aggregate_seeds(extra: dict, per_seed: list, n_seeds: int,
         "rate_lags_s": first["rate_lags_s"],
         "train_time": train_time,
         "checkpoint": first["checkpoint"],
-        "test_time_maes": np.mean([r["test_time_maes"] for r in per_seed], axis=0),
+        "test_box_errors": np.mean([r["test_box_errors"] for r in per_seed],
+                                   axis=0),
+        "test_box_times_s": first["test_box_times_s"],
     }
     row.update(extra)
     return row
