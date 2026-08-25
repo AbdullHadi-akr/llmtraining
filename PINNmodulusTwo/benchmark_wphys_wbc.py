@@ -748,9 +748,12 @@ def run_report_only(cli, plt) -> None:
             print(f"  (w_phys={w_phys:g}, w_bc={w_bc:g})", flush=True)
         arm_phys, _ = probe_arms(cli)
         todo = "1" if set(missing) & set(arm_phys) else "2"
-        print(f"\nRun the missing part first:\n  python3 {Path(__file__).name} "
-              f"--probe --probe-part {todo} --epochs {cli.epochs} "
-              f"--device {cli.device}", flush=True)
+        # Deliberately NOT cli.device: this step is documented to run on the CPU
+        # because it computes nothing, and echoing that into a TRAINING command
+        # would quietly put a multi-hour run on the CPU.
+        print(f"\nRun the missing part first (needs the GPU):\n"
+              f"  python3 {Path(__file__).name} --probe --probe-part {todo} "
+              f"--epochs {cli.epochs} --device cuda", flush=True)
         raise SystemExit(1)
     total_time = sum(r["train_time"] for r in results)
     print("\n".join(build_header(cli, len(results))), flush=True)
