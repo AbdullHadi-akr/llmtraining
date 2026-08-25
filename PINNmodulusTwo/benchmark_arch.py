@@ -136,6 +136,20 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--batch-phys", type=int, default=256)
     p.add_argument("--batch-bc", type=int, default=128)
     p.add_argument("--phys-norm", type=float, default=0.0)
+    # Loss balancing / preprocessing. These change what w_phys and w_bc MEAN,
+    # so a sweep is only comparable with another one that used the same values.
+    # benchmark_balance.py is what decides them.
+    p.add_argument("--loss-balance", choices=["ema", "legacy", "fixed"],
+                   default=d.get("loss_balance", "ema"), help="see train.py --loss-balance")
+    p.add_argument("--ema-decay", type=float, default=d.get("ema_decay", 0.9))
+    p.add_argument("--balance-warmup", type=int, default=d.get("balance_warmup", 1))
+    p.add_argument("--data-floor", type=float, default=d.get("data_floor", 1e-08))
+    p.add_argument("--bc-norm", type=float, default=d.get("bc_norm", 0.0))
+    p.add_argument("--residual-norm", choices=["rms", "legacy"], default=d.get("residual_norm", "rms"))
+    p.add_argument("--zero-weight-terms", choices=["skip", "compute"], default=d.get("zero_weight_terms", "skip"))
+    p.add_argument("--subsample-mode", choices=["stride", "mean"], default=d.get("subsample_mode", "stride"))
+    p.add_argument("--forcing-energy", action="store_true", default=d.get("forcing_energy", False))
+    p.add_argument("--config-rates", action="store_true", default=d.get("config_rates", False))
     p.add_argument("--device", default=d.get("device", "auto"),
                    help="auto | cpu | cuda | cuda:N")
     return p.parse_args()

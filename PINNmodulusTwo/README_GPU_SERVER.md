@@ -179,6 +179,7 @@ source .venv/bin/activate
 python3 PINNmodulusTwo/train.py --epochs 2 --subsample 40 --device cuda
 
 # 6.2  konvergiert das Training?  (~5 min)
+python3 PINNmodulusTwo/selftest.py          # Skalierungs-Checks, wenige Sekunden
 python3 PINNmodulusTwo/smallBench.py --epochs 5 --w-phys 0.0 0.1 --w-bc 0.1 --device cuda
 cat PINNmodulusTwo/artifacts/smallBench_results.txt
 
@@ -186,7 +187,7 @@ cat PINNmodulusTwo/artifacts/smallBench_results.txt
 python3 PINNmodulusTwo/train.py --ops OP01 OP02 OP03 OP04 OP05 --subsample 2 --epochs 5 --history-mode hybrid --rate-lags 5 20 --delta-grid 0.2 --grad-clip 1.0 --device cuda
 ```
 
-**Weiter zu [Kapitel 7](#7-range-probe-der-loss-gewichte--in-drei-schritten) nur, wenn:**
+**Weiter zu [Kapitel 7](#7-balancing-benchmark--was-die-gewichte-überhaupt-bedeuten-7-h-zwei-sessions) nur, wenn:**
 
 - 6.1 zeigt `[device] cuda:0 …` und der Prozess taucht in `nvidia-smi` auf
 - 6.2 endet mit `✓ ALL CHECKS PASSED - Ready for full benchmark!`
@@ -273,13 +274,13 @@ Bei **FAILED** nicht weitermachen, sondern die Ursache klären:
 | noch nicht konvergiert | mit mehr Epochen gegenprüfen |
 
 Bei `[ABORT] ... loss exploded` nennt die Meldung den zuerst betroffenen
-Loss-Term, siehe [Kapitel 10](#10-troubleshooting).
+Loss-Term, siehe [Kapitel 10](#11-troubleshooting).
 
 ---
 
 ### 6.3 Wie lange dauert eine Epoche? (~10 min)
 
-Ein kurzer Lauf mit den **echten** Einstellungen. Alle Zeitangaben in Kapitel 7
+Ein kurzer Lauf mit den **echten** Einstellungen. Alle Zeitangaben in Kapitel 8
 und 8 hängen an dieser einen Zahl:
 
 ```
@@ -290,8 +291,8 @@ Damit rechnest du die Kapitel-7-Schritte durch:
 
 ```
 Sekunden/Epoche × 20 Epochen ÷ 3600  = Stunden pro Punkt
-Stunden/Punkt × 5                    = Schritt 7.1  (w_phys-Arm)
-Stunden/Punkt × 4                    = Schritt 7.2  (w_bc-Arm)
+Stunden/Punkt × 5                    = Schritt 8.1  (w_phys-Arm)
+Stunden/Punkt × 4                    = Schritt 8.2  (w_bc-Arm)
 ```
 
 Bei 112 s/Epoche sind das 0,62 h pro Punkt — 7.1 also ~3,1 h und 7.2 ~2,5 h.
@@ -299,7 +300,7 @@ Kommt deutlich mehr heraus, ist der Hebel `--epochs 10` (halbiert beide
 Schritte). `--subsample` **nicht** erhöhen: 0.2 s liegt schon knapp unter der
 CFL-Grenze von ~0.241 s.
 
-Für Kapitel 8 dieselbe Rechnung mit 60 Epochen:
+Für Kapitel 9 dieselbe Rechnung mit 60 Epochen:
 
 ```
 Sekunden/Epoche × 60 Epochen ÷ 3600  = Stunden pro Gitterpunkt
@@ -339,7 +340,112 @@ beiden Schritte müssen in jedem Hyperparameter übereinstimmen.
 
 ---
 
-## 7. Range-Probe der Loss-Gewichte — in drei Schritten
+## 7. Balancing-Benchmark — was die Gewichte überhaupt bedeuten (~7 h, zwei Sessions)
+
+**Vor Kapitel 8.** Eine Gewichte-Probe misst nur dann Gewichte, wenn die
+Skalierung darunter feststeht. Genau das klärt dieses Kapitel.
+
+### 7.0 Das Problem in einem Satz
+
+`L_phys` und `L_bc` werden durch ihren eigenen laufenden Mittelwert geteilt,
+`L_data` bisher nicht. Die beiden normierten Terme liegen damit über den ganzen
+Lauf bei ~1, während `L_data` um Größenordnungen fällt:
+
+| | Start (`L_data ≈ 1`) | konvergiert (`L_data ≈ 5e-3`) |
+|---|---|---|
+| `w_phys = 0.001` | 0,1 % des Losses | ~20 % |
+| `w_phys = 0.1` | 10 % | ~20× `L_data` |
+| `w_phys = 1.0` | ~50 % | ~200× `L_data` |
+
+Die Mischung, die der Optimierer sieht, wandert also während des Trainings zur
+Physik. Zwei Folgen: das beste `w_phys` hängt an `--epochs` — ein in der
+20-Epochen-Probe gefundener Wert ist für den 60-Epochen-Lauf zu groß — und die
+bisherige Probe-Range liegt größtenteils im physikdominierten Bereich.
+
+`--loss-balance ema` (neuer Default) teilt **alle drei** Terme durch ihren
+eigenen Mittelwert. Dann ist `w_data:w_phys:w_bc` ein echtes Verhältnis, das in
+Epoche 1 dasselbe bedeutet wie in Epoche 60.
+
+### 7.1 Teil 1 — Balancing und Residuen-Skalierung (5 Trainings, ~3,5 h)
+
+```bash
+cd ~/llmtraining
+source .venv/bin/activate
+
+nohup python3 PINNmodulusTwo/benchmark_balance.py --part 1 --epochs 20 --device cuda > balance_part1.log 2>&1 &
+echo $! > balance.pid
+echo "Live: tail -f balance_part1.log"
+```
+
+Fünf Konfigurationen an **einem festen Gewichtspunkt** (`w_phys=0.1`,
+`w_bc=0.1`): die drei `--loss-balance`-Modi und die zwei `--residual-norm`-Modi.
+Gesweept wird die Skalierung, nicht das Gewicht.
+
+Entscheidend ist die Spalte `drift` im Report:
+
+```
+    axis    value |  MAE_in  MAE_val    +/-  MAE_test |  ratio_1  ratio_N   drift
+ balance      ema |    ...      ...    ...       ... |    0.100    0.098    0.98
+ balance   legacy |    ...      ...    ...       ... |     12.4     198.    16.0
+```
+
+- `ratio` = `w_phys*L_phys_bal / (w_data*L_data_bal)`, also die tatsächliche
+  Mischung. Unter `ema` startet sie per Konstruktion bei `w_phys/w_data`.
+- `drift` = `ratio_N / ratio_1`. Nahe 1 heißt: ein in einer kurzen Probe
+  gefundenes Gewicht überträgt sich auf den langen Lauf. Weit weg von 1 heißt:
+  es überträgt sich nicht.
+
+Zusätzlich entsteht `benchmark_balance_ratio.png` — die Mischung je Epoche, eine
+Kurve pro Konfiguration. Flach = stabil.
+
+### 7.2 Teil 2 — die optionalen Eingangskanäle (4 Trainings, ~2,8 h)
+
+Erst laufen lassen, wenn 7.1 einen Modus gewählt hat, und diesen mitgeben:
+
+```bash
+nohup python3 PINNmodulusTwo/benchmark_balance.py --part 2 --epochs 20 --device cuda --loss-balance ema > balance_part2.log 2>&1 &
+echo $! > balance.pid
+```
+
+Vier Varianten: `none`, `energy`, `rates`, `both`.
+
+- **`energy`** hängt die kumulierte eingebrachte Wärme als zweiten
+  Forcing-Kanal an, ausgedrückt als adiabate Temperaturerhöhung in Sigma. Ein
+  thermisches System *integriert* Leistung; das momentane `q_dot`, das das Netz
+  bisher bekommt, sagt nur, wie stark gerade geheizt wird — nie, wie viel Wärme
+  schon in der Zelle steckt.
+- **`rates`** hängt `d(config)/dt` für die Config-Kanäle an, die echte
+  Zeitprofile sind. Dasselbe Argument wie bei der Temperatur-Rekurrenz, auf die
+  Configs angewandt.
+
+Beide sind per Default **aus**. Sie verbreitern den Netzeingang, also werden sie
+gemessen und nicht angenommen.
+
+> **Profile vs. Labels.** `train.py` meldet beim Start, welche Config-Kanäle
+> sich innerhalb eines OP über die Zeit ändern (*Profile*) und welche je OP
+> konstant sind (*Labels*). Label-Kanäle sind Konstanten, die das Netz pro OP
+> auswendig lernen kann — bei fünf Trainings-OPs können ein paar davon als
+> OP-Kennung wirken, die sich nicht auf OP06/OP07 überträgt. Steht im Log
+> direkt unter der `OPs=`-Zeile.
+
+### 7.3 Was danach feststeht
+
+`benchmark_balance_best.txt` nennt den Gewinner und den Aufruf für Kapitel 8.
+Ab hier gilt: **jede Gewichte-Probe muss mit denselben Balancing-Flags laufen.**
+Sie stecken in der Signatur von `benchmark_wphys_wbc.py`; ein zweiter Arm mit
+anderem `--loss-balance` verwirft den ersten, statt ihn stillschweigend
+dazuzumischen.
+
+**Weiter zu Kapitel 8, wenn:**
+
+- 7.1 durchgelaufen ist und einen `--loss-balance`-Modus gewählt hat
+- die `drift`-Spalte gelesen wurde — sie sagt, ob die Probe in Kapitel 8
+  überhaupt auf den 60-Epochen-Lauf übertragbar ist
+- 7.2 gesagt hat, ob die Zusatzkanäle etwas bringen (sonst bleiben sie aus)
+
+---
+
+## 8. Range-Probe der Loss-Gewichte — in drei Schritten
 
 Dieselben neun Trainings wie bisher, mit denselben Parametern (`dt = 0.2 s`),
 nur in **drei getrennte Schritte** zerlegt: zwei Trainingsblöcke und eine
@@ -352,8 +458,8 @@ Schritt speichert seine Ergebnisse sofort.
 | **7.2** | `w_bc`-Arm | 4 | **~2,5 h** | CSV (jetzt 9 Zeilen) + Settings |
 | **7.3** | Auswertung, kein Training | 0 | **~1 min, ohne GPU** | Verdikt + Plots |
 
-**Heute reichen [Kapitel 6](#6-smoke-test-und-vorprüfung-20-min) und 7.1.** 7.2
-und 7.3 können beliebig später laufen — Schritt 7.1 legt seine Ergebnisse in
+**Heute reichen [Kapitel 6](#6-smoke-test-und-vorprüfung-20-min) und 8.1.** 8.2
+und 8.3 können beliebig später laufen — Schritt 8.1 legt seine Ergebnisse in
 `artifacts/probe_parts.json` und `artifacts/benchmark_wphys_wbc.csv` ab und
 wartet dort.
 
@@ -375,7 +481,7 @@ wartet dort.
 Auswahl), Test `OP07` (wird nur berichtet und fließt in keine Auswahl ein).
 
 ---
-### 7.0 Hyperparameter — für 7.1 und 7.2 identisch
+### 8.0 Hyperparameter — für 8.1 und 8.2 identisch
 
 **Das ist die verbindliche Liste.** 7.1 und 7.2 müssen in *jedem* dieser Werte
 übereinstimmen; weicht 7.2 ab, verwirft der Lauf den gespeicherten Teil aus 7.1,
@@ -425,14 +531,14 @@ womit 7.1 gelaufen ist.
 **Lernparameter** (die einzigen Dinge, die der Gradient anfasst): MLP-Gewichte,
 das per-Layer `β` des Swish, und die beiden Physik-Gains `src_gain`/`diff_gain`.
 Die History-Struktur wird **nicht** gelernt — kein lernbares `δ`, keine
-Lag-Gates. Wer sie optimieren will, sweept sie mit `benchmark_arch.py` (8.2).
+Lag-Gates. Wer sie optimieren will, sweept sie mit `benchmark_arch.py` (9.2).
 
 Die Defaults stehen in `PINNmodulusTwo/config.yaml`; die CLI überschreibt sie
 pro Lauf.
 
 ---
 
-### 7.1 Schritt 1 — der `w_phys`-Arm (5 Punkte, ~3,5 h)
+### 8.1 Schritt 1 — der `w_phys`-Arm (5 Punkte, ~3,5 h)
 
 Bevor ein Gitter Stunden investiert, um Unterschiede *innerhalb* eines Bereichs
 aufzulösen, klärt die Probe, ob dieser Bereich überhaupt der richtige ist — und
@@ -449,7 +555,7 @@ zerfallen sauber in die beiden Arme:
 | 7.2 | `w_bc` | 4 | `w_bc ∈ [0, 0.001, 0.01, 1.0]` bei festem `w_phys = 0.01` |
 
 Der Mittelpunkt `(w_phys=0.01, w_bc=0.1)` gehört zu 7.1; 7.2 überspringt ihn,
-deshalb 5 + 4 = 9 und nicht 10. Genau deshalb geht 7.1 zuerst: **7.2 allein wäre
+deshalb 5 + 4 = 9 und nicht 10. Genau deshalb geht 8.1 zuerst: **8.2 allein wäre
 nicht auswertbar**, weil der Bezugspunkt fehlt.
 
 ```bash
@@ -482,7 +588,7 @@ gespeichert** — CSV, Settings und Rohzeilen. Nur ausgewertet wird noch nichts.
 > **Ein Seed, mit Absicht.** `--seeds 0 1 2` wären 27 Trainings und damit ~18 h.
 > Der Preis: das Verdikt kann die gefundenen Unterschiede nicht vom Init-Rauschen
 > trennen und sagt das auch (`seed spread unknown`). Die Streuung klärt Schritt
-> 8.1 separat. Für „welche Dekade überhaupt" reicht ein Seed, solange die
+> 9.1 separat. Für „welche Dekade überhaupt" reicht ein Seed, solange die
 > Spannweite deutlich ist.
 
 **Zwischendurch reinschauen:**
@@ -495,7 +601,7 @@ nvidia-smi                                                # läuft die GPU?
 
 ---
 
-### 7.2 Schritt 2 — der `w_bc`-Arm (4 Punkte, ~2,5 h)
+### 8.2 Schritt 2 — der `w_bc`-Arm (4 Punkte, ~2,5 h)
 
 **Exakt dieselben Flags wie 7.1**, nur `--probe-part 2`:
 
@@ -533,7 +639,7 @@ The cross is complete. Plots and verdict:
 
 ---
 
-### 7.3 Schritt 3 — Auswertung und Plots (~1 min, ohne GPU)
+### 8.3 Schritt 3 — Auswertung und Plots (~1 min, ohne GPU)
 
 Trainiert nichts. Liest die gespeicherten Ergebnisse beider Arme, fügt sie zum
 vollständigen Kreuz zusammen und erzeugt **erst jetzt** Verdikt und Plots.
@@ -610,23 +716,23 @@ Fehler nicht — dann spart man sich das Gitter dafür.
 
 ---
 
-### 7.4 Was folgt daraus?
+### 8.4 Was folgt daraus?
 
 | Befund in der Probe | Konsequenz |
 |---|---|
 | Spannweite über die Dekaden **groß**, klares Minimum | 5×5-Gitter (8.3), zentriert auf diese Dekade |
 | Spannweite **klein / flach** | Gitter für dieses Gewicht überspringen — es bewegt den Fehler nicht |
 | beide Gewichte flach | zuerst Architektur-Benchmark (8.2): das Problem liegt woanders |
-| Läufe divergiert (`[SKIP]`) | nicht weitermachen, [Kapitel 10](#10-troubleshooting) |
+| Läufe divergiert (`[SKIP]`) | nicht weitermachen, [Kapitel 10](#11-troubleshooting) |
 
 Die Probe lief mit **einem** Seed, das Verdikt sagt deshalb „seed spread
-unknown". Ob die gefundenen Unterschiede echt sind, klärt Schritt 8.1.
+unknown". Ob die gefundenen Unterschiede echt sind, klärt Schritt 9.1.
 
 ---
 
-### 7.5 Alles zum Kopieren
+### 8.5 Alles zum Kopieren
 
-**Heute — Kapitel 6 und Schritt 7.1:**
+**Heute — Kapitel 6 und Schritt 7.1.** Kapitel 7 entscheidet, was die Gewichte in Kapitel 8 überhaupt bedeuten:
 
 ```bash
 cd ~/llmtraining
@@ -651,7 +757,16 @@ python3 PINNmodulusTwo/train.py --ops OP01 OP02 OP03 OP04 OP05 --subsample 2 --e
 # Deutlich zu viel? Dann --epochs 10 -- aber in BEIDEN Schritten.
 
 # ---------------------------------------------------------------------------
-# 7.1  RANGE-PROBE, w_phys-ARM  (5 Punkte, ~3,5 h)
+# 7.1  BALANCING-BENCHMARK, Teil 1  (5 Trainings, ~3,5 h)
+# ---------------------------------------------------------------------------
+nohup python3 PINNmodulusTwo/benchmark_balance.py --part 1 --epochs 20 --device cuda > balance_part1.log 2>&1 &
+echo $! > balance.pid
+# Spalte "drift" lesen: ~1 = Gewicht aus einer kurzen Probe uebertraegt sich.
+# Danach 7.2 (--part 2) und erst dann die Gewichte-Probe unten, IMMER mit
+# denselben --loss-balance-Flags.
+
+# ---------------------------------------------------------------------------
+# 8.1  RANGE-PROBE, w_phys-ARM  (5 Punkte, ~3,5 h)
 # ---------------------------------------------------------------------------
 nohup python3 PINNmodulusTwo/benchmark_wphys_wbc.py --probe --probe-part 1 --epochs 20 --device cuda > probe_part1.log 2>&1 &
 echo $! > probe.pid
@@ -664,24 +779,24 @@ echo "Stop: kill \$(cat probe.pid)"
 # Das ist KEIN Fehler: Ergebnisse sind gespeichert, ausgewertet wird in 7.3.
 ```
 
-**Später — Schritte 7.2 und 7.3:**
+**Später — Schritte 8.2 und 8.3:**
 
 ```bash
 cd ~/llmtraining
 source .venv/bin/activate
 
-# Erst die Einstellungen aus 7.1 nachlesen und die Flags danach richten:
+# Erst die Einstellungen aus 8.1 nachlesen und die Flags danach richten:
 cat PINNmodulusTwo/artifacts/benchmark_wphys_wbc_settings.txt
 
 # ---------------------------------------------------------------------------
-# 7.2  RANGE-PROBE, w_bc-ARM  (4 Punkte, ~2,5 h)
+# 8.2  RANGE-PROBE, w_bc-ARM  (4 Punkte, ~2,5 h)
 # ---------------------------------------------------------------------------
 nohup python3 PINNmodulusTwo/benchmark_wphys_wbc.py --probe --probe-part 2 --epochs 20 --device cuda > probe_part2.log 2>&1 &
 echo $! > probe.pid
 echo "Live: tail -f probe_part2.log"
 
 # ---------------------------------------------------------------------------
-# 7.3  AUSWERTUNG UND PLOTS  (~1 min, kein Training)
+# 8.3  AUSWERTUNG UND PLOTS  (~1 min, kein Training)
 # ---------------------------------------------------------------------------
 python3 PINNmodulusTwo/benchmark_wphys_wbc.py --probe --report-only --epochs 20 --device cpu
 
@@ -694,7 +809,7 @@ ls -lh PINNmodulusTwo/artifacts/benchmark_wphys_wbc_probe*.png
 
 ---
 
-### 7.6 Checkliste
+### 8.6 Checkliste
 
 Vor 7.1:
 
@@ -719,14 +834,14 @@ Nach 7.3:
 - [ ] `benchmark_wphys_wbc.csv` hat 9 Datenzeilen
 - [ ] beide `*_probe*.png` existieren
 - [ ] Verdikt je Achse gelesen — welche Dekade, und bewegt sich überhaupt etwas?
-- [ ] entschieden, welcher Lauf aus Kapitel 8 als Nächstes kommt
+- [ ] entschieden, welcher Lauf aus Kapitel 9 als Nächstes kommt
 
 ---
 
-## 8. Große Benchmarks — Tage
+## 9. Große Benchmarks — Tage
 
 Alles hier läuft mit **60 Epochen** und dauert Tage, nicht Stunden. Erst starten,
-wenn Kapitel 7 durch ist und die Probe gesagt hat, wo es sich lohnt.
+wenn Kapitel 8 durch ist und die Probe gesagt hat, wo es sich lohnt.
 
 | Lauf | Trainings | Laufzeit |
 |---|---|---|
@@ -739,7 +854,7 @@ Mit Seeds multipliziert sich das entsprechend. `--epochs 20` drittelt alles und
 ist für Vergleiche zwischen Konfigurationen meist ausreichend.
 
 ---
-### 8.1 Seed-Streuung an einem Gitterpunkt
+### 9.1 Seed-Streuung an einem Gitterpunkt
 
 **Der erste Lauf dieses Kapitels**, weil er entscheidet, wie die anderen zu
 lesen sind. Er beantwortet: bewegt sich der Fehler zwischen zwei Konfigurationen
@@ -758,12 +873,12 @@ Standardabweichung über die fünf Seeds.
 - **Streuung klein** (deutlich unter den Unterschieden, die du in einer Heatmap
   vergleichen willst): die langen Sweeps liefern lesbare Rangfolgen.
 - **Streuung groß**: ein feineres Gitter bringt nichts, weil der Sieger ohnehin
-  vom Zufall bestimmt wird. Dann in 8.2 und 8.3 **mit `--seeds 0 1 2`**
+  vom Zufall bestimmt wird. Dann in 9.2 und 9.3 **mit `--seeds 0 1 2`**
   arbeiten und die Gitter kleiner halten.
 
 ---
 
-### 8.2 Architektur-Benchmark
+### 9.2 Architektur-Benchmark
 
 Misst Breite, Tiefe und History-Lags — Werte, die im Gewichte-Sweep ungemessen
 festliegen. Läuft **eine Achse nach der anderen** gegen eine gemeinsame
@@ -829,10 +944,10 @@ nicht, diesen Regler weiter zu drehen.
 
 ---
 
-### 8.3 5×5-Gitter der Loss-Gewichte
+### 9.3 5×5-Gitter der Loss-Gewichte
 
 Sucht das optimale Paar `(w_phys, w_bc)` auf dem 5×5-Standardgitter — zentriert
-auf die Dekade, die das Verdikt aus [Schritt 7.3](#73-schritt-3--auswertung-und-plots-1-min-ohne-gpu)
+auf die Dekade, die das Verdikt aus [Schritt 8.3](#83-schritt-3--auswertung-und-plots-1-min-ohne-gpu)
 als wirksam ausgewiesen hat.
 
 ```bash
@@ -861,17 +976,17 @@ das Kommando ohne `nohup`/`&` (Detach mit `Ctrl-b`, dann `d`).
 | Epochen | 60 pro Gitterpunkt |
 | Laufzeit | 1,5–2,5 h/Punkt → **~1,5–2 Tage** |
 
-Mit `--epochs 20` sind es ~14 h. Wenn 8.1 eine große Seed-Streuung gezeigt hat,
+Mit `--epochs 20` sind es ~14 h. Wenn 9.1 eine große Seed-Streuung gezeigt hat,
 ist ein kleines Gitter mit drei Seeds aussagekräftiger als ein großes mit einem.
 
 **`--extended-grid`** schaltet auf 10×10 = 100 Punkte um, also **~6–8 Tage bei
 einem Seed**. Das lohnt praktisch nie: die Probe hat die Dekade bereits
 eingegrenzt, und 100 Punkte auf einem Seed liefern vor allem das Minimum aus 100
-Ziehungen — siehe das Rausch-Verdikt in 8.4.
+Ziehungen — siehe das Rausch-Verdikt in 9.4.
 
 ---
 
-### 8.4 Seeds — wie viele Läufe pro Gitterpunkt
+### 9.4 Seeds — wie viele Läufe pro Gitterpunkt
 
 Standard ist **ein** Seed pro Punkt. Damit ist nicht entscheidbar, ob der
 Unterschied zwischen zwei Zellen der Heatmap echt ist oder nur unterschiedliche
@@ -894,7 +1009,7 @@ explizit, ob die Rangfolge belastbar ist oder im Rauschen liegt.
 
 ---
 
-### 8.5 Erwartete Outputs
+### 9.5 Erwartete Outputs
 
 ```
 PINNmodulusTwo/artifacts/benchmark_wphys_wbc.csv               -> alle 100 Punkte
@@ -908,7 +1023,7 @@ PINNmodulusTwo/artifacts/checkpoints_wphys_wbc/*.pt            -> 100 Modelle (m
 
 ---
 
-### 8.6 Monitoring
+### 9.6 Monitoring
 
 Gilt für jeden der Läufe oben — Log- und PID-Datei entsprechend ersetzen (`probe.log`/`probe.pid`, `benchmark_arch.log`, `benchmark_grid.log`).
 
@@ -947,7 +1062,7 @@ gegenseitig, also Artefakte pro Lauf wegsichern oder `--model-dir` setzen.
 
 ---
 
-### 8.7 Auswertung nach Abschluss
+### 9.7 Auswertung nach Abschluss
 
 ```bash
 cat PINNmodulusTwo/artifacts/benchmark_wphys_wbc_best.txt
@@ -988,7 +1103,7 @@ du -sh PINNmodulusTwo/artifacts/checkpoints_wphys_wbc/
 
 ---
 
-### 8.8 Abbrechen und neu starten
+### 9.8 Abbrechen und neu starten
 
 ```bash
 kill $(cat benchmark.pid)
@@ -1001,7 +1116,7 @@ ps -p $(cat benchmark.pid)   # "No such process" = gestoppt
 
 ---
 
-### 8.9 Weiter mit den besten Gewichten
+### 9.9 Weiter mit den besten Gewichten
 
 ```bash
 # Werte aus benchmark_wphys_wbc_best.txt einsetzen
@@ -1025,7 +1140,7 @@ model.eval()
 
 ---
 
-## 9. Ergebnisse zurückholen
+## 10. Ergebnisse zurückholen
 
 ```bash
 rsync -avz user@gpu-server:~/llmtraining/PINNmodulusTwo/artifacts/ ./artifacts/
@@ -1050,7 +1165,7 @@ dem Server gebraucht.
 
 ---
 
-## 10. Troubleshooting
+## 11. Troubleshooting
 
 | Symptom | Ursache / Abhilfe |
 |---|---|
@@ -1062,12 +1177,14 @@ dem Server gebraucht.
 | `ModuleNotFoundError: modulus` | venv nicht aktiviert oder `pip install nvidia-modulus` fehlt → Schritt 4. |
 | `FileNotFoundError: .../data_cache/OP01.npz` | Daten nicht übertragen → Schritt 5. |
 | `FileNotFoundError: .../material_properties/constants.yaml` | dito → Schritt 5. |
+| `L_phys_bal=nan` / leere Kurve im Plot | Kein Fehler: bei `w_phys 0` (bzw. `w_bc 0`) wird der Term gar nicht mehr berechnet — er kostet einen Autograd-Hessian und trägt nichts bei. Als NaN protokolliert, damit der Plot eine Lücke zeigt statt einer flachen Linie, die es nie gab. Mit `--zero-weight-terms compute` wird er zum Mitloggen weiter gerechnet. |
+| Gewichte-Probe verwirft den anderen Arm | Die Balancing-Flags stecken in der Signatur. Teil 2 braucht dieselben wie Teil 1 — den fertigen Aufruf druckt Teil 1 am Ende aus. |
 | `[CFL WARN]` beim Start | Zeitschritt zu groß für die Diffusion — `--subsample` verkleinern (z. B. `--subsample 2`) oder `--grad-clip 1.0` setzen. Unabhängig von der GPU. |
 | Training bricht mit `[ABORT] ... loss exploded` ab | Gleiche Ursache wie oben; die Meldung nennt die empfohlenen Gegenmaßnahmen. |
 | `No space left on device` während des Benchmarks | Die 100 Checkpoints brauchen mehrere GB → mit `--no-save-models` (gar keine) oder `--save-best-only` (nur das beste Modell) neu starten. |
 | Benchmark startet nicht, "läuft schon" | Alten Prozess finden und beenden: `ps aux \| grep benchmark_wphys_wbc`, dann `kill <PID>`. |
 | Loss explodiert mitten im Benchmark | Lauf stoppen (`kill $(cat benchmark.pid)`) und mit stabileren Einstellungen neu starten: `--grad-clip 2.0 --lr 0.001`. |
-| Läuft auf der GPU kaum schneller | Erwartbar: pro Epoche gibt es ~7000 *sequentielle* Rollout-Schritte je OP, die sich nicht parallelisieren lassen. Batchgrößen erhöhen hilft nur dem Physik-Term (8.6). |
+| Läuft auf der GPU kaum schneller | Erwartbar: pro Epoche gibt es ~7000 *sequentielle* Rollout-Schritte je OP, die sich nicht parallelisieren lassen. Batchgrößen erhöhen hilft nur dem Physik-Term (9.6). |
 
 ---
 

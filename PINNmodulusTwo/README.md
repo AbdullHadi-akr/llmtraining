@@ -35,9 +35,16 @@ takes part in any selection.
   aggregation over seeds, the val/test split, and the seed-noise verdict. A
   benchmark only describes its own sweep axis.
 - `benchmark_wphys_wbc.py` — 2D sweep of the loss weights `w_phys` x `w_bc`.
+- `benchmark_balance.py` — **run this before the weight sweep**: how the loss
+  terms are scaled relative to each other, and whether the optional input
+  channels help. A weight only means something once the scaling under it is
+  settled (see *Loss balancing* below).
 - `benchmark_arch.py` — width, depth, history lags and anchor lag (`delta_grid`),
   one axis at a time.
 - `smallBench.py` — 2-5 minute smoke test; run it before any long sweep.
+- `selftest.py` — seconds-long arithmetic checks on the loss balancing and
+  residual scaling. No data, no GPU. The properties it guards are invisible
+  in a training log, and the next chance to notice is a multi-hour sweep.
 - `config.yaml` — hyperparameters, matching what the benchmarks run
   (CLI overrides available).
 
@@ -81,6 +88,55 @@ The physics term supports `time_deriv: bdf1`, `bdf2`, or `autograd`. `bdf2` is
 the default and remains the recommended choice when the history buffer is long
 enough; `history_at()` always uses raw interpolation so the derivative is not
 coupled to the hybrid feature layout.
+
+## Loss balancing — what `w_phys` and `w_bc` actually mean
+
+The three loss terms live on completely different scales, so a raw weight is not
+a mixing ratio. Each term is therefore divided by a running estimate of its own
+magnitude before its weight is applied (`--loss-balance`, `config.yaml:
+loss_balance`):
+
+| mode | which terms are divided | consequence |
+|---|---|---|
+| `ema` (default) | `L_data`, `L_phys`, `L_bc` | `w_data:w_phys:w_bc` is a genuine ratio. `w_phys = 1` means "physics contributes as much as data", and it means that in epoch 1 as much as in epoch 60. |
+| `legacy` | only `L_phys`, `L_bc` | the historical scheme. `L_data` stays raw and falls by orders of magnitude during a run, while the two normalised terms stay pinned near 1 — so the mixture drifts steadily towards physics, and the best `w_phys` becomes a function of `--epochs`. |
+| `fixed` | all three, frozen after warm-up | deterministic, no feedback between a loss and its own scale. |
+
+This is why `benchmark_balance.py` runs first. It trains at one fixed weight
+point and logs `w_phys*L_phys_bal / (w_data*L_data_bal)` per epoch — the mixture
+the optimiser actually saw. Under `legacy` that number moves during the run;
+under `ema` it does not. Tuning weights before knowing which regime you are in
+measures the drift as much as the weights.
+
+Two related scaling knobs:
+
+- `--residual-norm` (default `rms`). The `*_scale` constants in `data.py` are RMS
+  values, so `x / scale` is what gives `mean(res²) = 1`. The original code
+  divided by `sqrt(scale)`, leaving `mean(res²) = scale` — i.e. the `dTdt`,
+  `aniso` and `Qsrc` terms kept their original size gap despite the
+  normalisation. `legacy` restores that behaviour for comparison.
+- `bc_scale` is now **measured** from the training data (the RMS spatial
+  gradient across x-neighbouring grid points) instead of the old `1 / L_ref`
+  guess, which never involved a temperature at all. `--residual-norm legacy`
+  does *not* restore the old value, so pre-fix `L_bc` numbers are not
+  reproducible.
+
+## Optional input features (off by default)
+
+Both widen the network input, so they are measured rather than assumed —
+`benchmark_balance.py --part 2` is the axis for them.
+
+- `--forcing-energy`: cumulative injected heat as a second forcing channel,
+  expressed as an adiabatic temperature rise in sigmas. A thermal system
+  *integrates* power; the instantaneous `q_dot` the net gets says how hard it is
+  being heated right now, never how much heat is already in the cell.
+- `--config-rates`: `d(config)/dt` for the config channels that are genuine time
+  profiles. Same argument as the temperature recurrence, applied to the configs.
+
+`train.py` also reports which config channels are **profiles** (varying in time
+within an OP) and which are **labels** (constant per OP, differing between them).
+Label channels are constants the network can memorise per OP — with five
+training OPs they can act as an OP identifier that cannot transfer to OP06/OP07.
 
 ## Run
 

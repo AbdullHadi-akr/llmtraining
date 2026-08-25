@@ -136,6 +136,19 @@ DEFAULT_W_BC = [0.0, 0.01, 0.05, 0.1, 0.3]
 # Range probe: a CROSS through the baseline, not a grid. Decade-spaced, so it
 # answers "which order of magnitude matters at all" before a grid commits hours
 # to resolving differences inside a range that may be entirely flat.
+#
+# These values assume --loss-balance ema, where every term is divided by its own
+# magnitude and the weights are therefore genuine ratios: w_phys = 1 means "the
+# physics term contributes as much as the data term", and the decades below walk
+# from "off" to "equal footing".
+#
+# Under --loss-balance legacy the same numbers mean something else entirely,
+# because there L_data stays raw: the ratio is w_phys/(w_data * L_data), so it
+# depends on how far the fit has converged and keeps moving during the run. If
+# you deliberately probe in legacy mode, shift this list DOWN by roughly the
+# decade L_data converges to (~1e-2..1e-3 here, i.e. probe 1e-5..1e-2) -- and
+# expect the answer not to transfer to a run with a different --epochs.
+# benchmark_balance.py measures which of the two regimes you are in.
 PROBE_W_PHYS = [0.0, 0.001, 0.01, 0.1, 1.0]
 PROBE_W_BC = [0.0, 0.001, 0.01, 0.1, 1.0]
 # The two baselines must be members of their own lists, so the arms of the cross
@@ -269,6 +282,18 @@ def _probe_signature(cli) -> dict:
         "batch_phys": int(cli.batch_phys), "batch_bc": int(cli.batch_bc),
         "w_phys": [float(v) for v in cli.w_phys],
         "w_bc": [float(v) for v in cli.w_bc],
+        # The balancing decides what a weight MEANS, so two arms balanced
+        # differently are not one experiment. Without these keys part 2 could be
+        # run with another --loss-balance and silently merge into part 1.
+        "loss_balance": str(cli.loss_balance),
+        "ema_decay": float(cli.ema_decay),
+        "balance_warmup": int(cli.balance_warmup),
+        "data_floor": float(cli.data_floor),
+        "bc_norm": float(cli.bc_norm),
+        "residual_norm": str(cli.residual_norm),
+        "subsample_mode": str(cli.subsample_mode),
+        "forcing_energy": bool(cli.forcing_energy),
+        "config_rates": bool(cli.config_rates),
     }
 
 
@@ -441,6 +466,20 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--phys-norm", type=float, default=0.0,
                    help="L_phys divisor: 0=adaptive EMA, >0=fixed divisor")
     # Checkpoints
+    # Loss balancing / preprocessing. These change what w_phys and w_bc MEAN,
+    # so a sweep is only comparable with another one that used the same values.
+    # benchmark_balance.py is what decides them.
+    p.add_argument("--loss-balance", choices=["ema", "legacy", "fixed"],
+                   default=d.get("loss_balance", "ema"), help="see train.py --loss-balance")
+    p.add_argument("--ema-decay", type=float, default=d.get("ema_decay", 0.9))
+    p.add_argument("--balance-warmup", type=int, default=d.get("balance_warmup", 1))
+    p.add_argument("--data-floor", type=float, default=d.get("data_floor", 1e-08))
+    p.add_argument("--bc-norm", type=float, default=d.get("bc_norm", 0.0))
+    p.add_argument("--residual-norm", choices=["rms", "legacy"], default=d.get("residual_norm", "rms"))
+    p.add_argument("--zero-weight-terms", choices=["skip", "compute"], default=d.get("zero_weight_terms", "skip"))
+    p.add_argument("--subsample-mode", choices=["stride", "mean"], default=d.get("subsample_mode", "stride"))
+    p.add_argument("--forcing-energy", action="store_true", default=d.get("forcing_energy", False))
+    p.add_argument("--config-rates", action="store_true", default=d.get("config_rates", False))
     p.add_argument("--save-models", dest="save_models", action="store_true", default=True)
     p.add_argument("--no-save-models", dest="save_models", action="store_false")
     p.add_argument("--save-best-only", action="store_true",
@@ -657,9 +696,19 @@ def main() -> None:
             other = "2" if cli.probe_part == "1" else "1"
             print("  still to train: " + ", ".join(
                 f"(w_phys={a:g}, w_bc={b:g})" for a, b in missing), flush=True)
+            # Echo the balancing flags explicitly: they are part of the
+            # signature now, so a part 2 started without them lands on the
+            # config.yaml defaults and discards part 1 instead of merging.
+            extra = f" --loss-balance {cli.loss_balance}"
+            if cli.residual_norm != "rms":
+                extra += f" --residual-norm {cli.residual_norm}"
+            if cli.forcing_energy:
+                extra += " --forcing-energy"
+            if cli.config_rates:
+                extra += " --config-rates"
             print(f"\nNext - the other part, with these same flags:\n"
                   f"  python3 {Path(__file__).name} --probe --probe-part {other} "
-                  f"--epochs {cli.epochs} --device {cli.device}", flush=True)
+                  f"--epochs {cli.epochs} --device {cli.device}{extra}", flush=True)
             print("  (a settings mismatch discards the stored part instead of "
                   "merging it)", flush=True)
         else:

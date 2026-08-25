@@ -15,6 +15,22 @@ def _grad(outputs: torch.Tensor, inputs: torch.Tensor) -> torch.Tensor:
 
 
 TimeDerivMethod = Literal["bdf1", "bdf2", "autograd"]
+ResidualNorm = Literal["rms", "legacy"]
+
+
+def _term_norm(scale: float, mode: ResidualNorm) -> float:
+    """Divisor that takes a residual term to unit RMS.
+
+    Every ``*_scale`` handed in here is already an RMS (``data.py`` builds them as
+    ``sqrt(mean(x**2))``), so unit RMS means dividing by the scale itself:
+    ``mean((x / s)**2) == mean(x**2) / s**2 == 1``.
+
+    ``legacy`` reproduces the original ``x / sqrt(s)``, which leaves the term at
+    ``mean(x**2) == s`` instead of 1. That is not a normalisation at all: the
+    three residual terms then keep their relative size gap, which is precisely
+    what the scales exist to remove. Kept only so old runs stay reproducible.
+    """
+    return (scale ** 0.5 if mode == "legacy" else scale) + 1e-8
 
 
 def boundary_condition_loss(
@@ -28,6 +44,7 @@ def boundary_condition_loss(
     tn_q: torch.Tensor,      # (B,) query times (normalised)
     bc_mask: torch.Tensor,   # (P,) boolean mask for boundary points (x=0)
     bc_scale: float = 1.0,
+    residual_norm: ResidualNorm = "rms",
 ) -> torch.Tensor:
     """Boundary condition: dT/dx = 0 at cell center (x=0).
     
@@ -55,9 +72,11 @@ def boundary_condition_loss(
     grad_T = _grad(T, xb)  # (n_samples, 3)
     dT_dx = grad_T[:, 0]   # derivative wrt x (first coordinate)
     
-    # BC residual: dT/dx should be 0, normalized by sqrt(training RMS)
-    # We use sqrt because the loss squares this residual
-    return dT_dx / (bc_scale**0.5 + 1e-8)
+    # BC residual: dT/dx should be 0, measured against the RMS spatial gradient
+    # the training data actually shows (data.py: _measure_bc_scale). Dividing by
+    # that scale puts a "typical" gradient at 1, so L_bc reads as a fraction of
+    # the gradients present in the data rather than in units of nothing.
+    return dT_dx / _term_norm(bc_scale, residual_norm)
 
 
 def heat_residual(
@@ -77,6 +96,7 @@ def heat_residual(
     aniso_scale: float = 1.0,
     Qsrc_scale: float = 1.0,
     time_deriv: TimeDerivMethod = "bdf2",
+    residual_norm: ResidualNorm = "rms",
 ) -> torch.Tensor:
     """Return the scaled heat-equation residual at the sampled points.
     
@@ -124,10 +144,18 @@ def heat_residual(
         + 2.0 * (fo[:, 0, 1] * Txy + fo[:, 0, 2] * Txz + fo[:, 1, 2] * Tyz)
     )
 
-    # Normalize each term with sqrt of its training RMS so the squared loss
-    # lands at the right scale. The learnable gains then adjust relative strength.
-    dTdt_n = dTdt / (dTdt_scale**0.5 + 1e-8)
-    aniso_n = model.diff_gain * (aniso / (aniso_scale**0.5 + 1e-8))
-    src_n = model.src_gain * (Qsrc / (Qsrc_scale**0.5 + 1e-8))
+    # Each term is divided by its own training RMS, so all three enter the
+    # residual at unit scale and the equation is balanced BEFORE the learnable
+    # gains touch it. src_gain/diff_gain then express a genuine physical
+    # correction rather than having to travel decades just to undo a scaling
+    # mistake -- and dTdt, which has no gain at all, could never be corrected.
+    dTdt_n = dTdt / _term_norm(dTdt_scale, residual_norm)
+    aniso_n = model.diff_gain * (aniso / _term_norm(aniso_scale, residual_norm))
+    src_n = model.src_gain * (Qsrc / _term_norm(Qsrc_scale, residual_norm))
     residual = dTdt_n - aniso_n - src_n
-    return residual / (phys_scale**0.5)
+    # In "rms" mode the terms are already unit-scale, so a further division by a
+    # combined scale would only re-introduce an arbitrary factor -- and under EMA
+    # balancing in train.py any constant here cancels out anyway.
+    if residual_norm == "legacy":
+        return residual / (phys_scale ** 0.5)
+    return residual

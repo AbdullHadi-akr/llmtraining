@@ -53,7 +53,36 @@ seed: 0
 w_data: 1.0
 w_phys: 0.1
 w_bc: 0.1
-phys_norm: 0.0             # 0 = adaptive EMA balancing, >0 = fixed divisor
+
+# ---- loss balancing ---------------------------------------------------------
+# Each term is divided by an estimate of its own magnitude before its weight is
+# applied, so w_data:w_phys:w_bc is a ratio between TERMS and not between their
+# accidental units.
+#   ema     all three terms, including L_data. The ratio then means the same in
+#           epoch 1 and epoch 60.
+#   legacy  only L_phys and L_bc, as before. L_data stays raw and falls by
+#           orders of magnitude during a run, so the mixture drifts towards
+#           physics and the best w_phys becomes a function of `epochs`.
+#   fixed   divisors frozen after `balance_warmup` epochs.
+loss_balance: ema
+ema_decay: 0.9             # per EPOCH; corrected internally for len(ops)
+balance_warmup: 1          # only used by loss_balance: fixed
+data_floor: 1.0e-8         # lower bound on the L_data divisor
+phys_norm: 0.0             # >0 overrides the L_phys divisor with a constant
+bc_norm: 0.0               # >0 overrides the L_bc divisor with a constant
+
+# Residual term scaling. The *_scale constants in data.py are RMS values, so
+# dividing by the scale is what gives mean(res^2) = 1. `legacy` keeps the
+# original division by sqrt(scale), which leaves mean(res^2) = scale and so
+# leaves dTdt / aniso / Qsrc with their original size gap.
+residual_norm: rms
+# A loss term with weight 0 still costs a forward pass and an autograd Hessian.
+zero_weight_terms: skip    # skip | compute
+
+# ---- optional input features (OFF: measure them with benchmark_balance.py) ---
+subsample_mode: stride     # stride | mean (mean = crude anti-alias, changes data)
+forcing_energy: false      # cumulative injected heat as a 2nd forcing channel
+config_rates: false        # d(config)/dt for config channels that are profiles
 
 # ---- batch sizes ------------------------------------------------------------
 # On a GPU these can be raised a lot (that is where the speed-up comes from);

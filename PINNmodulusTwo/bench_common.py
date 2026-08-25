@@ -39,7 +39,8 @@ BOX_TIME_SEED = 20240517
 
 # History shape returned by fit(); used as a placeholder when fit() itself failed.
 EMPTY_HIST = {"epoch": [], "L_data": [], "L_phys": [], "L_bc": [],
-              "L_phys_bal": [], "L_bc_bal": [], "delta": [], "aborted": True}
+              "L_phys_bal": [], "L_bc_bal": [], "ratio_phys": [], "ratio_bc": [],
+              "delta": [], "aborted": True}
 
 
 def make_train_args(cli, overrides: dict, seed: int) -> Namespace:
@@ -67,6 +68,20 @@ def make_train_args(cli, overrides: dict, seed: int) -> Namespace:
         use_static=cli.use_static, use_forcing=cli.use_forcing,
         seed=int(seed), device=cli.device,
         test_op=cli.test_op,
+        # Balancing / preprocessing knobs. Read with getattr and an explicit
+        # default so a benchmark that does not sweep them needs no CLI flag of
+        # its own -- but every one of them still reaches fit(), instead of
+        # silently falling back to whatever train.py's own default happens to be.
+        loss_balance=getattr(cli, "loss_balance", "ema"),
+        ema_decay=getattr(cli, "ema_decay", 0.9),
+        balance_warmup=getattr(cli, "balance_warmup", 1),
+        data_floor=getattr(cli, "data_floor", 1e-8),
+        bc_norm=getattr(cli, "bc_norm", 0.0),
+        residual_norm=getattr(cli, "residual_norm", "rms"),
+        zero_weight_terms=getattr(cli, "zero_weight_terms", "skip"),
+        subsample_mode=getattr(cli, "subsample_mode", "stride"),
+        forcing_energy=getattr(cli, "forcing_energy", False),
+        config_rates=getattr(cli, "config_rates", False),
     )
     spec.update(overrides)
     return Namespace(**spec)
