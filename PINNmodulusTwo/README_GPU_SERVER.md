@@ -163,20 +163,36 @@ lassen — `python3 PINNmodulusTwo/generate_cache.py` (nutzt
 
 ## 6. Smoke-Test und Vorprüfung (~20 min)
 
-Drei Stufen: erst prüfen, ob überhaupt etwas auf der GPU rechnet, dann ob das
-Training konvergiert, dann messen, wie lange eine Epoche wirklich dauert.
-Zusammen ~20 Minuten — deutlich billiger als nach 20 Stunden Benchmark
-festzustellen, dass die Verluste explodiert sind oder das Zeitbudget nie
-gepasst hat.
+Drei kurze Läufe, bevor irgendetwas Langes startet: rechnet die GPU, konvergiert
+das Training, und wie lange dauert eine Epoche wirklich.
 
-| # | Schritt | Laufzeit | Weiter nur wenn |
-|---|---|---|---|
-| 6.1 | GPU-Kurzcheck | < 1 min | GPU taucht in `nvidia-smi` auf |
-| 6.2 | Konvergenz-Smoke-Test | ~5 min | `ALL CHECKS PASSED` |
-| 6.3 | Zeit pro Epoche messen | ~10 min | Budget für 7.1/7.2 nachgerechnet |
+**Alles am Stück zum Kopieren:**
+
+```bash
+cd ~/llmtraining
+source .venv/bin/activate
+
+# 6.1  rechnet die GPU?  (< 1 min)
+python3 PINNmodulusTwo/train.py --epochs 2 --subsample 40 --device cuda
+
+# 6.2  konvergiert das Training?  (~5 min)
+python3 PINNmodulusTwo/smallBench.py --epochs 5 --w-phys 0.0 0.1 --w-bc 0.1 --device cuda
+cat PINNmodulusTwo/artifacts/smallBench_results.txt
+
+# 6.3  wie lange dauert eine Epoche?  (~10 min)
+python3 PINNmodulusTwo/train.py --ops OP01 OP02 OP03 OP04 OP05 \
+  --subsample 2 --epochs 5 --history-mode hybrid --rate-lags 5 20 \
+  --delta-grid 0.2 --grad-clip 1.0 --device cuda
+```
+
+**Weiter zu [Kapitel 7](#7-range-probe-der-loss-gewichte--in-drei-schritten) nur, wenn:**
+
+- 6.1 zeigt `[device] cuda:0 …` und der Prozess taucht in `nvidia-smi` auf
+- 6.2 endet mit `✓ ALL CHECKS PASSED - Ready for full benchmark!`
+- 6.3 hat eine Zahl für `s/epoch` geliefert und das Budget ist nachgerechnet
 
 **Hyperparameter dieses Kapitels** — bewusst *nicht* die des Benchmarks: 6.1
-läuft absichtlich grob und schnell, 6.2 kurz, und nur 6.3 nutzt die echten
+läuft absichtlich grob und schnell, 6.2 kurz, und erst 6.3 nutzt die echten
 Einstellungen aus `config.yaml`.
 
 | | 6.1 | 6.2 | 6.3 |
@@ -184,111 +200,86 @@ Einstellungen aus `config.yaml`.
 | `--subsample` (→ `dt`) | `40` (4 s) | `2` (0.2 s) | `2` (0.2 s) |
 | `--epochs` | `2` | `5` | `5` |
 | `--ops` | alle | `OP01 OP02` | `OP01`–`OP05` |
-| `--w-phys` / `--w-bc` | Default `0.1`/`0.1` | `0.0 0.1` / `0.1` | Default `0.1`/`0.1` |
+| `--w-phys` / `--w-bc` | `0.1` / `0.1` | `0.0 0.1` / `0.1` | `0.1` / `0.1` |
 | `--history-mode` | `hybrid` | `hybrid` | `hybrid` |
 | `--delta-grid` | `0.2` s | `0.2` s | `0.2` s |
 | `--rate-lags` | `5 20` | `5 20` | `5 20` |
 
-### 6.1 GPU-Kurzcheck (< 1 Minute)
+---
 
-```bash
-cd ~/llmtraining/PINNmodulusTwo
-python3 train.py --epochs 2 --subsample 40 --device cuda
-```
+### 6.1 Rechnet die GPU? (< 1 min)
 
 Bewusst `--device cuda` statt `auto`: so bricht ein falsch aufgesetzter Server
 mit einer klaren Fehlermeldung ab, statt still auf der CPU zu rechnen.
-
-Erwartete Ausgabe (Auszug):
 
 ```
 [device] cuda:0 NVIDIA A100-SXM4-40GB  39.6 GiB  sm_80  torch=2.5.1+cu121 cuda=12.1
 [CFL WARN] Δt=4.000s, Δt_max≈0.241s -> POTENTIALLY UNSTABLE
   [WARN] --delta-grid 0.2s is below the data step 4s; ...
-OPs=['OP01', ...] n_config=7 ...
-model params=... delta_grid=0.2s gates=all-on ...
   epoch   1  L_data=...  [12.4s/epoch, this run ~0 min left]
 ```
 
-**Die beiden Warnungen sind hier erwartet und harmlos**, und beide kommen aus
-demselben `--subsample 40` — absichtlich grob, damit der Check unter einer Minute
-bleibt:
+**Die beiden Warnungen gehören hier dazu.** Beide kommen aus `--subsample 40`,
+das absichtlich grob ist, damit der Check unter einer Minute bleibt: Δt = 4 s
+liegt weit über der CFL-Grenze von ~0.241 s, und ein Anker 0.2 s zurück lässt
+sich auf einem 4-s-Raster nicht auflösen. Ab 6.2 läuft alles mit `--subsample 2`,
+dann sind Δt und Δgrid beide 0.2 s und beide Warnungen verschwinden.
 
-- **`[CFL WARN]`**: Δt ist die *Schrittweite des Rollouts*, also wie weit das
-  Modell pro Schritt nach vorne geht. `subsample 40` × 0.1 s Rohtakt = 4 s, das
-  ist 16× über der CFL-Grenze von ~0.241 s.
-- **`--delta-grid 0.2s is below the data step 4s`**: `delta_grid` ist etwas
-  anderes — der *Anker der History*, also wie weit **zurück** `T(t−Δgrid)`
-  nachgeschlagen wird. Bei einem 4-s-Raster gibt es keinen Punkt 0.2 s zurück;
-  der Nachschlag klemmt auf die letzte vorhandene Stufe und wirkt effektiv wie
-  4 s. Das ist kein Widerspruch, sondern eine Folge des groben Rasters: bei den
-  echten Einstellungen (`subsample 2`) sind Δt und Δgrid beide 0.2 s und passen
-  zusammen.
+Parallel in einer zweiten Session `nvidia-smi` — der Python-Prozess muss dort mit
+belegtem Speicher auftauchen.
 
-Dieser Schritt prüft ausschließlich, ob CUDA arbeitet — die inhaltliche Prüfung
-ist 6.2 und Kapitel 7, und die laufen mit den echten Einstellungen aus
-`config.yaml`.
+<details>
+<summary>Was Δt und Δgrid unterscheidet (die zwei Warnungen im Detail)</summary>
 
-Parallel in einer zweiten Session `nvidia-smi` — der Python-Prozess muss dort
-mit belegtem Speicher auftauchen.
+Beides sind Zeiten in Sekunden, aber sie zeigen in verschiedene Richtungen:
 
-### 6.2 Konvergenz-Smoke-Test
+- **Δt** ist die Schrittweite des Rollouts — wie weit das Modell pro Schritt nach
+  **vorne** geht. `subsample 40` × 0.1 s Rohtakt = 4 s. Darauf bezieht sich die
+  CFL-Prüfung.
+- **`delta_grid`** ist der Anker der History — wie weit `T(t−Δgrid)` nach
+  **hinten** nachgeschlagen wird, und von dort laufen die Ratensegmente
+  (`--rate-lags 5 20`) weiter rückwärts.
 
-Prüft, ob das Training tatsächlich konvergiert, **bevor** der große Benchmark startet.
+Auf einem 4-s-Raster gibt es keinen Punkt 0.2 s zurück; der Nachschlag klemmt auf
+die letzte vorhandene Stufe und wirkt effektiv wie 4 s. Kein Widerspruch, sondern
+eine Folge des groben Rasters — bei `--subsample 2` fallen Δt und Δgrid auf
+0.2 s zusammen und passen exakt.
 
-```bash
-cd ~/llmtraining
-source .venv/bin/activate
+</details>
 
-python3 PINNmodulusTwo/smallBench.py --epochs 5 --w-phys 0.0 0.1 --w-bc 0.1 --device cuda
-```
+---
 
-Was dabei passiert:
+### 6.2 Konvergiert das Training? (~5 min)
 
-- trainiert zwei Modelle: `w_phys=0.0` (data-only) und `w_phys=0.1` (mit Physik)
-- nur 5 Epochen, nur 2 OPs (OP01, OP02)
-- Test auf OP07 (held-out; im Full Benchmark ist OP07 der Val-OP)
-- Laufzeit: ~5 min auf CPU, auf der GPU entsprechend weniger
+Trainiert zwei Modelle — `w_phys=0.0` (data-only) und `w_phys=0.1` (mit Physik) —
+über 5 Epochen auf OP01/OP02 und testet auf OP07.
 
-Erwartete Outputs:
+Outputs:
 
 ```
 PINNmodulusTwo/artifacts/smallBench_results.txt      -> PASS/FAIL-Bericht
-PINNmodulusTwo/artifacts/smallBench_convergence.png  -> Loss-Kurven über die Epochen
+PINNmodulusTwo/artifacts/smallBench_convergence.png  -> Loss-Kurven
 ```
 
-Auswerten:
+Am Ende des Berichts steht `✓ ALL CHECKS PASSED` oder `✗ SOME CHECKS FAILED`.
 
-```bash
-cat PINNmodulusTwo/artifacts/smallBench_results.txt
-ls -lh PINNmodulusTwo/artifacts/smallBench_convergence.png
-```
+Bei **FAILED** nicht weitermachen, sondern die Ursache klären:
 
-Am Ende des Berichts steht entweder
+| Befund | Ursache |
+|---|---|
+| Loss explodiert (inf/NaN) | CFL-Problem — `--subsample` verkleinern |
+| Test-MAE > 20 °C | das Modell lernt nicht richtig |
+| noch nicht konvergiert | mit mehr Epochen gegenprüfen |
 
-```
-✓ ALL CHECKS PASSED - Ready for full benchmark!
-```
+Bei `[ABORT] ... loss exploded` nennt die Meldung den zuerst betroffenen
+Loss-Term, siehe [Kapitel 10](#10-troubleshooting).
 
-oder
+---
 
-```
-✗ SOME CHECKS FAILED - Review issues above before full benchmark
-```
+### 6.3 Wie lange dauert eine Epoche? (~10 min)
 
-### 6.3 Zeit pro Epoche messen (~10 min)
-
-Die letzte Vorprüfung, und die wichtigste fürs Planen: ein kurzer Trainingslauf
-mit den **echten** Einstellungen, um die Sekunden pro Epoche abzulesen. Alle
-Zeitangaben in Kapitel 7 und 8 hängen an dieser einen Zahl.
-
-```bash
-python3 PINNmodulusTwo/train.py --ops OP01 OP02 OP03 OP04 OP05 \
-  --subsample 2 --epochs 5 --history-mode hybrid --rate-lags 5 20 \
-  --delta-grid 0.2 --grad-clip 1.0 --device cuda
-```
-
-Das Log meldet ab Epoche 1:
+Ein kurzer Lauf mit den **echten** Einstellungen. Alle Zeitangaben in Kapitel 7
+und 8 hängen an dieser einen Zahl:
 
 ```
   epoch   1  L_data=...  [112.4s/epoch, this run ~7 min left]
@@ -314,11 +305,10 @@ Sekunden/Epoche × 60 Epochen ÷ 3600  = Stunden pro Gitterpunkt
 Stunden/Punkt × Punkte × Seeds ÷ 24  = Tage für den Sweep
 ```
 
----
+<details>
+<summary>Wie viel bringt die GPU hier eigentlich? (optional, weitere 10 min)</summary>
 
-#### Nebenbei: wie viel bringt die GPU hier eigentlich?
-
-Derselbe Lauf mit `--device cpu` beantwortet das in denselben zehn Minuten:
+Derselbe Lauf mit `--device cpu` beantwortet das:
 
 ```bash
 python3 PINNmodulusTwo/train.py --ops OP01 OP02 --subsample 2 --epochs 3 \
@@ -332,7 +322,7 @@ keinen großen Faktor.** Der Grund steckt in der Struktur der Last:
 |---|---|---|
 | Rollout: ~7000 sequentielle Schritte je OP und Epoche | nein, jeder Schritt braucht den vorherigen | gering |
 | Python-Schleife und Kernel-Starts, ~37.000 Iterationen je Epoche | nein, identisch auf beiden | keiner |
-| MLP-Matmuls je Schritt (363 Punkte × 128 breit) | ja, aber winzig | klein |
+| MLP-Matmuls je Schritt (363 Sensoren × 128 breit) | ja, aber winzig | klein |
 | Physik-Residuum (`--batch-phys`, doppeltes Autograd) | ja, echte Parallelarbeit | groß |
 
 Die GPU gewinnt dort, wo tatsächlich große Batches anfallen — beim
@@ -342,18 +332,10 @@ auch „läuft auf der GPU kaum schneller" als *erwartbar*, nicht als Fehler.
 
 **Praktische Konsequenz:** wenn `nvidia-smi` viel freien Speicher zeigt, ist
 `--batch-phys 2048 --batch-bc 1024` der Hebel, der die GPU wirklich nutzt — nicht
-ein breiteres Netz. Wenn du das machst, dann **in allen Schritten von Kapitel 7
-gleich** — 7.1 und 7.2 müssen in jedem Hyperparameter übereinstimmen.
+ein breiteres Netz. Wenn du das machst, dann **in 7.1 und 7.2 gleich**: die
+beiden Schritte müssen in jedem Hyperparameter übereinstimmen.
 
----
-
-### Entscheidung
-
-- **ALL CHECKS PASSED** und Zeit gemessen → weiter zu [Kapitel 7](#7-range-probe-der-loss-gewichte--in-drei-schritten).
-- **SOME CHECKS FAILED** → **stopp**, erst die Ursache klären:
-  - Loss explodiert (inf/NaN) → CFL-Problem, `--subsample` verkleinern (z. B. `--subsample 2`)
-  - Test-MAE > 20 °C → das Modell lernt nicht richtig
-  - noch nicht konvergiert → mit mehr Epochen gegenprüfen
+</details>
 
 ---
 
@@ -572,15 +554,41 @@ berichten.
 
 | Datei | Inhalt |
 |---|---|
-| `artifacts/benchmark_wphys_wbc_probe.png` | **Hauptplot:** je ein Panel pro Achse, MAE über die Dekaden, bestes Val-Ergebnis markiert |
+| `artifacts/benchmark_wphys_wbc_probe_boxplot.png` | **Boxplot:** ein Panel je Konfiguration, darin eine Box je Zeitpunkt |
+| `artifacts/benchmark_wphys_wbc_probe.png` | je ein Panel pro Achse, MAE über die Dekaden, bestes Val-Ergebnis markiert |
 | `artifacts/benchmark_wphys_wbc_probe_convergence.png` | Loss-Kurven (`L_data`, `L_phys`, `L_bc`) aller 9 Punkte über die Epochen |
 | `artifacts/benchmark_wphys_wbc_best.txt` | Zusammenfassung, Hyperparameter-Block, **Verdikt je Achse** |
 | `artifacts/benchmark_wphys_wbc.csv` | alle 9 Zeilen |
 | `artifacts/benchmark_wphys_wbc_settings.txt` | die Einstellungen, die das erzeugt haben |
 
-Der Hauptplot benutzt bewusst **keine Log-Achse**: die Dekaden enthalten die 0,
-und die ließe sich logarithmisch nicht darstellen. Die Punkte sitzen deshalb
-gleichmäßig verteilt, die echten Werte stehen als Achsenbeschriftung.
+**Was im Boxplot steckt.** Alles darin kommt aus dem einen Test-OP `OP07`, der
+nie an einer Auswahl beteiligt war. Daraus werden **10 zufällige Zeitpunkte**
+gezogen — zufällig, weil ein gleichmäßiges Raster mit den Lastwechseln des OP in
+Takt geraten kann, und mit festem Seed, damit alle 9 Konfigurationen an
+*denselben* Momenten gemessen werden. Zu jedem dieser Zeitpunkte liefert der
+Rollout einen Absolutfehler **pro Sensor**, also 363 Werte:
+
+| Element der Box | Bedeutung |
+|---|---|
+| Box | mittlere 50 % der Sensoren — 25 % liegen darüber, 25 % darunter |
+| rote Linie | der Median-Sensor |
+| Whisker | bis 1,5 × Interquartilsabstand |
+| Punkte darüber | einzelne Sensoren jenseits davon — die, die das Modell nicht trifft |
+
+Genau das ist der Punkt gegenüber einer einzelnen MAE-Zahl: ein Mittelwert kann
+gut aussehen, während eine Handvoll Sensoren weit daneben liegt. Im Boxplot ist
+das ein langer oberer Whisker, im Mittelwert nicht zu sehen. Und weil die x-Achse
+die Zeit ist, sieht man zusätzlich, ob der Fehler entlang des Rollouts wächst
+oder gleich bleibt.
+
+Die Panels folgen den Armen des Kreuzes: erst der `w_phys`-Arm in Dekaden-
+Reihenfolge, dann der `w_bc`-Arm. Der auf `OP06` ausgewählte Punkt ist rot
+umrandet.
+
+Der Achsen-Plot (`_probe.png`) benutzt bewusst **keine Log-Achse**: die Dekaden
+enthalten die 0, und die ließe sich logarithmisch nicht darstellen. Die Punkte
+sitzen deshalb gleichmäßig verteilt, die echten Werte stehen als
+Achsenbeschriftung.
 
 Die Zahlen sind identisch mit einem Lauf in einem Stück: die Punkte werden vor
 der Auswertung in dieselbe Kreuz-Reihenfolge sortiert, und die Trainingszeit
@@ -628,7 +636,7 @@ cd ~/llmtraining
 source .venv/bin/activate
 
 # ---------------------------------------------------------------------------
-# 6.1 + 6.2  SMOKE-TEST  (~6 min)
+# 6.1 + 6.2  RECHNET DIE GPU, KONVERGIERT DAS TRAINING?  (~6 min)
 # ---------------------------------------------------------------------------
 python3 PINNmodulusTwo/train.py --epochs 2 --subsample 40 --device cuda
 python3 PINNmodulusTwo/smallBench.py --epochs 5 --w-phys 0.0 0.1 --w-bc 0.1 --device cuda
@@ -637,7 +645,7 @@ cat PINNmodulusTwo/artifacts/smallBench_results.txt
 # NUR bei PASSED weitermachen.
 
 # ---------------------------------------------------------------------------
-# 6.3  ZEIT PRO EPOCHE MESSEN  (~10 min)  <- bestimmt das Budget
+# 6.3  WIE LANGE DAUERT EINE EPOCHE?  (~10 min)  <- bestimmt das Budget
 # ---------------------------------------------------------------------------
 python3 PINNmodulusTwo/train.py --ops OP01 OP02 OP03 OP04 OP05 \
   --subsample 2 --epochs 5 --history-mode hybrid --rate-lags 5 20 \
@@ -687,6 +695,9 @@ python3 PINNmodulusTwo/benchmark_wphys_wbc.py --probe --report-only \
 
 grep -A20 'RANGE PROBE' PINNmodulusTwo/artifacts/benchmark_wphys_wbc_best.txt
 ls -lh PINNmodulusTwo/artifacts/benchmark_wphys_wbc_probe*.png
+# _probe_boxplot.png  -> Fehlerverteilung ueber die 363 Sensoren je Zeitpunkt
+# _probe.png          -> MAE je Achse ueber die Dekaden
+# _probe_convergence  -> Loss-Kurven
 ```
 
 ---
@@ -899,7 +910,9 @@ explizit, ob die Rangfolge belastbar ist oder im Rauschen liegt.
 
 ```
 PINNmodulusTwo/artifacts/benchmark_wphys_wbc.csv               -> alle 100 Punkte
+PINNmodulusTwo/artifacts/benchmark_wphys_wbc_settings.txt      -> Hyperparameter des Laufs
 PINNmodulusTwo/artifacts/benchmark_wphys_wbc_heatmap.png       -> 2D-MAE-Heatmap (Val)
+PINNmodulusTwo/artifacts/benchmark_wphys_wbc_boxplot.png       -> Sensor-Fehler je Konfiguration
 PINNmodulusTwo/artifacts/benchmark_wphys_wbc_convergence.png   -> Loss-Kurven (Ecken + Best)
 PINNmodulusTwo/artifacts/benchmark_wphys_wbc_best.txt          -> beste Kombination + Tabelle
 PINNmodulusTwo/artifacts/checkpoints_wphys_wbc/*.pt            -> 100 Modelle (mehrere GB!)

@@ -96,8 +96,11 @@ Outputs (in PINNmodulusTwo/artifacts/):
     benchmark_wphys_wbc_best.txt - best combination + summary table + per-axis
         verdict. Evaluation step only.
     benchmark_wphys_wbc_probe.png - per-axis MAE over the decades (probe).
+    benchmark_wphys_wbc_probe_boxplot.png - one panel per probe point; per
+        sampled time point, the spread of the absolute error across the sensors.
     benchmark_wphys_wbc_probe_convergence.png - loss curves per probe point.
     benchmark_wphys_wbc_heatmap.png - 2D heatmap of validation MAE (grid only).
+    benchmark_wphys_wbc_boxplot.png - per-sensor error per configuration (grid).
     checkpoints_wphys_wbc/*.pt - per-sweep model checkpoints
 """
 
@@ -112,8 +115,8 @@ import numpy as np
 import torch
 
 from bench_common import (
-    EMPTY_HIST, aggregate_seeds, failed_result, make_train_args, noise_verdict,
-    print_eta, train_one_seed,
+    EMPTY_HIST, N_BOX_TIMES, aggregate_seeds, failed_result, make_train_args,
+    noise_verdict, print_eta, train_one_seed,
 )
 from data import require_ops
 from device_utils import resolve_device
@@ -328,7 +331,10 @@ def merge_probe_parts(cli, state: dict) -> tuple[list, list, list]:
     for blob in state.get("parts", {}).values():
         for r in blob.get("results", []):
             row = dict(r)
-            row["test_time_maes"] = np.asarray(row["test_time_maes"], dtype=float)
+            row["test_box_errors"] = np.asarray(row["test_box_errors"],
+                                                dtype=float)
+            row["test_box_times_s"] = np.asarray(row["test_box_times_s"],
+                                                 dtype=float)
             rows[_pair_key(row["w_phys"], row["w_bc"])] = row
         for h in blob.get("histories", []):
             hists[_pair_key(h["w_phys"], h["w_bc"])] = h
@@ -754,6 +760,90 @@ def run_report_only(cli, plt) -> None:
     evaluate(cli, results, histories, total_time, plt)
 
 
+def draw_time_boxes(ax, row: dict, cli, show_ylabel: bool = True) -> bool:
+    """One box per sampled time point; each box summarises the SENSORS.
+
+    At a given moment the held-out OP has one absolute error per sensor, so the
+    box is the middle 50% of sensors (25% above the median, 25% below), the red
+    line is the median sensor, and the dots above the whisker are the sensors the
+    model gets worst at that moment.
+
+    Whiskers are the matplotlib default of 1.5 IQR, not min-max: with a few
+    hundred sensors, min-max whiskers stretch to the single worst one and flatten
+    every box into a line, hiding the spread the plot exists to show.
+    """
+    err = np.asarray(row.get("test_box_errors", np.zeros((0, 0))), dtype=float)
+    times = np.asarray(row.get("test_box_times_s", np.zeros(0)), dtype=float)
+    if err.ndim != 2 or err.size == 0:
+        ax.text(0.5, 0.5, "no usable rollout", ha="center", va="center",
+                transform=ax.transAxes, fontsize=9)
+        ax.set_xticks([])
+        return False
+    data = [e[np.isfinite(e)] for e in err]          # one entry per time point
+    bp = ax.boxplot(data, patch_artist=True, widths=0.6, showmeans=False)
+    for patch in bp["boxes"]:
+        patch.set_facecolor("#d9e8ff")
+        patch.set_alpha(0.8)
+    for median in bp["medians"]:
+        median.set_color("#b00020")
+        median.set_linewidth(1.8)
+    for flier in bp.get("fliers", []):
+        flier.set(markerfacecolor="#444444", markeredgecolor="#444444",
+                  markersize=3, alpha=0.45)
+    ax.set_xticks(range(1, len(data) + 1))
+    ax.set_xticklabels([f"{t:.0f}" for t in times], fontsize=8)
+    if show_ylabel:
+        ax.set_ylabel(f"|error| per sensor [°C]  (n={err.shape[1]})", fontsize=10)
+    ax.grid(True, axis="y", alpha=0.3)
+    return True
+
+
+def draw_config_boxes(ax, rows: list, labels: list, cli, best: dict | None = None):
+    """One box per configuration, pooling every sampled (time, sensor) error.
+
+    Used where a panel per configuration would not fit -- the 5x5 grid has 25 of
+    them. Pooling loses the time structure that :func:`draw_time_boxes` shows, so
+    it answers only the comparison question: does this configuration's error
+    distribution sit lower than that one's.
+    """
+    data, kept = [], []
+    for row, label in zip(rows, labels):
+        err = np.asarray(row.get("test_box_errors", np.zeros((0, 0))), dtype=float)
+        flat = err.ravel()
+        flat = flat[np.isfinite(flat)]
+        if flat.size:
+            data.append(flat)
+            kept.append((row, label))
+    if not data:
+        ax.text(0.5, 0.5, "no usable rollout", ha="center", va="center",
+                transform=ax.transAxes)
+        return
+    bp = ax.boxplot(data, patch_artist=True, widths=0.6)
+    ax.set_xticks(range(1, len(data) + 1))
+    ax.set_xticklabels([lbl for _, lbl in kept])
+    for patch in bp["boxes"]:
+        patch.set_facecolor("#d9e8ff")
+        patch.set_alpha(0.8)
+    for median in bp["medians"]:
+        median.set_color("#b00020")
+        median.set_linewidth(1.8)
+    for flier in bp.get("fliers", []):
+        flier.set(markerfacecolor="#444444", markeredgecolor="#444444",
+                  markersize=2.5, alpha=0.35)
+    if best is not None:
+        for i, (row, _) in enumerate(kept, start=1):
+            if row["w_phys"] == best["w_phys"] and row["w_bc"] == best["w_bc"]:
+                # The axis shows test-op error, so mark the TEST value of the
+                # point selection picked on the validation OP -- not its val MAE.
+                ax.scatter([i], [row["test_mae"]], s=280, marker="*", color="red",
+                           edgecolors="darkred", linewidths=1.2, zorder=10,
+                           label=f"selected on {cli.val_op} (mean test MAE)")
+                ax.legend(loc="upper right", fontsize=9)
+                break
+    ax.set_ylabel("|error| per sensor [°C]", fontsize=11)
+    ax.grid(True, axis="y", alpha=0.3)
+
+
 def plot_probe(results: list, histories: list, cli, best: dict, plt) -> list:
     """Plots for the cross: one panel per axis, plus the convergence curves.
 
@@ -804,6 +894,51 @@ def plot_probe(results: list, histories: list, cli, best: dict, plt) -> list:
     fig.savefig(path, dpi=150)
     plt.close(fig)
     saved.append(path)
+
+    # Small multiples: every probe point gets its own time axis. Nine panels is
+    # what makes the per-time-point box readable at all -- pooled into one axis
+    # per configuration the time structure disappears, and that structure is
+    # where a bad weight shows itself (error growing along the rollout rather
+    # than being uniformly worse).
+    # Panels follow the arms of the cross, not a plain numeric sort: the w_phys
+    # arm first in decade order, then the w_bc arm. A sort by (w_phys, w_bc)
+    # interleaves the two arms and the rows stop meaning anything.
+    by_pair = {_pair_key(r["w_phys"], r["w_bc"]): r for r in results}
+    arm_phys, arm_bc = probe_arms(cli)
+    ordered = [by_pair[k] for k in
+               (_pair_key(a, b) for a, b in arm_phys + arm_bc) if k in by_pair]
+    n_cols = 3
+    n_rows = int(np.ceil(len(ordered) / n_cols)) or 1
+    fig3, axes3 = plt.subplots(n_rows, n_cols, figsize=(5.0 * n_cols, 3.4 * n_rows),
+                               sharey=True, squeeze=False)
+    flat_axes = [ax for row in axes3 for ax in row]
+    for ax, row in zip(flat_axes, ordered):
+        drawn = draw_time_boxes(ax, row, cli, show_ylabel=ax in axes3[:, 0])
+        is_best = (row["w_phys"] == best["w_phys"] and row["w_bc"] == best["w_bc"])
+        title = f"w_phys={row['w_phys']:g}, w_bc={row['w_bc']:g}"
+        if drawn and np.isfinite(row["test_mae"]):
+            title += f"   (mean {row['test_mae']:.2f} °C)"
+        ax.set_title(title + ("  * BEST" if is_best else ""), fontsize=10,
+                     fontweight="bold" if is_best else "normal")
+        if is_best:
+            for spine in ax.spines.values():
+                spine.set_edgecolor("#b00020")
+                spine.set_linewidth(2.0)
+    for ax in flat_axes[len(ordered):]:
+        ax.axis("off")
+    for ax in axes3[-1]:
+        ax.set_xlabel("time [s]", fontsize=10)
+    fig3.suptitle(
+        f"Held-out {cli.test_op}: error spread across the sensors, at "
+        f"{N_BOX_TIMES} random time points\n"
+        f"one box = one moment; box = middle 50% of the sensors, red line = "
+        f"median sensor, dots = sensors beyond 1.5 IQR",
+        fontsize=12)
+    fig3.tight_layout(rect=(0, 0, 1, 0.94))
+    path3 = ART_DIR / "benchmark_wphys_wbc_probe_boxplot.png"
+    fig3.savefig(path3, dpi=150)
+    plt.close(fig3)
+    saved.append(path3)
 
     usable_hist = [h for h in histories if h.get("hist", {}).get("epoch")]
     if usable_hist:
@@ -1041,50 +1176,15 @@ def evaluate(cli, results: list, histories: list, total_time: float, plt) -> Non
     plt.close()
     print(f"Saved convergence plot: {convergence_plot}", flush=True)
 
-    # ---- test-op boxplot (10 time points) ----------------------------------
+    # ---- test-op boxplot: one box per configuration -------------------------
     fig2, ax2 = plt.subplots(1, 1, figsize=(14, 6))
-    
-    # Create labels for each (w_phys, w_bc) combination
-    box_labels = [f"p{r['w_phys']:.3g}\nb{r['w_bc']:.3g}" for r in usable]
-    box_data = [r["test_time_maes"] for r in usable]
-    
-    # set_xticklabels instead of the boxplot(labels=...) kwarg, which was
-    # removed in matplotlib 3.11 (renamed to tick_labels in 3.9).
-    bp = ax2.boxplot(box_data, showmeans=True, whis=(0, 100), patch_artist=True)
-    ax2.set_xticks(range(1, len(box_data) + 1))
-    ax2.set_xticklabels(box_labels)
-    for patch in bp["boxes"]:
-        patch.set_facecolor("#d9e8ff")
-        patch.set_alpha(0.75)
-    for median in bp["medians"]:
-        median.set_color("#b00020")
-        median.set_linewidth(2.0)
-    for flier in bp.get("fliers", []):
-        flier.set(markerfacecolor="#444444", markeredgecolor="#444444", markersize=4)
-
-    # Overlay the 10 time-point MAEs
-    for i, vals in enumerate(box_data, start=1):
-        jitter = np.linspace(-0.15, 0.15, num=len(vals))
-        ax2.scatter(np.full(len(vals), i) + jitter, vals, s=20, color="#1f77b4", alpha=0.6, zorder=3)
-
-    # Mark best point
-    best_idx = next(i for i, r in enumerate(usable) if r["w_phys"] == best["w_phys"] and r["w_bc"] == best["w_bc"])
-    # The axis shows test-op MAE, so mark the test value of the point that was
-    # selected on the validation OP -- not its validation MAE.
-    ax2.scatter([best_idx + 1], [best["test_mae"]], s=300, marker="*", color="red",
-                edgecolors="darkred", linewidths=1.5, zorder=10,
-                label=f"Selected on {cli.val_op} (test MAE shown)")
-
+    labels = [f"p{r['w_phys']:.3g}\nb{r['w_bc']:.3g}" for r in usable]
+    draw_config_boxes(ax2, usable, labels, cli, best)
     ax2.set_xlabel("(w_phys, w_bc) combination", fontsize=11)
-    ax2.set_ylabel("Held-out test-op MAE across 10 time points [°C]", fontsize=11)
-    ax2.set_title(f"Test-op MAE distribution from 10 uniformly spaced time points ({cli.test_op})", fontsize=12)
-    ax2.grid(True, axis="y", alpha=0.3)
-    ax2.legend(loc="upper right")
-    
-    # Rotate labels if too many
+    ax2.set_title(f"Held-out {cli.test_op}: per-sensor error pooled over "
+                  f"{N_BOX_TIMES} random time points", fontsize=12)
     if len(usable) > 16:
         ax2.tick_params(axis="x", labelrotation=45, labelsize=8)
-    
     fig2.tight_layout()
     fig2.savefig(ART_DIR / "benchmark_wphys_wbc_boxplot.png", dpi=150)
     plt.close(fig2)
