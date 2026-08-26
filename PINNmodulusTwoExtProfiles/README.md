@@ -277,6 +277,115 @@ single sample, not stability. `noise_verdict` says outright when the gap to the
 runner-up is smaller than the seed spread, i.e. when the ranking cannot be
 defended. Use `--seeds 0 1 2`.
 
+### Recommended order — and how to read each result
+
+The axes are **not** independent, so the order matters:
+
+`resample` changes `q_dot`, which changes `Qsrc_scale`, which changes
+`phys_scale` — and those are the divisors of the physics residual. **Tune the
+weights before settling the resampling and you have to tune them again.**
+(`drivhist` and `drlags` only add columns to `forcing_feat`; they leave every
+physics scale untouched, so strictly they could come later. They are cheap and
+they change how well the model fits, so they go in the same first pass.)
+
+**Stage 0 — `smokeBench.py`.** Minutes, and it gates everything. Two things to
+take away besides pass/fail: whether the bundles really carry the profiles, and
+the **final `L_data`**, which is what sets the weight range in stage 2.
+
+**Stage 1 — preprocessing.** This is the "what do we do to get good
+preprocessing" question, and it is a measurement, not a guess:
+
+```bash
+python3 PINNmodulusTwoExtProfiles/profileBench.py     --axes resample drivhist drlags --epochs 20 --seeds 0 1 2
+```
+
+* `resample`: `mean` vs `point`. If `mean` wins on the T2/T3 tiers, aliasing was
+  costing you; if the span is inside the seed spread, at `subsample=2` your
+  profiles are slow enough that it does not matter — a legitimate and useful
+  answer.
+* `drivhist`: `on` vs `off`. `off` is the base project's feature set. This is the
+  single most informative point in the whole sweep: it is the direct answer to
+  "do the profiles need their own history at all".
+* `drlags`: how far back driver memory must reach. Read it against `drivhist` —
+  if `off` is competitive, the lag choice is noise.
+
+Then **write the winners into `config.yaml`** (`resample`,
+`use_driver_history`, `driver_rate_lags`) before going on. Everything after this
+is tuned against that preprocessing.
+
+**Stage 2 — the loss weights.** They are only meaningful relative to the
+physics scales, and those scales moved:
+
+```bash
+python3 PINNmodulusTwoExtProfiles/profileBench.py     --axes wphys wbc --epochs 20 --seeds 0 1 2
+```
+
+Picking the range: the weights multiply **balanced** losses, each divided by its
+own running EMA, so `L_phys_bal` sits at ≈1 for the whole run. That means
+
+> `w_phys` is not a relative weight — it is the near-constant **floor** the
+> physics term holds at, while `w_data · L_data` falls as training converges.
+> The physics-to-data ratio at the *end* is about `w_phys / L_data_final`.
+
+So take `L_data_final` from stage 0 and sweep roughly
+`[0, L_data_final, 10 × L_data_final]`. The shipped defaults —
+`[0, 0.01, 0.05, 0.1, 0.3]` for both — span two decades around the base
+project's 0.1 and always include `0.0`, because "does the physics term help at
+all here" has to be answerable with a clean no. Once a winner emerges, refine
+around it: `--axes wphys --w-phys-values 0.02 0.03 0.05 0.07 0.1`.
+
+If `w_phys = 0.3` wins and `L_data_final` is ~1e-2, check the training curves
+before adopting it: the gradient was mostly physics by the end. That may be
+exactly right — it is what a PINN is for — but it should be a decision.
+
+**Stage 3 — architecture, last.** `--axes width depth ratelags`. Re-asked
+because the base project's answers were found where every driver was constant.
+Skip it if stages 1–2 already land where you need; it is the most expensive
+stage and historically the least movement per hour.
+
+### The decision rule at every stage
+
+`profileBench_best.txt` prints a **span per axis** — `max − min` selection MAE —
+next to the seed spread, and one of three verdicts:
+
+| what it says | what to do |
+|---|---|
+| span **below** the seed spread | the knob does not matter on this data. Take the cheapest/simplest setting and stop tuning it. |
+| span **above** the seed spread | worth tuning; refine around the winner. |
+| "seed spread unknown (single seed)" | you cannot conclude anything yet. Re-run with `--seeds 0 1 2`. |
+
+Two more guards print automatically and are worth heeding:
+
+* **`noise_verdict`** — whether the gap to the runner-up beats the seed spread.
+  If it does not, the winner is "one of several equally good", not the optimum,
+  and reporting it as *the* answer overstates what was measured.
+* **`split_verdict`** — whether the winner bought its selection score from one
+  half of the selection set. A configuration that halves the error on OP06 and
+  doubles it on OP09 can still win the mean, and it is the wrong answer to the
+  question this extension exists to ask.
+
+Reading the tiers: judge a configuration on **T1 and T2**, which is what
+selection ran on. A configuration that wins T1/T2 and loses **T3** is not broken
+— T3 is extrapolation and was deliberately never selected on. Never quote a T3
+number as "the model's accuracy" without naming the OP it came from;
+`profileBench_perop.csv` keeps them separate for exactly that reason.
+
+### Budget
+
+One training per configuration per seed. At `subsample 2` / 60 epochs that is
+hours each, so:
+
+| pass | command | configurations |
+|---|---|---|
+| gate | `smokeBench.py` | — (minutes) |
+| stage 1 | `--axes resample drivhist drlags --epochs 20` | 9 |
+| stage 2 | `--axes wphys wbc --epochs 20` | 10 |
+| stage 3 | `--axes width depth ratelags` | 10 |
+
+Times `--seeds 0 1 2`. Read the seconds-per-epoch the training log prints after
+the first configuration before committing to a long run — that number, not an
+estimate, is what the ETA should come from.
+
 ---
 
 ## Files

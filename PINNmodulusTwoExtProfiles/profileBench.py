@@ -102,8 +102,46 @@ DEFAULT_RATE_LAG_SETS = [
     [10.0, 60.0],
     [30.0],
 ]
+# ---- what range to sweep the loss weights over, and why ---------------------
+# ``train.fit`` builds the loss as
+#
+#     w_data * L_data  +  w_phys * L_phys_bal  +  w_bc * L_bc_bal
+#
+# and the two balanced terms are each divided by their OWN running EMA
+# (``phys_norm: 0``, the default), so both sit at roughly 1.0 for the whole run
+# regardless of how large the raw residual is. That has a consequence worth
+# stating outright, because it is what sets the sensible range:
+#
+#     w_phys is not a relative weight. It is the near-constant FLOOR that the
+#     physics term holds at, while w_data * L_data falls as training converges.
+#
+# So the ratio between the physics and the data term at the END of training is
+# about ``w_phys / L_data_final``, not ``w_phys``. If L_data converges to 1e-2
+# and w_phys is 0.1, the physics term is ~10x the data term by then and the
+# gradient is mostly physics. That is not automatically wrong -- it is what a
+# PINN is for -- but it should be a choice rather than a surprise.
+#
+# The practical rule: read L_data_final off a short run (``smokeBench`` prints
+# it), and sweep w_phys across roughly [0, that value, 10x that value]. The
+# defaults below span two decades around the base project's 0.1 and always
+# include 0.0, because "does the physics term help at all on this data" is a
+# question the sweep has to be able to answer with a clean no.
+#
+# These are the SAME values ``PINNmodulusTwo/benchmark_wphys_wbc.py`` uses --
+# deliberately, so the two sweeps are readable side by side. What differs is
+# that here they are applied to residuals normalised by ``Qsrc_scale`` and
+# ``phys_scale`` refitted on OP01-OP16, so the same number is a different
+# mixing ratio and the OPTIMUM is expected to move. Nothing about the base
+# project's answer transfers except the grid it was found on.
+#
+# Refining: once the coarse sweep picks a winner, re-run just that axis around
+# it, e.g. ``--axes wphys --w-phys-values 0.02 0.03 0.05 0.07 0.1``. There is no
+# separate "extended grid" flag because the values are already a CLI argument.
 DEFAULT_W_PHYS = [0.0, 0.01, 0.05, 0.1, 0.3]
-DEFAULT_W_BC = [0.0, 0.05, 0.1, 0.3]
+# w_bc carries 0.01 as well: the BC term is a single scalar constraint
+# (dT/dx = 0 on the centre plane) rather than a full field residual, so it can
+# matter at a weight where the physics term would not yet register.
+DEFAULT_W_BC = [0.0, 0.01, 0.05, 0.1, 0.3]
 DEFAULT_WIDTHS = [64, 128, 256]
 DEFAULT_DEPTHS = [2, 4, 6]
 

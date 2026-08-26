@@ -301,6 +301,7 @@ def main() -> int:
 
         out.append("")
         out.append("CHECK 6 - short trainings converge and stay finite")
+        l_data_finals = []
         for w_phys in cli.w_phys:
             print(f"\n{'='*56}\nshort training, w_phys={w_phys}\n{'='*56}",
                   flush=True)
@@ -313,6 +314,8 @@ def main() -> int:
             model.eval()
             L_first = hist["L_data"][0] if hist["L_data"] else float("nan")
             L_last = hist["L_data"][-1] if hist["L_data"] else float("nan")
+            if np.isfinite(L_last):
+                l_data_finals.append(float(L_last))
             stable = np.isfinite(L_last) and np.isfinite(
                 hist["L_phys"][-1] if hist["L_phys"] else np.nan)
             converged = np.isfinite(L_first) and np.isfinite(L_last) and L_last < L_first
@@ -355,8 +358,44 @@ def main() -> int:
     out += ["", "=" * 72]
     if ok:
         out.append("ALL CHECKS PASSED")
-        out.append("  next: python3 PINNmodulusTwoExtProfiles/profileBench.py "
-                   "--epochs 20 --axes resample drivhist drlags")
+        out.append("  next (stage 1, preprocessing - settle this BEFORE the "
+                   "weights, because")
+        out.append("  --resample changes q_dot and therefore Qsrc_scale, which is "
+                   "what w_phys is")
+        out.append("  measured against):")
+        out.append("    python3 PINNmodulusTwoExtProfiles/profileBench.py "
+                   "--axes resample drivhist drlags --epochs 20 --seeds 0 1 2")
+        if l_data_finals:
+            # w_phys multiplies a loss that is divided by its own EMA and so sits
+            # at ~1: it is the floor the physics term holds at, while
+            # w_data * L_data falls. The end-of-training ratio between the two is
+            # therefore ~ w_phys / L_data_final, which is what makes a short run's
+            # L_data the right thing to pick the sweep range from.
+            ref = float(np.median(l_data_finals))
+
+            def _sig2(v: float) -> float:
+                """Round to 2 significant figures - a suggested bracket has no
+                business printing six digits it cannot justify."""
+                if v <= 0:
+                    return 0.0
+                return float(f"{v:.2g}")
+
+            grid = sorted({_sig2(v) for v in
+                           (0.0, ref / 10.0, ref, 3.0 * ref, 10.0 * ref)})
+            out.append(f"  then (stage 2, weights) - L_data ended at ~{ref:.3g} "
+                       f"here, and w_phys is the")
+            out.append("  near-constant FLOOR the physics term holds at, so the "
+                       "physics-to-data ratio")
+            out.append("  at the end is ~ w_phys / L_data_final. A range built "
+                       "around that value:")
+            out.append("    python3 PINNmodulusTwoExtProfiles/profileBench.py "
+                       "--axes wphys wbc --epochs 20 --seeds 0 1 2 \\")
+            out.append("        --w-phys-values "
+                       + " ".join(f"{v:g}" for v in grid))
+            out.append("  (this L_data comes from a deliberately short, coarse "
+                       "run - treat the range as")
+            out.append("  a starting bracket, and re-derive it from a full-length "
+                       "run before refining.)")
         out.append("  NOTE a pass here means the pipeline is sound, NOT that the "
                    "model is accurate. Accuracy is what profileBench measures.")
     else:
@@ -364,7 +403,7 @@ def main() -> int:
     out.append("=" * 72)
 
     (ART_DIR / "smokeBench_results.txt").write_text("\n".join(out) + "\n")
-    print("\n".join(out[-8:]), flush=True)
+    print("\n".join(out[-20:]), flush=True)
     print(f"\n  wrote {ART_DIR / 'smokeBench_results.txt'}", flush=True)
     return 0 if ok else 1
 
