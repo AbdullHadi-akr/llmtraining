@@ -47,7 +47,9 @@ def boundary_condition_loss(
     forcing_sample = forcing[t_idx]
     
     # Evaluate model at boundary points
-    xb = xn[p_idx].clone().requires_grad_(True)
+    # ``xn[p_idx]`` is advanced indexing, which already allocates a fresh
+    # tensor sharing no storage with xn -- the clone was a second copy.
+    xb = xn[p_idx].requires_grad_(True)
     hist = model._history(Tn_seq, dtn, tn_sample, p_idx)
     T = model.field(xb, static[p_idx], cfg_sample, forcing_sample, hist)
     
@@ -85,7 +87,7 @@ def heat_residual(
       - bdf2: 2nd-order backward difference, O(Δt²) error (recommended)
       - autograd: continuous autograd derivative, O(ε_machine) error
     """
-    xb = xn[p_idx].clone().requires_grad_(True)   # (B, 3)
+    xb = xn[p_idx].requires_grad_(True)   # (B, 3); indexing already copies
     hist = model._history(Tn_seq, dtn, tn_q, p_idx)
     
     if time_deriv == "autograd":
@@ -97,15 +99,27 @@ def heat_residual(
     else:
         T = model.field(xb, static[p_idx], cfg, forcing, hist)
         
+        # In RAW mode the history block already IS the BDF stencil: column i-1 is
+        # ``interp_history(tn_q - i*delta)``, the same tensor and the same call
+        # ``history_at(lag=i)`` would make, so re-fetching it is duplicate work.
+        # Hybrid packs [anchor, rates...] instead, and a raw run with too few
+        # columns has nothing to reuse -- both fall back to the explicit lookup.
+        raw_hist = model.history_mode != "hybrid"
+
+        def _lag(n: int) -> torch.Tensor:
+            if raw_hist and model.k_max >= n:
+                return hist[:, n - 1]
+            return model.history_at(Tn_seq, dtn, tn_q, p_idx, lag=n)
+
         if time_deriv == "bdf2":
             # BDF2: 2nd-order backward difference, O(Δt²) error
             # dT/dt ≈ (3*T - 4*T_{-1} + T_{-2}) / (2*Δt)
-            T_1 = model.history_at(Tn_seq, dtn, tn_q, p_idx, lag=1)
-            T_2 = model.history_at(Tn_seq, dtn, tn_q, p_idx, lag=2)
+            T_1 = _lag(1)
+            T_2 = _lag(2)
             dTdt = (3.0 * T - 4.0 * T_1 + T_2) / (2.0 * model.delta + 1e-8)
         else:
             # BDF1: 1st-order backward difference, O(Δt) error
-            T_prev = model.history_at(Tn_seq, dtn, tn_q, p_idx, lag=1)
+            T_prev = _lag(1)
             dTdt = (T - T_prev) / (model.delta + 1e-8)
 
     # Spatial derivatives via autograd (always continuous)
