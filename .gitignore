@@ -15,6 +15,9 @@
 !PINNmodulusTwo/config.yaml
 !PINNmodulusTwo/requirements-gpu.txt
 
+# Same for the profile extension (its config.yaml IS the benchmark configuration)
+!PINNmodulusTwoExtProfiles/config.yaml
+
 # Keep this file tracked
 !.gitignore
 
