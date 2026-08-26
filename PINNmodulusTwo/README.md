@@ -26,11 +26,15 @@ takes part in any selection.
 - `model.py` — `LearnableSwish`, `ModulusMLP` (Modulus `FCLayer`s), and
   `RecurrentField`. The recurrence is deliberately **not** adaptive: `δ`, `k`,
   `delta_grid`, `rate_lags` and the lag gates are all fixed hyperparameters —
-  configurable, never trained. Learned are only the MLP weights, the per-layer
-  swish `β`, and the physics gains `src_gain`/`diff_gain`.
+  configurable, never trained. Learned are only the MLP weights and the per-layer
+  swish `β`; `src_gain`/`diff_gain` are pinned at 1.0 unless `--learn-gains`.
+  With `residual_output` (default) the net predicts the deviation from the
+  anchor's spatially averaged temperature level rather than the absolute value.
 - `physics.py` — nondimensional anisotropic heat residual; space via autograd,
-  time via the finite-difference `(T(t) − T(t−δ))/δ` over the recurrence.
-- `train.py` — training loop + evaluation, plots, metrics.
+  time via the finite-difference `(T(t) − T(t−δ))/δ` over the recurrence. The
+  assembled residual is divided by **one** scale, not each term by its own.
+- `train.py` — training loop + evaluation, plots, metrics. One free-running
+  rollout per OP per epoch, then `--inner-steps` minibatch updates against it.
 - `bench_common.py` — shared benchmark machinery: per-seed training, mean/std
   aggregation over seeds, the val/test split, and the seed-noise verdict. A
   benchmark only describes its own sweep axis.
@@ -51,8 +55,8 @@ these cases — this is the whole reason method #2 needs recurrence.
 `k` (how many history points) and `δ` (their spacing) are **fixed
 hyperparameters**, not learned — as are the `rate_lags` in hybrid mode and the
 lag gates, which are permanently on. The history layout is configured once and
-stays put; only the network and the two physics gains train. Sweep the layout
-with `benchmark_arch.py` rather than expecting the model to find it.
+stays put; only the network trains. Sweep the layout with `benchmark_arch.py`
+rather than expecting the model to find it.
 
 Hybrid history keeps the same raw interpolation for the physics residual, but
 feeds the network a more compact feature block:
@@ -81,6 +85,30 @@ The physics term supports `time_deriv: bdf1`, `bdf2`, or `autograd`. `bdf2` is
 the default and remains the recommended choice when the history buffer is long
 enough; `history_at()` always uses raw interpolation so the derivative is not
 coupled to the hybrid feature layout.
+
+## Training budget (`--inner-steps`)
+
+The rollout is what costs time: ~7000 *sequential* steps per OP per epoch that
+cannot be parallelised. The loop used to spend one of those on a single optimiser
+step, so a 60-epoch run over 5 OPs finished after **300 Adam updates** — far too
+few for a ~70k-parameter MLP, and the main reason the rollout error stayed large.
+
+Now each rollout is computed once under `no_grad` and reused for `--inner-steps`
+minibatch updates of `batch_data` random `(t, point)` pairs. That is not an
+approximation of the old objective: the recurrence always detached its history
+between steps, so the old full-sequence gradient was already a plain sum of
+independent per-`(t, point)` gradients against a trajectory it held constant — a
+minibatch estimates the same quantity. At the default 100 the same run takes
+**30 000** updates instead of 300, for one rollout's worth of extra cost.
+
+The tradeoff is staleness: after a few updates the frozen buffer is no longer
+quite what the current weights would produce. It is refreshed every epoch, so
+keep `--inner-steps` in the hundreds. `--inner-steps 1` reproduces the old
+budget exactly, which is the honest baseline to compare against.
+
+Measure the new per-epoch time with step 6.3 of `README_GPU_SERVER.md` before
+starting a long sweep — every runtime estimate in chapters 7 and 8 hangs on that
+one number, and the inner loop shifts it.
 
 ## Run
 

@@ -27,8 +27,9 @@ server setup and the full benchmark session see
 
 The recurrence is deliberately **not** adaptive: the history spacing `δ`, the lag
 count `k`, the lag gates and the hybrid `rate_lags` are all fixed
-hyperparameters. Learned are the MLP weights, the per-layer swish `β`, and the
-two physics gains `src_gain` / `diff_gain`.
+hyperparameters. Learned are the MLP weights and the per-layer swish `β`. The
+physics gains `src_gain` / `diff_gain` are pinned at 1.0 (`--learn-gains` frees
+them again).
 
 ### `data_cache/` — the OP bundles
 

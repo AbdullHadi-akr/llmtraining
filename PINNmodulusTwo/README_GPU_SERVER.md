@@ -411,10 +411,13 @@ womit 7.1 gelaufen ist.
 | `--epochs` | **`20`** | Kapitel 8 fährt mit 60. Für „in welcher Dekade wirkt das Gewicht" reichen 20; für den Endwert eines Modells nicht |
 | `--lr` | `2e-3` | Basis-Lernrate |
 | `--weight-decay` | `0.0` | |
-| `--gain-lr-mult` | `25.0` | `src_gain`/`diff_gain` lernen 25× schneller, sonst bleiben sie bei 1.0 |
+| `--learn-gains` | **aus** | `src_gain`/`diff_gain` bleiben fest auf 1.0. Das Residuum wird nicht mehr Term für Term normiert, also gibt es keine Skalenlücke mehr, die sie schließen müssten |
+| `--gain-lr-mult` | `25.0` | nur wirksam mit `--learn-gains` |
 | `--grad-clip` | `1.0` | maximale Gradientennorm |
 | `--early-stopping-patience` | `0` | aus |
-| `--batch-data` | `2048` | |
+| `--inner-steps` | **`100`** | Optimierer-Schritte je OP je Epoche gegen den einen eingefrorenen Rollout dieser Epoche. `1` = das alte Budget (ein Schritt pro OP) |
+| `--batch-data` | `2048` | `(t, Punkt)`-Paare je Schritt. Wurde vorher geparst und **ignoriert** — der Datenterm lief Full-Batch |
+| `--residual-output` | **an** | das Netz sagt die Abweichung vom räumlich gemittelten Temperaturniveau des Ankers vorher statt des Absolutwerts |
 | `--batch-phys` / `--batch-bc` | `256` / `128` | Kollokationspunkte — hier liegt der GPU-Hebel |
 | `--phys-norm` | `0` | `0` = adaptiver EMA, `>0` = fester Divisor |
 | `--seeds` | `0` | ein Seed, mit Absicht (siehe 7.1) |
@@ -422,10 +425,16 @@ womit 7.1 gelaufen ist.
 **Gesweept** werden nur `w_phys` und `w_bc`, jeweils über
 `[0, 0.001, 0.01, 0.1, 1.0]`. `w_data` bleibt fest bei `1.0`.
 
-**Lernparameter** (die einzigen Dinge, die der Gradient anfasst): MLP-Gewichte,
-das per-Layer `β` des Swish, und die beiden Physik-Gains `src_gain`/`diff_gain`.
-Die History-Struktur wird **nicht** gelernt — kein lernbares `δ`, keine
-Lag-Gates. Wer sie optimieren will, sweept sie mit `benchmark_arch.py` (8.2).
+**Lernparameter** (die einzigen Dinge, die der Gradient anfasst): MLP-Gewichte
+und das per-Layer `β` des Swish. Die Physik-Gains sind auf 1.0 fixiert
+(`--learn-gains` gibt sie frei). Die History-Struktur wird **nicht** gelernt —
+kein lernbares `δ`, keine Lag-Gates. Wer sie optimieren will, sweept sie mit
+`benchmark_arch.py` (8.2).
+
+> **Laufzeit neu messen.** Die Zahlen in Kapitel 7 und 8 hängen alle an
+> Schritt 6.3 („Wie lange dauert eine Epoche?"). Der Innenloop verschiebt
+> diese Zahl, also 6.3 einmal neu fahren und die Stundenrechnungen damit
+> nachziehen, bevor ein langer Sweep startet.
 
 Die Defaults stehen in `PINNmodulusTwo/config.yaml`; die CLI überschreibt sie
 pro Lauf.

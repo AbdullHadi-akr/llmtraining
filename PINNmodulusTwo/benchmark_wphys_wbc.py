@@ -436,6 +436,17 @@ def parse_args() -> argparse.Namespace:
                         "summary and the per-axis verdict. Probe mode only.")
     # Batching
     p.add_argument("--batch-data", type=int, default=2048)
+    p.add_argument("--inner-steps", type=int, default=100,
+                   help="optimiser steps per OP per epoch against that epoch's "
+                        "frozen rollout; drives both the update count and most "
+                        "of the per-epoch cost beyond the rollout itself")
+    p.add_argument("--residual-output", action=argparse.BooleanOptionalAction,
+                   default=True,
+                   help="predict the deviation from the anchor's spatial mean "
+                        "temperature level instead of the absolute value")
+    p.add_argument("--learn-gains", action=argparse.BooleanOptionalAction,
+                   default=False,
+                   help="let src_gain/diff_gain train (off: pinned at 1.0)")
     p.add_argument("--batch-phys", type=int, default=256)
     p.add_argument("--batch-bc", type=int, default=128)
     p.add_argument("--phys-norm", type=float, default=0.0,

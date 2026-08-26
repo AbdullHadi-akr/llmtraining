@@ -73,6 +73,13 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--batch-data", type=int, default=d.get("batch_data", 1024))
     p.add_argument("--batch-phys", type=int, default=d.get("batch_phys", 128))
     p.add_argument("--batch-bc", type=int, default=d.get("batch_bc", 64))
+    p.add_argument("--inner-steps", type=int, default=d.get("inner_steps", 100),
+                   help="optimiser steps per OP per epoch against that epoch's "
+                        "frozen rollout")
+    p.add_argument("--residual-output", action=argparse.BooleanOptionalAction,
+                   default=d.get("residual_output", True))
+    p.add_argument("--learn-gains", action=argparse.BooleanOptionalAction,
+                   default=d.get("learn_gains", False))
     p.add_argument("--use-static", action="store_true", default=d.get("use_static", True))
     p.add_argument("--use-forcing", action="store_true", default=d.get("use_forcing", True))
     p.add_argument("--seed", type=int, default=0)
@@ -109,6 +116,9 @@ def _make_args(cli, w_phys: float) -> Args:
     args.batch_data = cli.batch_data
     args.batch_phys = cli.batch_phys
     args.batch_bc = cli.batch_bc
+    args.inner_steps = cli.inner_steps
+    args.residual_output = cli.residual_output
+    args.learn_gains = cli.learn_gains
     args.weight_decay = 0.0
     args.grad_clip = cli.grad_clip
     args.early_stopping_patience = 0
