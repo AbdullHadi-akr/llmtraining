@@ -24,20 +24,34 @@ Fixed hyperparameters (override on CLI if desired):
 Two modes:
 
 --probe   RANGE PROBE, 9 points. A decade-spaced CROSS through a shared centre
-          rather than a grid: each weight is walked over [0, 1e-3, 1e-2, 1e-1, 1]
-          while the other sits at the centre. Answers "does this weight move the
-          error at all, and in which decade" -- run it BEFORE the grid, because
-          resolving a grid inside a range that turns out to be flat is the
-          expensive way to learn nothing.
+          rather than a grid: each weight is walked over [0, 0.01, 0.1, 1, 3]
+          while the other sits at the centre (0.1). Answers "does this weight
+          move the error at all, and in which decade" -- run it BEFORE the grid,
+          because resolving a grid inside a range that turns out to be flat is
+          the expensive way to learn nothing.
+
+          The weights are mixing fractions, not raw multipliers: train.py divides
+          L_phys and L_bc by an EMA of their own magnitude first, so w=1 means
+          "counts as much as the data term". Hence a range that brackets 1 from
+          both sides, with w=0 as the control the gain is measured against and
+          w=3 as a deliberately over-weighted point. The verdict reports the gain
+          against w=0 and flags a best point that sits at an edge of the range.
 
           --probe-part 1|2 splits those 9 points into two shorter sessions along
           the arms of the cross: part 1 walks w_phys (5 points, the shared centre
           among them), part 2 walks w_bc (4 points). Same trainings, same total
-          time, in two sittings instead of one. A part run TRAINS AND SAVES --
-          the CSV, the settings block and the raw rows are written every time --
-          but it does not evaluate: the per-axis verdict weighs each arm against
-          the shared centre, which arm 2 does not contain, so a half cross would
-          compare an axis against itself.
+          time, in two sittings instead of one. Add a/b (1a, 1b, 2a, 2b) to halve
+          an arm again when a whole arm still does not fit the session budget --
+          2-3 points per sitting. A part run TRAINS AND SAVES -- the CSV, the
+          settings block and the raw rows are written every time -- but it does
+          not evaluate: the per-axis verdict weighs each arm against the shared
+          centre, which arm 2 does not contain, so a half cross would compare an
+          axis against itself.
+
+          --max-hours (default 5) does not stop anything; from the first finished
+          point on it projects the block total and, when that overruns, names the
+          --epochs value that would have fit. Restarting after one point is cheap;
+          discovering the overrun at the end is not.
 
           --report-only is the evaluation step. It trains nothing, merges the
           stored parts and writes the summary, the per-axis verdict and the
@@ -50,7 +64,7 @@ Two modes:
               --probe --probe-part 2 --epochs 20 --device cuda   # 4 trainings
               --probe --report-only  --epochs 20 --device cuda   # plots, no GPU
 
-(default) GRID, 5x5 = 25 points over [0, 0.01, 0.05, 0.1, 0.3] per weight.
+(default) GRID, 5x5 = 25 points over [0, 0.03, 0.1, 0.3, 1.0] per weight.
           Use --w-phys/--w-bc to centre it on the decade the probe found.
           --extended-grid gives 10x10; see the runtime note below first.
 
@@ -130,25 +144,48 @@ ART_DIR.mkdir(parents=True, exist_ok=True)
 # range probe found; the values below are only a starting spread.
 # (The old comment claimed 'best around w_phys~0.1-0.2' from earlier runs --
 #  those ran with the broken L_phys and delta, so the number meant nothing.)
-DEFAULT_W_PHYS = [0.0, 0.01, 0.05, 0.1, 0.3]
-DEFAULT_W_BC = [0.0, 0.01, 0.05, 0.1, 0.3]
+DEFAULT_W_PHYS = [0.0, 0.03, 0.1, 0.3, 1.0]
+DEFAULT_W_BC = [0.0, 0.03, 0.1, 0.3, 1.0]
 
 # Range probe: a CROSS through the baseline, not a grid. Decade-spaced, so it
 # answers "which order of magnitude matters at all" before a grid commits hours
 # to resolving differences inside a range that may be entirely flat.
-PROBE_W_PHYS = [0.0, 0.001, 0.01, 0.1, 1.0]
-PROBE_W_BC = [0.0, 0.001, 0.01, 0.1, 1.0]
+#
+# What the numbers mean, and why the range sits where it does. train.py divides
+# L_phys and L_bc by an EMA of their own magnitude before weighting, so each
+# weighted term is ~w in value: w = 1 means "this term counts as much as the data
+# term", not "this term is multiplied by one". The useful span therefore brackets
+# 1 rather than trailing off below it.
+#
+#   0.0   the control. Without it none of the other points mean anything: the
+#         whole question is how far below the w=0 error the term can push.
+#   0.01  a decade below the point where the terms are comparable
+#   0.1   |
+#   1.0   the term counts as much as the data term
+#   3.0   deliberately TOO strong. A range whose best point sits at its own edge
+#         has not bracketed anything -- it only says "further out, please". One
+#         point past the plausible optimum is what turns the sweep from a
+#         direction into an answer, and _report_probe says so when it happens.
+#
+# The old range was [0, 0.001, 0.01, 0.1, 1.0]: four decades below the balance
+# point and nothing above it, so it could never show a term being over-weighted.
+# Its apparent optimum also came from runs whose L_phys was normalised term by
+# term with collapsing gains -- see physics.py -- so it is not evidence for
+# anything here.
+PROBE_W_PHYS = [0.0, 0.01, 0.1, 1.0, 3.0]
+PROBE_W_BC = [0.0, 0.01, 0.1, 1.0, 3.0]
 # The two baselines must be members of their own lists, so the arms of the cross
 # meet in a single shared point. Otherwise each axis is measured against a
 # different reference and the two are not comparable -- and the cross costs one
-# training more than it needs to.
-PROBE_BASE_W_PHYS = 0.01
+# training more than it needs to. 0.1 is the middle of the range: with a corrected
+# physics term there is no prior reason to centre the cross anywhere else.
+PROBE_BASE_W_PHYS = 0.1
 PROBE_BASE_W_BC = 0.1
 assert PROBE_BASE_W_PHYS in PROBE_W_PHYS and PROBE_BASE_W_BC in PROBE_W_BC
 
 # Extended 10×10 grid - use with --extended-grid
-EXTENDED_W_PHYS = [0.0, 0.001, 0.005, 0.01, 0.03, 0.05, 0.1, 0.2, 0.5, 1.0]
-EXTENDED_W_BC = [0.0, 0.001, 0.005, 0.01, 0.03, 0.05, 0.1, 0.3, 0.7, 1.0]
+EXTENDED_W_PHYS = [0.0, 0.01, 0.03, 0.05, 0.1, 0.2, 0.3, 0.5, 1.0, 2.0]
+EXTENDED_W_BC = [0.0, 0.01, 0.03, 0.05, 0.1, 0.2, 0.3, 0.5, 1.0, 2.0]
 
 
 def _report_probe(results, usable, cli, summary) -> None:
@@ -177,9 +214,42 @@ def _report_probe(results, usable, cli, summary) -> None:
         lines.append(f"    best {axis}={best_row[key]:g} "
                      f"(val {best_row['val_mae']:.3f} °C), "
                      f"span over the decades = {span:.3f} °C")
+
+        # What the term actually buys, against the run with it switched off. This
+        # is the number the sweep exists to produce -- a ranking of five weights
+        # does not say whether the term helps at all.
+        off = next((r for r in rows if r[key] == 0.0), None)
+        helps = None
+        if off is not None:
+            gain = off["val_mae"] - best_row["val_mae"]
+            helps = gain > max(noise, 0.0)
+            verdict = ("HELPS" if helps else
+                       "no measurable gain" if gain > -max(noise, 0.0) else "HURTS")
+            lines.append(
+                f"    vs {axis}=0 ({off['val_mae']:.3f} °C): "
+                f"{gain:+.3f} °C at the best weight -> {verdict}")
+
+        # A best point sitting at an end of the range means the range did not
+        # bracket the optimum: the sweep found a direction, not an answer, and
+        # reporting the edge value as "the best weight" would be reading the
+        # boundary of the search as a property of the model. Landing on w=0 is not
+        # that -- there is nothing below it, and it is the control.
+        lo, hi = rows[0][key], rows[-1][key]
+        if best_row[key] == hi:
+            lines.append(f"    NOT BRACKETED: the best point is the LARGEST weight "
+                         f"tried ({hi:g}). Extend upwards (e.g. {hi * 3:g}, "
+                         f"{hi * 10:g}) before reading this as an optimum.")
+        elif best_row[key] == lo and len(rows) > 1 and lo > 0.0:
+            lines.append(f"    NOT BRACKETED: the best point is the SMALLEST weight "
+                         f"tried ({lo:g}); the optimum may lie below it.")
+
         if len(cli.seeds) < 2:
             lines.append("    seed spread unknown (single seed) - re-run the probe "
                          "with --seeds 0 1 2 before trusting this.")
+        elif helps is False:
+            lines.append(f"    no weight beat {axis}=0 by more than the seed spread "
+                         f"({noise:.3f} °C): this term is not earning its place "
+                         f"here. Skip the grid for it.")
         elif span < noise:
             lines.append(f"    span is BELOW the seed spread ({noise:.3f} °C): this "
                          f"weight does not move the error. Skip the grid for it.")
@@ -188,7 +258,7 @@ def _report_probe(results, usable, cli, summary) -> None:
                          f"a grid, centred on the best decade above.")
     lines += ["",
               "Next: run the 5x5 grid only over the decade(s) that mattered, e.g.",
-              "  --w-phys 0.01 0.03 0.05 0.1 0.3  --w-bc 0.01 0.03 0.05 0.1 0.3"]
+              "  --w-phys 0.03 0.1 0.2 0.3 0.5  --w-bc 0.03 0.1 0.2 0.3 0.5"]
     (ART_DIR / "benchmark_wphys_wbc_best.txt").write_text(
         "\n".join(summary + lines) + "\n")
     print("\n".join(lines), flush=True)
@@ -226,13 +296,39 @@ def build_pairs(cli) -> list:
     """
     if not cli.probe:
         return [(p, b) for p in cli.w_phys for b in cli.w_bc]
+    return probe_part_pairs(cli, getattr(cli, "probe_part", "all"))
+
+
+def probe_part_pairs(cli, part: str) -> list:
+    """The points one ``--probe-part`` value covers."""
     arm_phys, arm_bc = probe_arms(cli)
-    part = getattr(cli, "probe_part", "all")
-    if part == "1":
-        return arm_phys
-    if part == "2":
-        return arm_bc
-    return arm_phys + arm_bc
+    if part == "all":
+        return arm_phys + arm_bc
+    arm = arm_phys if part.startswith("1") else arm_bc
+    # A halved arm ("1a"/"1b") for machines where a whole arm does not fit the
+    # session budget. The merge is keyed by (w_phys, w_bc) and unions every stored
+    # part, so a half arm needs no special handling there -- it is one more bucket,
+    # and the report step still refuses anything short of the whole cross.
+    if part.endswith(("a", "b")):
+        half = (len(arm) + 1) // 2
+        return arm[:half] if part.endswith("a") else arm[half:]
+    return arm
+
+
+def next_probe_parts(cli, missing: list) -> list:
+    """Which ``--probe-part`` values still have to run, whole arms first.
+
+    Derived from what is actually missing rather than from "the other one", so it
+    stays correct when an arm was run in halves.
+    """
+    miss = {_pair_key(a, b) for a, b in missing}
+    out = []
+    for part in ("1", "2", "1a", "1b", "2a", "2b"):
+        keys = {_pair_key(a, b) for a, b in probe_part_pairs(cli, part)}
+        if keys and keys <= miss:
+            out.append(part)
+            miss -= keys
+    return out
 
 
 # --- Split probe: storing one part until the other one lands ---------------
@@ -242,7 +338,12 @@ def build_pairs(cli) -> list:
 # centre. A part run therefore writes its rows here and stops before the report;
 # whichever part completes the cross merges everything and reports once.
 PROBE_STATE_FILE = "probe_parts.json"
-PROBE_PART_LABEL = {"1": "1/2 (w_phys arm)", "2": "2/2 (w_bc arm)"}
+PROBE_PART_LABEL = {
+    "1": "1/2 (w_phys arm)", "2": "2/2 (w_bc arm)",
+    "1a": "1a (w_phys arm, first half)", "1b": "1b (w_phys arm, second half)",
+    "2a": "2a (w_bc arm, first half)", "2b": "2b (w_bc arm, second half)",
+}
+PROBE_PARTS = list(PROBE_PART_LABEL)
 
 
 def _probe_signature(cli) -> dict:
@@ -428,14 +529,21 @@ def parse_args() -> argparse.Namespace:
                         "the CSV, the summary, the per-axis verdict and the "
                         "plots. This is the evaluation step of a split probe; it "
                         "refuses to run on an incomplete cross. Probe mode only.")
-    p.add_argument("--probe-part", choices=["1", "2", "all"], default="all",
-                   help="split the probe into two shorter sessions: 1 = w_phys "
-                        "arm (5 points), 2 = w_bc arm (4 points), all = both in "
-                        "one run. A part run stores its rows and reports nothing; "
-                        "whichever part completes the cross writes the CSV, the "
-                        "summary and the per-axis verdict. Probe mode only.")
+    p.add_argument("--probe-part", choices=PROBE_PARTS + ["all"], default="all",
+                   help="split the probe into shorter sessions: 1 = w_phys arm "
+                        "(5 points), 2 = w_bc arm (4 points), all = both in one "
+                        "run. Add a/b to halve an arm again (1a/1b, 2a/2b) when a "
+                        "whole arm does not fit the session budget. A part run "
+                        "stores its rows and reports nothing; whichever part "
+                        "completes the cross writes the CSV, the summary and the "
+                        "per-axis verdict. Probe mode only.")
     # Batching
     p.add_argument("--batch-data", type=int, default=2048)
+    p.add_argument("--max-hours", type=float, default=5.0,
+                   help="wall-clock budget for THIS block. Purely advisory: from "
+                        "the first finished point on, the log projects the block "
+                        "total and says how much --epochs would have to shrink to "
+                        "fit. 0 disables the check")
     p.add_argument("--inner-steps", type=int, default=100,
                    help="optimiser steps per OP per epoch against that epoch's "
                         "frozen rollout; drives both the update count and most "
@@ -619,7 +727,8 @@ def main() -> None:
                 train_time, len(cli.seeds)))
             histories.append({"w_phys": w_phys, "w_bc": w_bc,
                               "hist": first_hist or EMPTY_HIST})
-            print_eta(idx, total_points, start_time_total, train_time)
+            print_eta(idx, total_points, start_time_total, train_time,
+                      budget_h=getattr(cli, 'max_hours', 0.0), epochs=cli.epochs)
             continue
 
         row = aggregate_seeds({"w_phys": float(w_phys), "w_bc": float(w_bc)},
@@ -642,7 +751,8 @@ def main() -> None:
         if n_ok < n_all:
             print(f"  note: {n_all - n_ok}/{n_all} seeds diverged and were left out "
                   f"of the mean", flush=True)
-        print_eta(idx, total_points, start_time_total, train_time)
+        print_eta(idx, total_points, start_time_total, train_time,
+                      budget_h=getattr(cli, 'max_hours', 0.0), epochs=cli.epochs)
 
     total_time = time.time() - start_time_total
     print(f"\n{'='*60}")
@@ -665,12 +775,17 @@ def main() -> None:
         print(f"  results saved: {csv_path}", flush=True)
         print(f"  settings saved: {set_path}", flush=True)
         if missing:
-            other = "2" if cli.probe_part == "1" else "1"
             print("  still to train: " + ", ".join(
                 f"(w_phys={a:g}, w_bc={b:g})" for a, b in missing), flush=True)
-            print(f"\nNext - the other part, with these same flags:\n"
-                  f"  python3 {Path(__file__).name} --probe --probe-part {other} "
-                  f"--epochs {cli.epochs} --device {cli.device}", flush=True)
+            todo = next_probe_parts(cli, missing)
+            print("\nNext - with these same flags:", flush=True)
+            for part in todo:
+                print(f"  python3 {Path(__file__).name} --probe --probe-part {part} "
+                      f"--epochs {cli.epochs} --device {cli.device}", flush=True)
+            if not todo:
+                print("  (the missing points do not line up with a whole part - "
+                      "re-run --probe-part all, or the arm they belong to)",
+                      flush=True)
             print("  (a settings mismatch discards the stored part instead of "
                   "merging it)", flush=True)
         else:

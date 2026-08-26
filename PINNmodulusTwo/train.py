@@ -296,6 +296,11 @@ def fit(args):
         epoch_start = time.time()
         model.train()
         ep_data, ep_phys, ep_bc = 0.0, 0.0, 0.0
+        # Split the epoch's wall time into its two halves. Every runtime estimate
+        # in README_GPU_SERVER chapters 7 and 8 is derived from one measured
+        # seconds-per-epoch, and --inner-steps moves only the second half, so the
+        # split is what makes the budget plannable instead of guessed.
+        t_roll_s, t_inner_s = 0.0, 0.0
         aborted_epoch = False
         for op in ops:
             n_t, n_pts = op["n_t"], op["n_points"]
@@ -324,18 +329,29 @@ def fit(args):
             # refreshed every epoch, so inner_steps trades update count against
             # how stale the trajectory may get -- keep it in the hundreds, not the
             # tens of thousands.
+            _t0 = time.time()
             with torch.no_grad():
                 own_hist = rollout(
                     model, op["xn"], op["static"], op["cfg"], op["forcing"],
                     op["Tn_ic"], op["tn"], dtn,
                 )
+            t_roll_s += time.time() - _t0
+            _t0 = time.time()
 
             op_data = op_phys = op_bc = 0.0
             for _ in range(inner_steps):
                 # ---- data term on a minibatch of (t, point) ------------------
+                # Labels are only read up to split_t. The rollout still covers the
+                # whole trajectory -- the recurrence needs it, and the physics and
+                # BC terms below are unsupervised and use all of it -- but fitting
+                # LABELS past split_t would train on the very rows that
+                # ``metrics.txt`` and the benchmarks' MAE_in column report as a
+                # held-out in-time check. data.py already treats that tail as
+                # held out: T_mu/T_sigma and every config/source statistic are
+                # pooled over [:split_t] only.
                 # t starts at 1: row 0 is the imposed initial condition, never a
                 # prediction.
-                bt = torch.randint(1, n_t, (batch_data,), device=device)
+                bt = torch.randint(1, op["split_t"], (batch_data,), device=device)
                 bp = torch.randint(0, n_pts, (batch_data,), device=device)
                 tq = op["tn"][bt]
                 hist = model._history(own_hist, dtn, tq, bp)
@@ -420,6 +436,7 @@ def fit(args):
                 op_phys += float(L_phys.detach())
                 op_bc += float(L_bc.detach())
 
+            t_inner_s += time.time() - _t0
             if aborted_epoch:
                 break
             # Mean over the inner steps, so the logged epoch loss stays a
@@ -490,9 +507,23 @@ def fit(args):
                 f"  epoch {epoch:3d}  L_data={ep_data:.4e}  L_phys_bal={ep_phys_bal:.4e}  "
                 f"L_bc_bal={ep_bc_bal:.4e}  delta={float(model.delta.detach()):.4g}  "
                 f"src_gain={sg:.3g}  diff_gain={dg:.3g}{lags_str}  betas={betas}  "
-                f"[{epoch_s:.1f}s/epoch, this run ~{eta_min:.0f} min left]",
+                f"[{epoch_s:.1f}s/epoch = {t_roll_s:.1f}s rollout + "
+                f"{t_inner_s:.1f}s x{inner_steps} inner, "
+                f"this run ~{eta_min:.0f} min left]",
                 flush=True,
             )
+            if epoch == 1 and device.type == "cuda":
+                # Peak VRAM, once. The batch sizes are the only real GPU knob here
+                # (see README_GPU_SERVER 6.4) and guessing how much headroom is
+                # left is exactly the thing a measurement should answer.
+                peak = torch.cuda.max_memory_allocated(device) / 1e9
+                total = torch.cuda.get_device_properties(device).total_memory / 1e9
+                print(
+                    f"  peak VRAM {peak:.2f} GB of {total:.1f} GB "
+                    f"(batch_data={batch_data} batch_phys={args.batch_phys} "
+                    f"batch_bc={args.batch_bc})",
+                    flush=True,
+                )
         if early_stopping_patience > 0 and epochs_without_improvement >= early_stopping_patience:
             print(
                 f"  early stopping after epoch {epoch}: training data loss did not improve "

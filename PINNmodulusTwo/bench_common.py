@@ -321,9 +321,33 @@ def noise_verdict(usable: list, best: dict, n_seeds: int, label_of) -> list:
 
 
 def print_eta(idx: int, total: int, start_time_total: float,
-              train_time: float) -> None:
-    """Report the time this configuration took and extrapolate the remainder."""
+              train_time: float, budget_h: float = 0.0,
+              epochs: int | None = None) -> None:
+    """Report the time this configuration took and extrapolate the remainder.
+
+    With ``budget_h`` set, also project the whole block and say -- from the FIRST
+    finished point on -- whether it will overrun. A sweep that blows its budget is
+    worth knowing about after one point, when restarting costs one point, rather
+    than after the session it was supposed to fit into.
+
+    This warns and keeps going; it never stops the run. Breaking off mid-arm would
+    leave a part that the report step correctly refuses to evaluate, so the useful
+    reaction is a deliberate Ctrl-C and a restart with the smaller ``--epochs``
+    named here -- which starts a clean block, because a settings mismatch against
+    a stored part is refused rather than merged.
+    """
     elapsed = time.time() - start_time_total
-    eta = (elapsed / idx) * (total - idx) if idx else 0.0
-    print(f"  Train time: {train_time/60:.1f} min | ETA: {eta/60:.1f} min",
-          flush=True)
+    per_point = elapsed / idx if idx else 0.0
+    eta = per_point * (total - idx)
+    projected = elapsed + eta
+    print(f"  Train time: {train_time/60:.1f} min | ETA: {eta/60:.1f} min "
+          f"| block total ~{projected/3600:.2f} h", flush=True)
+    if budget_h > 0.0 and projected > budget_h * 3600.0:
+        print(f"  [BUDGET] this block projects to {projected/3600:.2f} h, over the "
+              f"{budget_h:.1f} h limit (--max-hours).", flush=True)
+        if epochs:
+            fit = max(1, int(epochs * (budget_h * 3600.0) / projected))
+            print(f"           --epochs {fit} would fit ({epochs} is running now); "
+                  f"or split the arm and run fewer points per session.", flush=True)
+        print(f"           Ctrl-C now costs one point. Finishing costs "
+              f"{(projected - budget_h * 3600.0)/3600:.2f} h over.", flush=True)
