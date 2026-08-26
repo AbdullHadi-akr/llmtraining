@@ -16,6 +16,15 @@ ist, sonst die CPU.
 > cd PINNmodulusTwo && python3 train.py --epochs 2 --subsample 40 --device cuda
 > ```
 
+> **Bevor du einen langen Sweep startest:
+> [README_MODEL_CRITIQUE.md](README_MODEL_CRITIQUE.md).**
+> Diese Datei hier sagt, *wie* man die Läufe startet. Die Kritik sagt, *worauf man
+> in den Ergebnissen schaut* und **welcher Schritt danach überhaupt sinnvoll
+> ist** — inklusive der Fälle, in denen ein Gewichte-Sweep die falsche nächste
+> Maßnahme wäre. Sie hält außerdem fest, was am Modell repariert wurde und was
+> davon bisher nur mathematisch verifiziert und noch nicht auf echten Daten
+> gemessen ist.
+
 ---
 
 ## 1. Treiber prüfen und ggf. installieren
@@ -472,6 +481,13 @@ dort.
 
 **Datenaufteilung:** Training `OP01–OP05`, Validierung `OP06` (entscheidet die
 Auswahl), Test `OP07` (wird nur berichtet und fließt in keine Auswahl ein).
+
+> **Erst Schritt A in [README_MODEL_CRITIQUE.md](README_MODEL_CRITIQUE.md).**
+> Kapitel 7 kostet ~9 h GPU-Zeit und setzt voraus, dass das Modell überhaupt auf
+> seine Hyperparameter reagiert. Der `smallBench`-Vergleich dort (~10 min)
+> entscheidet das — und in zwei der dort beschriebenen Fälle ist ein
+> Gewichte-Sweep die falsche nächste Maßnahme. Dieselbe Datei sagt auch, wie das
+> Verdikt aus 7.3 zu lesen ist.
 
 ---
 ### 7.0 Hyperparameter — für 7.1 und 7.2 identisch

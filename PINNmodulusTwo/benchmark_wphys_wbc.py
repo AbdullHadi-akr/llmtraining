@@ -68,6 +68,12 @@ Two modes:
           Use --w-phys/--w-bc to centre it on the decade the probe found.
           --extended-grid gives 10x10; see the runtime note below first.
 
+READ FIRST: PINNmodulusTwo/README_MODEL_CRITIQUE.md. It says how to read this
+sweep's verdict, and -- more usefully -- when NOT to run it: a weight sweep only
+answers anything once the model is known to respond to its hyperparameters at
+all, and the 10-minute smallBench comparison described there decides that. It
+also records which of the model's fixes are so far only verified mathematically.
+
 Run:
     source .venv/bin/activate
     python3 PINNmodulusTwo/benchmark_wphys_wbc.py --probe --epochs 20 --device cuda

@@ -24,6 +24,9 @@ residual, and the symmetry boundary condition `dT/dx = 0` at the cell centre.
 Start with [`PINNmodulusTwo/README.md`](PINNmodulusTwo/README.md); for the GPU
 server setup and the full benchmark session see
 [`PINNmodulusTwo/README_GPU_SERVER.md`](PINNmodulusTwo/README_GPU_SERVER.md).
+Where the model currently stands — what was broken, what is fixed, and what to
+look for in each test before spending GPU days — is in
+[`PINNmodulusTwo/README_MODEL_CRITIQUE.md`](PINNmodulusTwo/README_MODEL_CRITIQUE.md).
 
 The recurrence is deliberately **not** adaptive: the history spacing `δ`, the lag
 count `k`, the lag gates and the hybrid `rate_lags` are all fixed

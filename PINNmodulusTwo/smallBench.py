@@ -7,6 +7,16 @@ Runs a short training (few epochs, 2 w_phys values) to verify:
 3. Balanced losses are ~O(1)
 4. Test MAE is reasonable (< 20°C)
 
+This is also "step A" of PINNmodulusTwo/README_MODEL_CRITIQUE.md: run it once as
+it stands and once as
+
+    --inner-steps 1 --no-residual-output --learn-gains
+
+which is the configuration from before the training-budget, residual-output and
+physics-residual fixes. Comparing the two Test MAEs is what decides whether those
+fixes actually helped -- so far they are only verified mathematically -- and the
+critique file turns each possible outcome into the next step to take.
+
 Run:
     cd /mnt/c/Users/M0245635/batterysurrogatemodell
     source modulus_env/bin/activate

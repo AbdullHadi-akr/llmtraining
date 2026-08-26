@@ -44,6 +44,11 @@ takes part in any selection.
 - `smallBench.py` — 2-5 minute smoke test; run it before any long sweep.
 - `config.yaml` — hyperparameters, matching what the benchmarks run
   (CLI overrides available).
+- [`README_MODEL_CRITIQUE.md`](README_MODEL_CRITIQUE.md) — what was wrong with the
+  model, what is fixed, what is still open, and **what you have to see in which
+  test to know which step comes next**. Everything in it is so far verified
+  mathematically only, not measured on real data; it names the run that settles
+  that. Read it before committing GPU days to a sweep.
 
 ## Why recurrence (profiles)
 
