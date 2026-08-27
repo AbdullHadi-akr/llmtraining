@@ -23,7 +23,7 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from data import load_ops
+from data import effective_rate_scale, load_ops
 from device_utils import enable_tf32, resolve_device, seed_everything
 from model import RecurrentField, rollout
 from physics import heat_residual, boundary_condition_loss
@@ -132,6 +132,22 @@ def parse_args() -> argparse.Namespace:
                         "part, so this raises the update count at roughly "
                         "constant cost; 1 reproduces the old one-step-per-OP "
                         "behaviour")
+    p.add_argument("--rollout-clamp", type=float,
+                   default=d.get("rollout_clamp", 50.0),
+                   help="saturate the rollout buffer at +/-this many normalised "
+                        "temperature units; 0 disables. A working trajectory "
+                        "stays within a few units, so this never binds on a sane "
+                        "model -- it exists so a diverging one produces a finite "
+                        "loss that training can still move, instead of an inf "
+                        "that makes every downstream term NaN. It is reported "
+                        "whenever it binds")
+    p.add_argument("--max-rate-amp", type=float, default=d.get("max_rate_amp", 0.0),
+                   help="cap the hybrid history's amplification A = 1/(lag_n * "
+                        "rate_scale) by raising rate_scale; 0 = leave rate_scale "
+                        "at dTdt_scale. A is printed at startup either way. This "
+                        "CHANGES THE MODEL. Prefer longer --rate-lags, which lower "
+                        "A by making the segment a real span rather than by "
+                        "rescaling a channel; record it when you use this")
     p.add_argument("--residual-output", action=argparse.BooleanOptionalAction,
                    default=d.get("residual_output", True),
                    help="predict the deviation from the spatially averaged "
@@ -320,12 +336,25 @@ def fit(args):
         flush=True,
     )
 
+    # The hybrid history divides a temperature DIFFERENCE by ``lag_n *
+    # rate_scale``. That product is tiny (5 s out of a ~1474 s reference span),
+    # so the channel multiplies whatever the previous step produced by A ~ 119
+    # and feeds it back in. Print A always; --max-rate-amp caps it by raising
+    # rate_scale, at the cost of no longer being the same model.
+    rate_scale = bundle.dTdt_scale
+    if args.history_mode == "hybrid":
+        rate_scale, amp_lines = effective_rate_scale(
+            bundle.dTdt_scale, rate_lags_n, float(getattr(args, "max_rate_amp", 0.0))
+        )
+        for line in amp_lines:
+            print(line, flush=True)
+
     model = RecurrentField(
         n_config=bundle.n_config, n_static=n_static, n_forcing=n_forcing,
         k_max=args.k_max, history_mode=args.history_mode, rate_lags=rate_lags_n,
         layer_size=args.width, num_layers=args.depth,
         delta_seconds=1.0, dtn=dtn, t_span_ref=bundle.T_span_ref,
-        rate_scale=bundle.dTdt_scale, delta_grid=delta_grid_n,
+        rate_scale=rate_scale, delta_grid=delta_grid_n,
         use_autograd_time=(args.time_deriv == "autograd"),
         residual_output=bool(getattr(args, "residual_output", True)),
         learn_gains=bool(getattr(args, "learn_gains", False)),
@@ -378,6 +407,10 @@ def fit(args):
     # that cannot be parallelised); a minibatch step is cheap, so this is where the
     # update count comes from.
     inner_steps = max(1, int(getattr(args, "inner_steps", 100)))
+
+    rollout_clamp = float(getattr(args, "rollout_clamp", 50.0) or 0.0)
+    if rollout_clamp > 0.0:
+        print(f"rollout saturation guard: |Tn| <= {rollout_clamp:g}", flush=True)
     batch_data = int(getattr(args, "batch_data", 2048))
     print(
         f"optimiser steps = {inner_steps} per OP per epoch x {len(ops)} OPs "
@@ -450,6 +483,7 @@ def fit(args):
         # seconds-per-epoch, and --inner-steps moves only the second half, so the
         # split is what makes the budget plannable instead of guessed.
         t_roll_s, t_inner_s = 0.0, 0.0
+        ep_saturated: list[tuple[str, int, int]] = []
         aborted_epoch = False
         for op in ops:
             n_t, n_pts = op["n_t"], op["n_points"]
@@ -482,9 +516,17 @@ def fit(args):
             with torch.no_grad():
                 own_hist = rollout(
                     model, op["xn"], op["static"], op["cfg"], op["forcing"],
-                    op["Tn_ic"], op["tn"], dtn,
+                    op["Tn_ic"], op["tn"], dtn, clamp=rollout_clamp,
                 )
             t_roll_s += time.time() - _t0
+            # The guard binding means the rollout tried to run away and was held
+            # back -- the loss stays finite, but the trajectory is not a
+            # prediction any more. Silence here would look like ordinary slow
+            # convergence, so it is counted and reported.
+            if rollout_clamp > 0.0:
+                n_sat = int((own_hist.abs() >= rollout_clamp).any(dim=1).sum())
+                if n_sat:
+                    ep_saturated.append((op["op_id"], n_sat, own_hist.shape[0]))
             _t0 = time.time()
 
             op_data = op_phys = op_bc = 0.0
@@ -618,6 +660,18 @@ def fit(args):
             ep_ratio_phys += op_ratio_phys / inner_steps
             ep_ratio_bc += op_ratio_bc / inner_steps
 
+        if ep_saturated:
+            worst = ", ".join(
+                f"{op_id} {n}/{tot} steps" for op_id, n, tot in ep_saturated
+            )
+            print(f"  [SATURATED] epoch {epoch}: rollout hit the "
+                  f"|Tn| <= {rollout_clamp:g} guard ({worst}). The loss stays "
+                  f"finite, but the trajectory ran away and was held back -- it "
+                  f"is not a prediction, and a run that only survives because "
+                  f"of this is not trained. Watch the count: falling is the "
+                  f"model pulling itself together, flat or rising is not.",
+                  flush=True)
+
         ep_ratio_phys /= len(ops)
         ep_ratio_bc /= len(ops)
         ep_data /= len(ops)
@@ -629,8 +683,21 @@ def fit(args):
         phys_broken = want_phys and not np.isfinite(ep_phys)
         if not np.isfinite(ep_data) or phys_broken:
             print(f"  [ABORT] epoch {epoch}: loss exploded (L_data={ep_data:.4g}, L_phys={ep_phys:.4g})")
-            print("  L_data non-finite means the free-running rollout diverged; check the")
-            print("  history channels feeding back into the net (--history-mode raw isolates it).")
+            print("  L_data non-finite means the rollout that feeds it diverged.")
+            if epoch == 1:
+                print("  This is epoch 1, so it happened BEFORE any optimiser step: the")
+                print("  untrained network's own output is what the history channels fed")
+                print("  back, and training cannot learn its way out of a NaN it starts in.")
+            if bool(getattr(args, "residual_output", True)):
+                print("  --residual-output is ON, and that is the first thing to turn off.")
+                print("  T(t) = level(t) + net(...) carries the level through an integrator")
+                print("  of gain exactly 1 with no leak, so any one-signed component of the")
+                print("  network output accumulates over the ~7000 steps without bound.")
+                print("  Measured on a synthetic bundle it aborts on every seed in EVERY")
+                print("  history configuration, raw included; --no-residual-output does not.")
+            print("  The hybrid rate channel is the usual amplifier -- see the A = ... line")
+            print("  at startup; A above ~100 means a one-step level jump comes back into")
+            print("  the net magnified that many times (--history-mode raw isolates it).")
             print("  L_phys non-finite alone points at the residual: --time-deriv bdf1 or --w-phys 0.")
             print("  Also worth trying: --grad-clip 1.0, a lower --lr, or a larger --subsample.")
             # Record the failed epoch so callers never see an empty history and

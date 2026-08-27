@@ -85,6 +85,11 @@ def make_train_args(cli, overrides: dict, seed: int) -> Namespace:
         subsample_mode=getattr(cli, "subsample_mode", "stride"),
         forcing_energy=getattr(cli, "forcing_energy", False),
         config_rates=getattr(cli, "config_rates", False),
+        # Stability knobs. Same defaults as train.py's argparse on purpose: a
+        # benchmark that never heard of them must still get the configuration
+        # that trains, not the one that aborts in epoch 1.
+        rollout_clamp=getattr(cli, "rollout_clamp", 50.0),
+        max_rate_amp=getattr(cli, "max_rate_amp", 0.0),
     )
     spec.update(overrides)
     return Namespace(**spec)
