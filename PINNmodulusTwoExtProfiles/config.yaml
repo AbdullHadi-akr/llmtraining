@@ -63,6 +63,11 @@ use_forcing: true          # NOTE: false also removes every driver rate channel
 epochs: 60
 lr: 2.0e-3
 weight_decay: 0.0
+# Optimiser steps per OP per epoch, all against that epoch's frozen rollout.
+# The rollout is the expensive part (one sequential pass over the trajectory),
+# so this raises the update count at roughly constant cost. Mirrors the base
+# project; 1 reproduces the old one-update-per-OP behaviour.
+inner_steps: 100
 gain_lr_mult: 25.0
 grad_clip: 1.0             # 0 disables clipping
 early_stopping_patience: 0 # 0 disables early stopping

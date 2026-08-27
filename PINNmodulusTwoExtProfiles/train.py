@@ -53,7 +53,7 @@ from data import (
     normalisation_report, profile_report, require_ops,
 )
 from device_utils import enable_tf32, resolve_device, seed_everything
-from model import RecurrentField, rollout, rollout_train
+from model import RecurrentField, rollout
 from op_metrics import format_op_metrics, op_metrics, rollout_phys
 from op_registry import (
     DEFAULT_TEST_OPS, DEFAULT_TRAIN_OPS, DEFAULT_VAL_OPS, TIER_IN,
@@ -165,6 +165,12 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--w-phys", type=float, default=d.get("w_phys", 0.1))
     p.add_argument("--w-bc", type=float, default=d.get("w_bc", 0.1))
     p.add_argument("--phys-norm", type=float, default=d.get("phys_norm", 0.0))
+    p.add_argument("--inner-steps", type=int, default=d.get("inner_steps", 100),
+                   help="optimiser steps per OP per epoch, all against that "
+                        "epoch's frozen rollout. The rollout is the expensive "
+                        "part, so this raises the update count at roughly "
+                        "constant cost; 1 reproduces the old one-step-per-OP "
+                        "behaviour")
     p.add_argument("--batch-data", type=int, default=d.get("batch_data", 2048))
     p.add_argument("--batch-phys", type=int, default=d.get("batch_phys", 256))
     p.add_argument("--batch-bc", type=int, default=d.get("batch_bc", 128))
@@ -325,6 +331,7 @@ def fit(args):
     # whichever OP preceded it in the walk; across a set spanning 0 C to 4 C
     # that is an OP-order-dependent weighting nobody asked for.
     phys_norm = float(getattr(args, "phys_norm", 0.0))
+    inner_steps = max(1, int(getattr(args, "inner_steps", 100)))
     phys_ema: dict = {}
     bc_ema: dict = {}
     order_rng = np.random.default_rng(int(args.seed))
@@ -347,84 +354,118 @@ def fit(args):
             t_end = max(t_end, 2)
             Tn_seq = op["Tn"]
 
-            # ---- data term: free-running on the model's OWN past -------------
-            buf = rollout_train(
-                model, op["xn"], op["static"], op["cfg"], op["forcing"],
-                op["Tn_ic"], op["tn"][:t_end], dtn,
-            )
-            L_data = torch.mean((buf[1:] - Tn_seq[1:t_end]) ** 2)
-
-            # ---- physics term (autograd space + FD time) ---------------------
-            own_hist = buf.detach()
-            pt = torch.randint(0, t_end, (args.batch_phys,), device=device)
-            pp = torch.randint(0, n_pts, (args.batch_phys,), device=device)
-            res = heat_residual(
-                model, op["xn"], op["static"], op["cfg"][pt], op["forcing"][pt],
-                op["Fo"], op["Qsrc"][pt, pp], own_hist, dtn, op["tn"][pt], pp,
-                phys_scale, bundle.dTdt_scale, bundle.aniso_scale,
-                bundle.Qsrc_scale, time_deriv=args.time_deriv,
-            )
-            L_phys = torch.mean(res ** 2)
-
-            # ---- boundary condition term (dT/dx = 0 at x=0) ------------------
-            pt_bc = torch.randint(0, t_end, (args.batch_bc,), device=device)
-            bc_res = boundary_condition_loss(
-                model, op["xn"], op["static"], op["cfg"][pt_bc],
-                op["forcing"][pt_bc], own_hist, dtn, op["tn"][pt_bc], bc_mask,
-                bundle.bc_scale,
-            )
-            L_bc = torch.mean(bc_res ** 2)
-
-            # Balance onto the data scale so the weights are fair 0-1 knobs.
-            # Only finite values update an EMA: one non-finite sample would
-            # otherwise pin it at nan for the rest of the run (0.9*nan == nan).
-            if phys_norm > 0.0:
-                phys_den = phys_norm
-            else:
-                cur = float(L_phys.detach())
-                if np.isfinite(cur):
-                    phys_ema[op_id] = (cur if op_id not in phys_ema
-                                       else 0.9 * phys_ema[op_id] + 0.1 * cur)
-                phys_den = phys_ema.get(op_id, 1.0)
-            L_phys_bal = L_phys / (phys_den + 1e-8)
-
-            bc_cur = float(L_bc.detach())
-            if np.isfinite(bc_cur):
-                bc_ema[op_id] = (bc_cur if op_id not in bc_ema
-                                 else 0.9 * bc_ema[op_id] + 0.1 * bc_cur)
-            L_bc_bal = L_bc / (bc_ema.get(op_id, 1.0) + 1e-8)
-
-            # Only add terms that are switched on: ``0.0 * nan`` is nan, so a
-            # zero weight does NOT neutralise a non-finite term -- it poisons
-            # the whole loss, the gradients and every later epoch.
-            loss = args.w_data * L_data
-            if args.w_phys != 0.0:
-                loss = loss + args.w_phys * L_phys_bal
-            if args.w_bc != 0.0:
-                loss = loss + args.w_bc * L_bc_bal
-
-            if not torch.isfinite(loss):
-                bad = [n for n, v in (("L_data", L_data), ("L_phys", L_phys),
-                                      ("L_bc", L_bc)) if not torch.isfinite(v)]
-                print(
-                    f"  [ABORT] epoch {epoch}, {op_id}: non-finite loss; "
-                    f"first offending term(s): {', '.join(bad) or 'weighted sum'}",
-                    flush=True,
+            # ---- one frozen rollout, then `inner_steps` updates against it ---
+            # The base project replaced its differentiable rollout with this:
+            # the history was detached between steps anyway, so ~7000 sequential
+            # steps bought exactly the gradient a minibatch of (t, point) pairs
+            # against a FROZEN trajectory gives -- for ONE optimiser step. The
+            # rollout is refreshed every epoch, so inner_steps trades update
+            # count against how stale the trajectory may get.
+            with torch.no_grad():
+                own_hist = rollout(
+                    model, op["xn"], op["static"], op["cfg"], op["forcing"],
+                    op["Tn_ic"], op["tn"][:t_end], dtn,
                 )
-                ep_data = float("nan")
+
+            op_data = op_phys = op_bc = 0.0
+            op_phys_bal = op_bc_bal = 0.0
+            aborted = False
+            for _ in range(inner_steps):
+                # ---- data term on a minibatch of (t, point) ------------------
+                # t starts at 1: row 0 is the imposed initial condition, never a
+                # prediction. With --holdout-tail the rollout already stops at
+                # split_t, so the late window is never fitted.
+                bt = torch.randint(1, t_end, (args.batch_data,), device=device)
+                bp = torch.randint(0, n_pts, (args.batch_data,), device=device)
+                tq = op["tn"][bt]
+                hist = model._history(own_hist, dtn, tq, bp)
+                pred = model.field(
+                    op["xn"][bp], op["static"][bp], op["cfg"][bt],
+                    op["forcing"][bt], hist, model.level(own_hist, dtn, tq),
+                )
+                L_data = torch.mean((pred - Tn_seq[bt, bp]) ** 2)
+
+                # ---- physics term (autograd space + FD time) ----------------
+                pt = torch.randint(0, t_end, (args.batch_phys,), device=device)
+                pp = torch.randint(0, n_pts, (args.batch_phys,), device=device)
+                res = heat_residual(
+                    model, op["xn"], op["static"], op["cfg"][pt], op["forcing"][pt],
+                    op["Fo"], op["Qsrc"][pt, pp], own_hist, dtn, op["tn"][pt], pp,
+                    phys_scale, time_deriv=args.time_deriv,
+                )
+                L_phys = torch.mean(res ** 2)
+
+                # ---- boundary condition term (dT/dx = 0 at x=0) -------------
+                pt_bc = torch.randint(0, t_end, (args.batch_bc,), device=device)
+                bc_res = boundary_condition_loss(
+                    model, op["xn"], op["static"], op["cfg"][pt_bc],
+                    op["forcing"][pt_bc], own_hist, dtn, op["tn"][pt_bc], bc_mask,
+                    bundle.bc_scale,
+                )
+                L_bc = torch.mean(bc_res ** 2)
+
+                # Balance onto the data scale so the weights are fair 0-1 knobs.
+                # Only finite values update an EMA: one non-finite sample would
+                # otherwise pin it at nan for the rest of the run (0.9*nan == nan).
+                if phys_norm > 0.0:
+                    phys_den = phys_norm
+                else:
+                    cur = float(L_phys.detach())
+                    if np.isfinite(cur):
+                        phys_ema[op_id] = (cur if op_id not in phys_ema
+                                           else 0.9 * phys_ema[op_id] + 0.1 * cur)
+                    phys_den = phys_ema.get(op_id, 1.0)
+                L_phys_bal = L_phys / (phys_den + 1e-8)
+
+                bc_cur = float(L_bc.detach())
+                if np.isfinite(bc_cur):
+                    bc_ema[op_id] = (bc_cur if op_id not in bc_ema
+                                     else 0.9 * bc_ema[op_id] + 0.1 * bc_cur)
+                L_bc_bal = L_bc / (bc_ema.get(op_id, 1.0) + 1e-8)
+
+                # Only add terms that are switched on: ``0.0 * nan`` is nan, so a
+                # zero weight does NOT neutralise a non-finite term -- it poisons
+                # the whole loss, the gradients and every later epoch.
+                loss = args.w_data * L_data
+                if args.w_phys != 0.0:
+                    loss = loss + args.w_phys * L_phys_bal
+                if args.w_bc != 0.0:
+                    loss = loss + args.w_bc * L_bc_bal
+
+                if not torch.isfinite(loss):
+                    bad = [n for n, v in (("L_data", L_data), ("L_phys", L_phys),
+                                          ("L_bc", L_bc)) if not torch.isfinite(v)]
+                    print(
+                        f"  [ABORT] epoch {epoch}, {op_id}: non-finite loss; "
+                        f"first offending term(s): {', '.join(bad) or 'weighted sum'}",
+                        flush=True,
+                    )
+                    ep_data = float("nan")
+                    aborted = True
+                    break
+
+                opt.zero_grad()
+                loss.backward()
+                grad_clip = float(getattr(args, "grad_clip", 0.0))
+                if grad_clip > 0.0:
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=grad_clip)
+                opt.step()
+                op_data += float(L_data.detach())
+                op_phys += float(L_phys.detach())
+                op_bc += float(L_bc.detach())
+                op_phys_bal += float(L_phys_bal.detach())
+                op_bc_bal += float(L_bc_bal.detach())
+
+            if aborted:
                 break
 
-            opt.zero_grad()
-            loss.backward()
-            grad_clip = float(getattr(args, "grad_clip", 0.0))
-            if grad_clip > 0.0:
-                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=grad_clip)
-            opt.step()
-            ep_data += float(L_data.detach())
-            ep_phys += float(L_phys.detach())
-            ep_bc += float(L_bc.detach())
-            ep_phys_bal += float(L_phys_bal.detach())
-            ep_bc_bal += float(L_bc_bal.detach())
+            # Per-OP means over the inner steps, so the epoch numbers stay
+            # comparable to the one-update-per-OP runs they are logged against.
+            ep_data += op_data / inner_steps
+            ep_phys += op_phys / inner_steps
+            ep_bc += op_bc / inner_steps
+            ep_phys_bal += op_phys_bal / inner_steps
+            ep_bc_bal += op_bc_bal / inner_steps
 
         n_ops = len(ops)
         ep_data /= n_ops

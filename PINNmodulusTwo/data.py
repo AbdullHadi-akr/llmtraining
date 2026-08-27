@@ -506,10 +506,11 @@ def load_ops(
     dTdt_scale = float(np.sqrt((np.concatenate(dTdt_pool) ** 2).mean())) + 1e-6
     aniso_scale = float(np.sqrt(np.mean(np.sum(Fo ** 2, axis=(1, 2))))) + 1e-6
     Qsrc_scale = float(np.sqrt((np.concatenate(Qsrc_pool) ** 2).mean())) + 1e-6
-    # BC scale: expected magnitude of temperature spatial gradient dT/dx
-    # Heuristic: typical temperature variation (T_sigma) over typical length (L_ref)
-    # Since T is z-scored, T_sigma~1 in normalized units, and x is in [0, L_axis/L_ref]
-    bc_scale = 1.0 / L_ref  # normalized temperature per normalized length
+    # BC scale: the RMS spatial gradient the training data actually carries, so a
+    # BC residual of 1 means "as steep as a typical gradient in this cell". The
+    # old 1/L_ref was a guess that never looked at a temperature; it stays as the
+    # fallback for the case where no x-neighbour pair can be formed.
+    bc_scale, bc_pairs = _measure_bc_scale(xn, ops, fallback=1.0 / L_ref)
     # phys_scale: the ONE scale ``physics.py`` divides the assembled residual by,
     # so L_phys lands at O(1) without altering the equation. Built from the two
     # genuine term magnitudes: dTdt_scale and Qsrc_scale are RMS values of terms

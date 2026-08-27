@@ -172,8 +172,12 @@ Rekurrenz selbst mitbringen.
 
 ## 3. Der Rollout — kein Teacher Forcing
 
-`rollout_train()` (`model.py:452`) und `rollout()` (`model.py:485`) sind
-identisch bis auf die Gradienten:
+`rollout()` (`model.py`) erzeugt die Trajektorie. Der gradientenführende
+Zwilling `rollout_train()` ist entfallen: er hat die History zwischen den
+Schritten ohnehin detached, der Gradient bei `t` verließ also nie die eigene
+Feldauswertung dieses Schritts — ~7000 sequentielle Schritte für **einen**
+Optimierer-Schritt. Trainiert wird jetzt gegen die eingefrorene Trajektorie
+(siehe Abschnitt 6):
 
 ```python
 buf[0] = Tn_ic                                              # die GEMESSENE IC
@@ -298,20 +302,37 @@ Temperaturen, weil ihre *Vorgeschichte* verschieden war.
 
 ```python
 für jede Epoche:
-  für jedes OP:                                  # <- der Optimierer schrittet PRO OP
-    buf      = rollout_train(...)                #    ~7000 sequentielle Schritte
-    L_data   = mean((buf[1:] − Tn[1:])²)
-    L_phys   = mean(heat_residual(...)²)         #    batch_phys Stichproben
-    L_bc     = mean(boundary_condition_loss(...)²)
+  für jedes OP:
+    with no_grad:
+      buf    = rollout(...)                      # <- ~7000 sequentielle Schritte,
+                                                 #    EINMAL pro OP und Epoche
+    für inner_steps Schritte:                    # <- hier schrittet der Optimierer
+      L_data = mean((field(minibatch) − Tn[…])²) #    batch_data (t, Punkt)-Paare
+      L_phys = mean(heat_residual(...)²)         #    batch_phys Stichproben
+      L_bc   = mean(boundary_condition_loss(...)²)
 
-    L_*_bal  = L_* / balance.divisor(...)        #    je Term durch eigene Größe
-    loss     = w_data·L_data_bal + w_phys·L_phys_bal + w_bc·L_bc_bal
+      L_*_bal  = L_* / balance.divisor(...)      #    je Term durch eigene Größe
+      loss     = w_data·L_data_bal + w_phys·L_phys_bal + w_bc·L_bc_bal
 
-    loss.backward();  clip_grad_norm_;  opt.step()
+      loss.backward();  clip_grad_norm_;  opt.step()
 ```
 
-Bei fünf OPs sind das **fünf Optimierer-Schritte je Epoche**, und das zweite OP
-sieht bereits aktualisierte Gewichte.
+Alle `inner_steps` Updates laufen gegen dieselbe eingefrorene Trajektorie. Das
+ist genau der Gradient, den der alte differenzierbare Rollout auch geliefert hat
+— nur zahlt eine Trajektorie jetzt `inner_steps` Updates statt einem. Bei fünf
+OPs und `inner_steps: 100` sind das **500 Optimierer-Schritte je Epoche** statt
+fünf; vorher war ein 60-Epochen-Lauf nach 300 Adam-Updates fertig, was für ein
+70k-Parameter-MLP viel zu wenig ist.
+
+Der Preis des Einfrierens: nach einigen Updates ist der Puffer nicht mehr ganz
+die Trajektorie, die die aktuellen Gewichte erzeugen würden. Er wird jede Epoche
+erneuert — `inner_steps` tauscht also Update-Anzahl gegen Aktualität der
+Trajektorie. Hunderte sind richtig, Zehntausende nicht.
+
+Das zweite OP sieht dabei bereits die Gewichte, die das erste aktualisiert hat —
+die OP-Reihenfolge ist hier die Listenreihenfolge aus `ops` und wird nicht
+gemischt. (Die Profil-Erweiterung mischt sie, weil ihre OPs über 0 C bis 4 C
+weit heterogener sind; siehe `PINNmodulusTwoExtProfiles/README.md`.)
 
 ### 6.1 Warum überhaupt balanciert wird
 
