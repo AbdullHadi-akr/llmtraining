@@ -136,6 +136,22 @@ def parse_args() -> argparse.Namespace:
                         "from --driver-rate-lags, which are exogenous")
     p.add_argument("--delta-grid", type=float, default=d.get("delta_grid", 0.2),
                    help="anchor lag of the hybrid temperature history in SECONDS")
+    p.add_argument("--residual-output", action=argparse.BooleanOptionalAction,
+                   default=d.get("residual_output", False),
+                   help="OFF by default, and it should stay off. On, field() "
+                        "returns level(t) + net(...) and the level is carried "
+                        "through an integrator of gain exactly 1 with no leak, "
+                        "so any one-signed component of the network output "
+                        "accumulates over the trajectory without bound. Measured "
+                        "in the base project it aborted on every seed in every "
+                        "history configuration, raw included. See "
+                        "PINNmodulusTwo/ARCHITECTURE.md 3.1")
+    p.add_argument("--rollout-clamp", type=float,
+                   default=d.get("rollout_clamp", 50.0),
+                   help="saturate |Tn| in the rollout buffer; 0 disables. Keeps "
+                        "a runaway rollout finite so the loss stays a number the "
+                        "optimiser can move, instead of an inf that makes every "
+                        "downstream term NaN. Load-bearing once w_phys > 0")
     p.add_argument("--max-rate-amp", type=float, default=d.get("max_rate_amp", 0.0),
                    help="cap on 1/(lag_n * rate_scale), the factor by which the "
                         "hybrid history magnifies a one-step LEVEL jump. 0 = off "
@@ -293,6 +309,10 @@ def fit(args):
         delta_seconds=1.0, dtn=dtn, t_span_ref=bundle.T_span_ref,
         rate_scale=rate_scale, delta_grid=delta_grid_n,
         use_autograd_time=(args.time_deriv == "autograd"),
+        # Was never passed here, so this extension silently ran with the model's
+        # old default (True) and had no way to switch it off -- the same
+        # integrator that aborts every run in the base project.
+        residual_output=bool(getattr(args, "residual_output", False)),
     ).to(device)
 
     # src_gain / diff_gain correct the scale gap between the source and the
@@ -365,6 +385,7 @@ def fit(args):
                 own_hist = rollout(
                     model, op["xn"], op["static"], op["cfg"], op["forcing"],
                     op["Tn_ic"], op["tn"][:t_end], dtn,
+                    clamp=float(getattr(args, "rollout_clamp", 50.0) or 0.0),
                 )
 
             op_data = op_phys = op_bc = 0.0

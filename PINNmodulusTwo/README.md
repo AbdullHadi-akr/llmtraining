@@ -1,5 +1,11 @@
 # PINNmodulusTwo — Approach 2 (Modulus-as-a-tool + own recurrence)
 
+> **Update 27.08.2026 — der erste durchlaufende Test.** Bis dahin brach
+> jeder Lauf in Epoche 1 mit `L_data = nan` ab.
+> [`README_ERSTER_TEST.md`](README_ERSTER_TEST.md) beschreibt Modell,
+> Architektur, Training, Daten, Loss und Ergebnisse vollständig, dazu die
+> Ursache des Abbruchs und den Vergleich `hybrid` gegen `raw`.
+
 Implementation of **method #2** from the Notion page *"Battery Model with NVIDIA
 MODULUS"*: use Modulus as much as practical, but bring our **own recurrence** in
 PyTorch. Roughly a 50:50 Modulus / PyTorch split. **Temperature only** — `bc_V`
