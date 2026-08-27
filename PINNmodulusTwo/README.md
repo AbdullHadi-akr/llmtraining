@@ -115,6 +115,45 @@ Measure the new per-epoch time with step 6.3 of `README_GPU_SERVER.md` before
 starting a long sweep — every runtime estimate in chapters 7 and 8 hangs on that
 one number, and the inner loop shifts it.
 
+## Loss balancing, and what it does to older numbers
+
+Each loss term is divided by a running estimate of its own magnitude before its
+weight is applied, so `w_data:w_phys:w_bc` is a ratio between **terms** and not
+between their accidental units. `--loss-balance` picks which terms:
+
+| mode | what is divided | consequence |
+|---|---|---|
+| `ema` *(default)* | all three, `L_data` included | the ratio means the same in epoch 1 and epoch 60 |
+| `legacy` | only `L_phys` and `L_bc`; `L_data` stays raw | `L_data` falls by orders of magnitude during a run, so the mixture drifts towards physics and the best `w_phys` becomes a function of `--epochs` |
+| `fixed` | all three, divisors frozen after `--balance-warmup` epochs | |
+
+**`ema` is the default, and it changes what a weight means.** Any `w_phys` /
+`w_bc` result produced under the old scheme was measured with `L_data` raw. Those
+numbers do not carry over — not because either scheme is wrong, but because the
+quantity the weight multiplies is a different one. Before comparing against an
+older sweep, either re-run it or reproduce the old scheme explicitly:
+
+```bash
+python3 PINNmodulusTwo/train.py --loss-balance legacy
+```
+
+Two things that are *not* restored by that flag, because they were removed for a
+reason rather than switched off:
+
+- **The EMA horizon** is now corrected for `len(ops)` × `--inner-steps`. It used
+  to be a per-step decay, so its real horizon in *epochs* silently depended on
+  how many OPs were trained. `--loss-balance legacy` keeps the corrected horizon;
+  it restores the scheme, not the bug.
+- **The per-term residual normalisation** is gone from `heat_residual` in every
+  mode. `--residual-norm legacy` restores only the old *overall* divisor
+  `sqrt(phys_scale)`; it does not bring back dividing `dTdt`, `aniso` and `Qsrc`
+  by three different numbers, which changed the equation rather than scaling it
+  (see `README_MODEL_CRITIQUE.md` §1.3).
+
+`smallBench.py` and both benchmark scripts pass all of these through to `fit()`,
+and `config.yaml` holds the defaults — so a bare run, a smoke test and a
+benchmark all balance the same way.
+
 ## Run
 
 ```bash

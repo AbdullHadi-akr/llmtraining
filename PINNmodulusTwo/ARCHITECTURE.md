@@ -340,6 +340,12 @@ Die drei Terme leben auf völlig verschiedenen Skalen; ein rohes Gewicht ist dar
 kein Mischungsverhältnis. Jeder Term wird durch eine laufende Schätzung seiner
 eigenen Größe geteilt — **welche** Terme, entscheidet `--loss-balance`:
 
+> Der Default `ema` teilt auch `L_data`. Damit bedeutet ein `w_phys` etwas
+> anderes als unter dem alten Schema, in dem `L_data` roh blieb — ältere
+> Gewichts-Ergebnisse sind nicht direkt vergleichbar. Was das genau heißt und
+> wie man das alte Schema reproduziert, steht in
+> [README.md](README.md#loss-balancing-and-what-it-does-to-older-numbers).
+
 ```mermaid
 flowchart LR
     subgraph EMA["loss_balance = ema — Default"]

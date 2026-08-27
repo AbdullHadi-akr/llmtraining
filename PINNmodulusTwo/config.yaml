@@ -78,6 +78,9 @@ w_bc: 0.1
 #           orders of magnitude during a run, so the mixture drifts towards
 #           physics and the best w_phys becomes a function of `epochs`.
 #   fixed   divisors frozen after `balance_warmup` epochs.
+# `ema` divides L_data too, so a w_phys measured under the old scheme (L_data
+# raw) does not carry over. README.md has the comparison rules and the flags
+# that reproduce the old scheme.
 loss_balance: ema
 ema_decay: 0.9             # per EPOCH; corrected for len(ops) x inner_steps
 balance_warmup: 1          # only used by loss_balance: fixed
