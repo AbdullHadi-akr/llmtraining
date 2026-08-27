@@ -40,7 +40,7 @@ import matplotlib.pyplot as plt
 THIS_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(THIS_DIR))
 
-from data import build_op, load_ops
+from data import build_op
 from device_utils import resolve_device
 from model import rollout
 from train import fit
@@ -92,6 +92,23 @@ def parse_args() -> argparse.Namespace:
                    default=d.get("learn_gains", False))
     p.add_argument("--use-static", action="store_true", default=d.get("use_static", True))
     p.add_argument("--use-forcing", action="store_true", default=d.get("use_forcing", True))
+    p.add_argument("--loss-balance", choices=["ema", "legacy", "fixed"],
+                   default=d.get("loss_balance", "ema"))
+    p.add_argument("--ema-decay", type=float, default=d.get("ema_decay", 0.9))
+    p.add_argument("--balance-warmup", type=int, default=d.get("balance_warmup", 1))
+    p.add_argument("--data-floor", type=float, default=d.get("data_floor", 1e-8))
+    p.add_argument("--phys-norm", type=float, default=d.get("phys_norm", 0.0))
+    p.add_argument("--bc-norm", type=float, default=d.get("bc_norm", 0.0))
+    p.add_argument("--residual-norm", choices=["rms", "legacy"],
+                   default=d.get("residual_norm", "rms"))
+    p.add_argument("--zero-weight-terms", choices=["skip", "compute"],
+                   default=d.get("zero_weight_terms", "skip"))
+    p.add_argument("--subsample-mode", choices=["stride", "mean"],
+                   default=d.get("subsample_mode", "stride"))
+    p.add_argument("--forcing-energy", action="store_true",
+                   default=d.get("forcing_energy", False))
+    p.add_argument("--config-rates", action="store_true",
+                   default=d.get("config_rates", False))
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--device", default=d.get("device", "auto"),
                    help="auto | cpu | cuda | cuda:N (auto = cuda when available)")
@@ -132,7 +149,21 @@ def _make_args(cli, w_phys: float) -> Args:
     args.weight_decay = 0.0
     args.grad_clip = cli.grad_clip
     args.early_stopping_patience = 0
-    args.phys_norm = 0.0
+    # Same trap as delta_grid above: fit() reads all of these via getattr, so a
+    # field missing here does not raise -- the smoke test would quietly run a
+    # different balancing than config.yaml asks for, which is exactly what this
+    # file exists to rule out.
+    args.phys_norm = cli.phys_norm
+    args.bc_norm = cli.bc_norm
+    args.loss_balance = cli.loss_balance
+    args.ema_decay = cli.ema_decay
+    args.balance_warmup = cli.balance_warmup
+    args.data_floor = cli.data_floor
+    args.residual_norm = cli.residual_norm
+    args.zero_weight_terms = cli.zero_weight_terms
+    args.subsample_mode = cli.subsample_mode
+    args.forcing_energy = cli.forcing_energy
+    args.config_rates = cli.config_rates
     args.use_static = cli.use_static
     args.use_forcing = cli.use_forcing
     args.seed = cli.seed
@@ -190,10 +221,19 @@ def main():
         model, bundle, ops_packed, dtn, hist = fit(args)
         model.eval()
 
+        # A term whose weight is 0 is not computed at all (train.py
+        # --zero-weight-terms), and is recorded as NaN on purpose. That is an
+        # absent measurement, not a failed one: checking it would fail the very
+        # w_phys=0 reference point this smoke test needs in order to show what
+        # the physics term is worth.
+        phys_on = float(w_phys) != 0.0
+        bc_on = float(cli.w_bc) != 0.0
+
         # Check 1: No inf/NaN in final losses
         L_data_final = hist["L_data"][-1] if hist["L_data"] else float("nan")
         L_phys_final = hist["L_phys"][-1] if hist["L_phys"] else float("nan")
-        stable = np.isfinite(L_data_final) and np.isfinite(L_phys_final)
+        stable = np.isfinite(L_data_final) and (not phys_on
+                                                or np.isfinite(L_phys_final))
 
         # Check 2: Loss decreased (convergence)
         if len(hist["L_data"]) >= 2:
@@ -202,10 +242,11 @@ def main():
         else:
             converged = False
 
-        # Check 3: Balanced losses are ~O(1)
+        # Check 3: Balanced losses are ~O(1) -- only where a term is switched on
         L_phys_bal = hist.get("L_phys_bal", [1.0])[-1]
         L_bc_bal = hist.get("L_bc_bal", [1.0])[-1]
-        balanced = 0.01 < L_phys_bal < 100 and 0.01 < L_bc_bal < 100
+        balanced = ((not phys_on or 0.01 < L_phys_bal < 100)
+                    and (not bc_on or 0.01 < L_bc_bal < 100))
 
         # Check 4: Test MAE is reasonable
         held = build_op(cli.test_op, bundle, subsample_time=cli.subsample)
@@ -239,7 +280,9 @@ def main():
 
         print(f"\n  Results for w_phys={w_phys}:")
         print(f"    L_data(final):  {L_data_final:.4e}  {'✓' if stable else '✗ (inf/NaN)'}")
-        print(f"    L_phys_bal:     {L_phys_bal:.4e}  {'✓' if balanced else '✗ (not ~O(1))'}")
+        phys_note = ("(w_phys=0: term not computed)" if not phys_on
+                     else "✓" if balanced else "✗ (not ~O(1))")
+        print(f"    L_phys_bal:     {L_phys_bal:.4e}  {phys_note}")
         print(f"    L_bc_bal:       {L_bc_bal:.4e}")
         print(f"    Train MAE:      {train_mae:.2f}°C")
         print(f"    Test MAE:       {test_mae:.2f}°C  {'✓' if mae_ok else '✗ (>20°C)'}")
@@ -261,7 +304,13 @@ def main():
 
     if all_passed:
         print("\n✓ ALL CHECKS PASSED - Ready for full benchmark!")
-        print("  Run: python3 PINNmodulusTwo/benchmark_wphys_wbc.py --extended-grid")
+        # NOT the 10x10 grid: that is 100 trainings (~6-8 days) and it would
+        # sweep weights before anything has established what a weight means
+        # here. The balancing benchmark is ~4 h and settles that first.
+        print("  Next: python3 PINNmodulusTwo/benchmark_balance.py --part 1 "
+              "--epochs 20 --device cuda")
+        print("        (settles the loss balancing; the weight probe in "
+              "benchmark_wphys_wbc.py comes after it)")
     else:
         print("\n✗ SOME CHECKS FAILED - Review issues above before full benchmark")
 

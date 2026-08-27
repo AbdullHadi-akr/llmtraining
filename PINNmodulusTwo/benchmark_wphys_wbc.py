@@ -376,6 +376,18 @@ def _probe_signature(cli) -> dict:
         "batch_phys": int(cli.batch_phys), "batch_bc": int(cli.batch_bc),
         "w_phys": [float(v) for v in cli.w_phys],
         "w_bc": [float(v) for v in cli.w_bc],
+        # The balancing decides what a weight MEANS, so two arms balanced
+        # differently are not one experiment. Without these keys part 2 could be
+        # run with another --loss-balance and silently merge into part 1.
+        "loss_balance": str(cli.loss_balance),
+        "ema_decay": float(cli.ema_decay),
+        "balance_warmup": int(cli.balance_warmup),
+        "data_floor": float(cli.data_floor),
+        "bc_norm": float(cli.bc_norm),
+        "residual_norm": str(cli.residual_norm),
+        "subsample_mode": str(cli.subsample_mode),
+        "forcing_energy": bool(cli.forcing_energy),
+        "config_rates": bool(cli.config_rates),
     }
 
 
@@ -566,6 +578,20 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--phys-norm", type=float, default=0.0,
                    help="L_phys divisor: 0=adaptive EMA, >0=fixed divisor")
     # Checkpoints
+    # Loss balancing / preprocessing. These change what w_phys and w_bc MEAN,
+    # so a sweep is only comparable with another one that used the same values.
+    # benchmark_balance.py is what decides them.
+    p.add_argument("--loss-balance", choices=["ema", "legacy", "fixed"],
+                   default=d.get("loss_balance", "ema"), help="see train.py --loss-balance")
+    p.add_argument("--ema-decay", type=float, default=d.get("ema_decay", 0.9))
+    p.add_argument("--balance-warmup", type=int, default=d.get("balance_warmup", 1))
+    p.add_argument("--data-floor", type=float, default=d.get("data_floor", 1e-08))
+    p.add_argument("--bc-norm", type=float, default=d.get("bc_norm", 0.0))
+    p.add_argument("--residual-norm", choices=["rms", "legacy"], default=d.get("residual_norm", "rms"))
+    p.add_argument("--zero-weight-terms", choices=["skip", "compute"], default=d.get("zero_weight_terms", "skip"))
+    p.add_argument("--subsample-mode", choices=["stride", "mean"], default=d.get("subsample_mode", "stride"))
+    p.add_argument("--forcing-energy", action="store_true", default=d.get("forcing_energy", False))
+    p.add_argument("--config-rates", action="store_true", default=d.get("config_rates", False))
     p.add_argument("--save-models", dest="save_models", action="store_true", default=True)
     p.add_argument("--no-save-models", dest="save_models", action="store_false")
     p.add_argument("--save-best-only", action="store_true",
@@ -638,9 +664,15 @@ def build_header(cli, n_points: int, part: str | None = None) -> list:
         f"batch_bc={cli.batch_bc}",
         f"  runs = {n_points} points x {len(cli.seeds)} "
         f"seed(s) = {n_points*len(cli.seeds)} trainings",
+        "LOSS BALANCING (decides what a weight MEANS - see benchmark_balance.py):",
+        f"  loss_balance={cli.loss_balance}  ema_decay={cli.ema_decay}  "
+        f"residual_norm={cli.residual_norm}",
+        f"  phys_norm={cli.phys_norm}  bc_norm={cli.bc_norm}  "
+        f"data_floor={cli.data_floor}  balance_warmup={cli.balance_warmup}",
+        f"  forcing_energy={cli.forcing_energy}  config_rates={cli.config_rates}  "
+        f"subsample_mode={cli.subsample_mode}",
         "LOSS WEIGHTS (SWEPT):",
-        f"  w_data=1.0 (fixed)   phys_norm={cli.phys_norm} "
-        f"({'adaptive EMA' if not cli.phys_norm else 'fixed divisor'})",
+        "  w_data=1.0 (fixed)",
         f"  w_phys sweep = {cli.w_phys}",
         f"  w_bc sweep = {cli.w_bc}",
         (f"Probe: w_phys swept at w_bc={PROBE_BASE_W_BC}, "

@@ -141,6 +141,21 @@ class NormBundle:
     rho: np.ndarray
     Cp: np.ndarray
     train_frac: float
+    # ---- profile bookkeeping and optional extra features ----------------------
+    # config_profile: channel varies along time WITHIN an OP (a real profile).
+    # config_label:   channel is constant within each OP but differs between them
+    #                 -- a per-OP identifier the network can memorise.
+    bc_pairs: int = 0
+    config_profile: np.ndarray | None = None
+    config_label: np.ndarray | None = None
+    config_rate_cols: np.ndarray | None = None
+    config_rate_sigma: np.ndarray | None = None
+    rc_ref: float = 1.0
+    energy_mu: float = 0.0
+    energy_sigma: float = 1.0
+    forcing_energy: bool = False
+    config_rates: bool = False
+    subsample_mode: str = "stride"
 
 
 def _config_vector(config: Dict[str, float]) -> np.ndarray:
@@ -172,13 +187,42 @@ def _std_guard(sigma: np.ndarray, eps: float = 1e-8) -> np.ndarray:
     return np.maximum(sigma, eps)
 
 
-def _read_raw(op_id: str, subsample_time: int) -> dict:
+def _decimate(a: np.ndarray, step: int, mode: str) -> np.ndarray:
+    """Reduce the time axis by ``step``.
+
+    ``stride`` keeps every step-th sample -- fast, and what every result so far
+    was produced with. It is also plain decimation without a low-pass, so any
+    content above the new Nyquist frequency folds back into the retained signal.
+    At ``--subsample 2`` (0.1 s -> 0.2 s) that is negligible; at the smoke test's
+    ``--subsample 40`` (-> 4 s) it is not.
+
+    ``mean`` averages each block of ``step`` samples instead, which is a crude
+    but honest anti-alias filter. Not the default: it changes the data itself,
+    so switching it on invalidates comparisons with earlier runs.
+    """
+    if step <= 1:
+        return a
+    if mode == "stride":
+        return a[::step]
+    if mode != "mean":
+        raise ValueError(f"unknown subsample mode {mode!r} (expected stride|mean)")
+    n = (a.shape[0] // step) * step
+    if n == 0:                      # fewer samples than one block -> single mean
+        return a.mean(axis=0, keepdims=True)
+    head = a[:n].reshape(a.shape[0] // step, step, *a.shape[1:]).mean(axis=1)
+    if a.shape[0] > n:              # ragged tail keeps its own (shorter) mean
+        head = np.concatenate([head, a[n:].mean(axis=0, keepdims=True)], axis=0)
+    return head
+
+
+def _read_raw(op_id: str, subsample_time: int, subsample_mode: str = "stride") -> dict:
     npz = np.load(DATA_CACHE / f"{op_id}.npz", allow_pickle=True)
     names = json.loads(str(npz["sim_config_scalar_names_json"].item()))
     config = dict(zip(names, [float(v) for v in npz["sim_config_scalar"]]))
-    t = np.asarray(npz["t_fast"], dtype=np.float64)[::subsample_time]
-    T = np.asarray(npz["T"], dtype=np.float64)[::subsample_time]
-    jr1_w = np.asarray(npz["q_source"], dtype=np.float64)[::subsample_time, 0]
+    t = _decimate(np.asarray(npz["t_fast"], dtype=np.float64), subsample_time, subsample_mode)
+    T = _decimate(np.asarray(npz["T"], dtype=np.float64), subsample_time, subsample_mode)
+    jr1_w = _decimate(np.asarray(npz["q_source"], dtype=np.float64)[:, 0],
+                      subsample_time, subsample_mode)
     q_dot = jr1_w / (V_JR1 * N_JR1_POINTS)  # W/m^3, Gleichverteilung
     cfg_ts = _config_timeseries(npz, t, config)
     return dict(op_id=op_id, t=t, T=T, q_dot=q_dot, cfg_ts=cfg_ts,
@@ -226,9 +270,89 @@ def _static_features(rho, Cp, lam, region, xn):
     return np.stack([alpha_z, jr1, x_z], axis=1).astype(np.float32)
 
 
+def _measure_bc_scale(xn, ops, fallback: float, max_times: int = 200):
+    """RMS of the spatial temperature gradient dTn/dxn, measured on train data.
+
+    The BC drives dT/dx to zero at x=0, so "how large is a gradient here" cannot
+    be read off the boundary itself -- it is supposed to vanish there. What makes
+    a useful yardstick is the gradient the data actually carries elsewhere: a BC
+    residual of 1 then means "as steep as a typical gradient in this cell".
+
+    The previous ``1 / L_ref`` was a pure guess that did not involve the
+    temperature at all, yet it set the scale of ``L_bc`` and with it the range of
+    ``w_bc`` that means anything.
+
+    Returns ``(scale, n_pairs)``; ``n_pairs == 0`` means the grid was not
+    structured enough to find x-neighbours and ``fallback`` is returned.
+    """
+    columns: Dict[tuple, List[int]] = {}
+    for i, (y, z) in enumerate(np.round(xn[:, 1:], 9)):
+        columns.setdefault((float(y), float(z)), []).append(i)
+
+    lo, hi, dx = [], [], []
+    for idxs in columns.values():
+        if len(idxs) < 2:
+            continue
+        idxs = sorted(idxs, key=lambda i: xn[i, 0])
+        for a, b in zip(idxs[:-1], idxs[1:]):
+            step = float(xn[b, 0] - xn[a, 0])
+            if step > 1e-12:
+                lo.append(a)
+                hi.append(b)
+                dx.append(step)
+    if len(dx) < 8:
+        return float(fallback), 0
+
+    lo_i, hi_i, dx_a = np.asarray(lo), np.asarray(hi), np.asarray(dx)
+    pooled = []
+    for op in ops:
+        n = max(1, int(op.split_t))
+        stride = max(1, n // max_times)
+        Tn = op.Tn[:n:stride].astype(np.float64)
+        pooled.append(((Tn[:, hi_i] - Tn[:, lo_i]) / dx_a[None, :]).ravel())
+    g = np.concatenate(pooled)
+    return float(np.sqrt((g ** 2).mean())) + 1e-12, len(dx_a)
+
+
+def _energy_raw(q_dot: np.ndarray, t: np.ndarray, rc_ref: float,
+                T_sigma: float) -> np.ndarray:
+    """Cumulative injected heat, expressed as a temperature rise in sigmas.
+
+    ``q_dot`` is a volumetric power [W/m^3]; its time integral divided by
+    ``rho*Cp`` is the adiabatic temperature rise the JR1 has seen so far, and
+    dividing by ``T_sigma`` puts it in the same units the network predicts.
+
+    Why this is worth a channel of its own: a thermal system INTEGRATES power.
+    The instantaneous ``q_dot`` the network currently gets says how hard it is
+    being heated right now, never how much heat is already in the cell. With
+    time-varying config profiles two moments can share a ``q_dot`` and differ by
+    a large amount of accumulated energy -- the same argument that motivates the
+    temperature recurrence, applied to the forcing.
+    """
+    if q_dot.shape[0] < 2:
+        return np.zeros_like(q_dot)
+    increments = 0.5 * (q_dot[1:] + q_dot[:-1]) * np.diff(t)
+    E = np.concatenate([[0.0], np.cumsum(increments)])
+    return E / (rc_ref * T_sigma + 1e-30)
+
+
+def _config_rate_raw(cfg_norm: np.ndarray, tn: np.ndarray) -> np.ndarray:
+    """d(config)/d(tn) for an already normalised config block.
+
+    Only meaningful for channels that are genuinely profiles; constant channels
+    differentiate to zero and are dropped by the caller.
+    """
+    if cfg_norm.shape[0] < 2:
+        return np.zeros_like(cfg_norm)
+    return np.gradient(cfg_norm, tn, axis=0)
+
+
 def _assemble_op(r, split_t, *, T_mu, T_sigma, T_span_ref, xn, Fo, q_mask, region,
                  rho, Cp, config_mu, config_sigma, config_active,
-                 static_feat, q_mu, q_sigma) -> OPData:
+                 static_feat, q_mu, q_sigma,
+                 rc_ref=1.0, energy_mu=0.0, energy_sigma=1.0, forcing_energy=False,
+                 config_rate_cols=None, config_rate_sigma=None,
+                 config_rates=False) -> OPData:
     t = r["t"]
     n_t = t.shape[0]
     tn = (t - t[0]) / (T_span_ref + 1e-12)
@@ -236,7 +360,15 @@ def _assemble_op(r, split_t, *, T_mu, T_sigma, T_span_ref, xn, Fo, q_mask, regio
     Tn = (r["T"] - T_mu) / T_sigma
     Tn_ic = Tn[0].copy()
     cfg_feat = _normalise_config(r["cfg_ts"], config_mu, config_sigma, config_active)
+    if config_rates and config_rate_cols is not None and len(config_rate_cols):
+        rates = _config_rate_raw(cfg_feat.astype(np.float64), tn)[:, config_rate_cols]
+        cfg_feat = np.concatenate(
+            [cfg_feat, (rates / config_rate_sigma[None, :]).astype(np.float32)], axis=1)
     forcing_feat = ((r["q_dot"] - q_mu) / q_sigma).astype(np.float32).reshape(-1, 1)
+    if forcing_energy:
+        E = _energy_raw(r["q_dot"], t, rc_ref, T_sigma)
+        E_n = ((E - energy_mu) / energy_sigma).astype(np.float32).reshape(-1, 1)
+        forcing_feat = np.concatenate([forcing_feat, E_n], axis=1)
     Qsrc = (
         r["q_dot"][:, None] * q_mask[None, :] * T_span_ref
         / (rho[None, :] * Cp[None, :] * T_sigma)
@@ -257,6 +389,9 @@ def load_ops(
     op_ids: List[str] | None = None,
     subsample_time: int = 40,
     train_frac: float = 0.8,
+    subsample_mode: str = "stride",
+    forcing_energy: bool = False,
+    config_rates: bool = False,
 ) -> NormBundle:
     """Load the requested OPs and build a shared non-dimensional dataset.
 
@@ -264,11 +399,18 @@ def load_ops(
         op_ids: e.g. ``["OP01", "OP02", "OP03"]`` (default).
         subsample_time: keep every N-th raw timestep (raw dt = 0.1 s).
         train_frac: fraction of each OP's timeline used for train stats/metrics.
+        subsample_mode: ``stride`` (plain decimation, the historical behaviour)
+            or ``mean`` (block average, an anti-alias filter). See ``_decimate``.
+        forcing_energy: append the cumulative injected heat as a second forcing
+            channel. Off by default -- it widens the network input, so it has to
+            be measured against the current features rather than assumed better.
+        config_rates: append d(config)/dt for the config channels that are
+            genuine time profiles. Also off by default, same reason.
     """
     if op_ids is None:
         op_ids = ["OP01", "OP02", "OP03"]
 
-    raw = [_read_raw(op_id, subsample_time) for op_id in op_ids]
+    raw = [_read_raw(op_id, subsample_time, subsample_mode) for op_id in op_ids]
 
     # ---- shared geometry (grid identical across OPs) --------------------------
     xyz = raw[0]["xyz"]
@@ -305,11 +447,50 @@ def load_ops(
     rho, Cp, lam, Fo, region, q_mask = _grid_arrays(raw[0]["layer"], xyz, T_span_ref, L_ref)
     static_feat = _static_features(rho, Cp, lam, region, xn)
 
+    # ---- profile detection ----------------------------------------------------
+    # A config channel is a PROFILE when it varies along time WITHIN an OP, and a
+    # per-OP LABEL when it is constant there but differs between OPs. The two are
+    # indistinguishable in ``config_active`` (which only sees pooled variance),
+    # yet they behave completely differently: a label channel is a constant the
+    # network can memorise per OP, and with five training OPs a handful of them
+    # is enough to identify which OP a sample came from. That memorised offset
+    # cannot transfer to OP06/OP07 -- it is train-only capacity.
+    within = np.zeros(len(CONFIG_ORDER))
+    for r, split_t in zip(raw, splits):
+        seg = r["cfg_ts"][:max(1, split_t)]
+        within = np.maximum(within, np.nan_to_num(np.nanstd(seg, axis=0), nan=0.0))
+    config_profile = (within / (np.abs(config_mu) + 1e-9)) > 1e-6
+    config_label = config_active & ~config_profile
+
+    # ---- cumulative-heat + config-rate normalisation --------------------------
+    jr1 = q_mask > 0.5
+    rc_ref = float((rho[jr1] * Cp[jr1]).mean()) if jr1.any() else float((rho * Cp).mean())
+    rate_cols = np.where(config_profile & config_active)[0]
+    energy_pool, rate_pool = [], []
+    for r, split_t in zip(raw, splits):
+        n = max(1, split_t)
+        tn_r = (r["t"] - r["t"][0]) / (T_span_ref + 1e-12)
+        energy_pool.append(_energy_raw(r["q_dot"], r["t"], rc_ref, T_sigma)[:n])
+        if len(rate_cols):
+            cfg_n = _normalise_config(r["cfg_ts"], config_mu, config_sigma, config_active)
+            rate_pool.append(_config_rate_raw(cfg_n.astype(np.float64), tn_r)[:n, rate_cols])
+    E_all = np.concatenate(energy_pool)
+    energy_mu = float(E_all.mean())
+    energy_sigma = float(_std_guard(np.array(E_all.std())))
+    if rate_pool:
+        rate_stack = np.concatenate(rate_pool, axis=0)
+        config_rate_sigma = np.sqrt((rate_stack ** 2).mean(axis=0)) + 1e-9
+    else:
+        config_rate_sigma = np.zeros(0)
+
     consts = dict(
         T_mu=T_mu, T_sigma=T_sigma, T_span_ref=T_span_ref, xn=xn, Fo=Fo,
         q_mask=q_mask, region=region, rho=rho, Cp=Cp, config_mu=config_mu,
         config_sigma=config_sigma, config_active=config_active,
         static_feat=static_feat, q_mu=q_mu, q_sigma=q_sigma,
+        rc_ref=rc_ref, energy_mu=energy_mu, energy_sigma=energy_sigma,
+        forcing_energy=forcing_energy, config_rate_cols=rate_cols,
+        config_rate_sigma=config_rate_sigma, config_rates=config_rates,
     )
 
     ops, dTdt_pool, Qsrc_pool = [], [], []
@@ -344,13 +525,19 @@ def load_ops(
         ops=ops, T_mu=T_mu, T_sigma=T_sigma, T_span_ref=T_span_ref, L_ref=L_ref,
         xyz_min=xyz_min.astype(np.float64), config_mu=config_mu,
         config_sigma=config_sigma, config_active=config_active,
-        n_config=len(CONFIG_ORDER), phys_scale=phys_scale,
+        n_config=len(CONFIG_ORDER) + len(rate_cols) * int(bool(config_rates)),
+        phys_scale=phys_scale,
         dTdt_scale=dTdt_scale, aniso_scale=aniso_scale, Qsrc_scale=Qsrc_scale,
-        bc_scale=bc_scale,
+        bc_scale=bc_scale, bc_pairs=bc_pairs,
         static_feat=static_feat, n_static=static_feat.shape[1],
-        q_mu=q_mu, q_sigma=q_sigma, n_forcing=1,
+        q_mu=q_mu, q_sigma=q_sigma, n_forcing=1 + int(bool(forcing_energy)),
         xn=xn, Fo=Fo, q_mask=q_mask, region=region, rho=rho, Cp=Cp,
         train_frac=train_frac,
+        config_profile=config_profile, config_label=config_label,
+        config_rate_cols=rate_cols, config_rate_sigma=config_rate_sigma,
+        rc_ref=rc_ref, energy_mu=energy_mu, energy_sigma=energy_sigma,
+        forcing_energy=bool(forcing_energy), config_rates=bool(config_rates),
+        subsample_mode=subsample_mode,
     )
 
 
@@ -389,7 +576,7 @@ def build_op(op_id: str, bundle: NormBundle, subsample_time: int = 40,
     the held-out OP is a genuine out-of-sample test. ``train_frac`` defaults to
     the bundle's value only for the split marker; the whole OP is unseen.
     """
-    r = _read_raw(op_id, subsample_time)
+    r = _read_raw(op_id, subsample_time, bundle.subsample_mode)
     tf = bundle.train_frac if train_frac is None else train_frac
     split_t = int(tf * r["T"].shape[0])
     return _assemble_op(
@@ -399,6 +586,14 @@ def build_op(op_id: str, bundle: NormBundle, subsample_time: int = 40,
         config_mu=bundle.config_mu, config_sigma=bundle.config_sigma,
         config_active=bundle.config_active, static_feat=bundle.static_feat,
         q_mu=bundle.q_mu, q_sigma=bundle.q_sigma,
+        # Every extra-feature constant comes from the training bundle too, so a
+        # held-out OP is fed through exactly the same transform and stays a
+        # genuine out-of-sample test.
+        rc_ref=bundle.rc_ref, energy_mu=bundle.energy_mu,
+        energy_sigma=bundle.energy_sigma, forcing_energy=bundle.forcing_energy,
+        config_rate_cols=bundle.config_rate_cols,
+        config_rate_sigma=bundle.config_rate_sigma,
+        config_rates=bundle.config_rates,
     )
 
 
@@ -408,8 +603,11 @@ if __name__ == "__main__":
           f"L_ref={b.L_ref:.4g} T_span_ref={b.T_span_ref:.1f}s "
           f"phys_scale={b.phys_scale:.4g} dTdt_scale={b.dTdt_scale:.4g} "
           f"aniso_scale={b.aniso_scale:.4g} Qsrc_scale={b.Qsrc_scale:.4g} "
-          f"bc_scale={b.bc_scale:.4g} n_config={b.n_config}")
-    print(f"  config_active={b.config_active.tolist()}  names={CONFIG_ORDER}")
+          f"bc_scale={b.bc_scale:.4g} (from {b.bc_pairs} x-neighbour pairs) "
+          f"n_config={b.n_config} n_forcing={b.n_forcing}")
+    print(f"  config_active ={b.config_active.tolist()}  names={CONFIG_ORDER}")
+    print(f"  config_profile={b.config_profile.tolist()}  (varies in time within an OP)")
+    print(f"  config_label  ={b.config_label.tolist()}  (constant per OP -> memorisable)")
     for op in b.ops:
         print(f"  {op.op_id}: n_t={op.n_t} n_points={op.n_points} "
               f"split_t={op.split_t} dtn={op.dtn:.4g} "

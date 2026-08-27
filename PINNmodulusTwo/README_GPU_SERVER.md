@@ -78,6 +78,15 @@ source .venv/bin/activate
 pip install --upgrade pip
 ```
 
+> **Das Repo liegt schon auf dem Server?** Dann zuerst den Stand holen — die
+> Flags in den Befehlen dieser Anleitung gibt es nur auf einem aktuellen `main`:
+>
+> ```bash
+> cd ~/llmtraining && git checkout main && git pull origin main
+> ```
+>
+> Bricht ein Aufruf später mit `error: unrecognized arguments: ...` ab, ist genau
+> das die Ursache — der Code auf dem Server ist älter als diese Anleitung.
 **Immer `main`, nie ein `claude/...`-Branch.** Die Feature-Branches sind
 Momentaufnahmen und bleiben stehen, wo sie gemergt wurden — der Stand aus dem
 GPU-Setup kennt die Flags aus Kapitel 6 und 7 noch nicht. **Schon geklont?**
@@ -104,16 +113,16 @@ pip install -r PINNmodulusTwo/requirements-gpu.txt
 Verifikation:
 
 ```bash
-python3 -c "import torch; print(torch.__version__, torch.version.cuda, \
-torch.cuda.is_available(), torch.cuda.get_device_name(0))"
+python3 -c "import torch; print(torch.__version__, torch.version.cuda, torch.cuda.is_available(), torch.cuda.get_device_name(0))"
 ```
 
 Erwartet z. B. `2.5.1+cu121 12.1 True NVIDIA A100-SXM4-40GB`.
 Steht dort `False` → siehe Troubleshooting unten.
 
-> Die `requirements.txt` im Repo-Root **nicht** verwenden: das ist ein
-> UTF-16-kodierter Windows-`pip freeze` (inklusive `pywinpty`) und installiert
-> die CPU-Wheels.
+> Es gibt nur noch `PINNmodulusTwo/requirements-gpu.txt`. Die alte
+> `requirements.txt` im Repo-Root ist gelöscht: ein UTF-16-kodierter
+> Windows-`pip freeze` (inklusive `pywinpty`), der die CPU-Wheels installierte.
+> Wer sie noch braucht, holt sie aus der Git-Historie.
 
 ---
 
@@ -132,9 +141,7 @@ in `model.py` gibt bei fehlendem Paket eine Meldung mit genau diesem Hinweis aus
 NGC-Container-Image benutzen, dort ist alles vorinstalliert:
 
 ```bash
-docker run --gpus all -it --rm \
-  -v "$PWD":/workspace -w /workspace \
-  nvcr.io/nvidia/modulus/modulus:24.09 bash
+docker run --gpus all -it --rm -v "$PWD":/workspace -w /workspace nvcr.io/nvidia/modulus/modulus:24.09 bash
 ```
 
 (Voraussetzung: `nvidia-container-toolkit` installiert, dann testet
@@ -156,13 +163,9 @@ Nach dem `git clone` fehlen also zwei Ordner:
 Vom lokalen Rechner aus (Pfade anpassen):
 
 ```bash
-rsync -avz --progress \
-  ~/batterysurrogatemodell/PINNmodulusTwo/data_cache/ \
-  user@gpu-server:~/llmtraining/PINNmodulusTwo/data_cache/
+rsync -avz --progress ~/batterysurrogatemodell/PINNmodulusTwo/data_cache/ user@gpu-server:~/llmtraining/PINNmodulusTwo/data_cache/
 
-rsync -avz --progress \
-  ~/batterysurrogatemodell/PINNmodulusTwo/material_properties/ \
-  user@gpu-server:~/llmtraining/PINNmodulusTwo/material_properties/
+rsync -avz --progress ~/batterysurrogatemodell/PINNmodulusTwo/material_properties/ user@gpu-server:~/llmtraining/PINNmodulusTwo/material_properties/
 ```
 
 Prüfen (auf dem Server):
@@ -197,16 +200,15 @@ source .venv/bin/activate
 python3 PINNmodulusTwo/train.py --epochs 2 --subsample 40 --device cuda
 
 # 6.2  konvergiert das Training?  (~5 min)
+python3 PINNmodulusTwo/selftest.py          # Skalierungs-Checks, wenige Sekunden
 python3 PINNmodulusTwo/smallBench.py --epochs 5 --w-phys 0.0 0.1 --w-bc 0.1 --device cuda
 cat PINNmodulusTwo/artifacts/smallBench_results.txt
 
 # 6.3  wie lange dauert eine Epoche?  (~10 min)
-python3 PINNmodulusTwo/train.py --ops OP01 OP02 OP03 OP04 OP05 \
-  --subsample 2 --epochs 5 --history-mode hybrid --rate-lags 5 20 \
-  --delta-grid 0.2 --grad-clip 1.0 --device cuda
+python3 PINNmodulusTwo/train.py --ops OP01 OP02 OP03 OP04 OP05 --subsample 2 --epochs 5 --history-mode hybrid --rate-lags 5 20 --delta-grid 0.2 --grad-clip 1.0 --device cuda
 ```
 
-**Weiter zu [Kapitel 7](#7-range-probe-der-loss-gewichte--in-drei-schritten) nur, wenn:**
+**Weiter zu [Kapitel 7](#7-balancing-benchmark--was-die-gewichte-überhaupt-bedeuten-7-h-zwei-sessions) nur, wenn:**
 
 - 6.1 zeigt `[device] cuda:0 …` und der Prozess taucht in `nvidia-smi` auf
 - 6.2 endet mit `✓ ALL CHECKS PASSED - Ready for full benchmark!`
@@ -293,12 +295,13 @@ Bei **FAILED** nicht weitermachen, sondern die Ursache klären:
 | noch nicht konvergiert | mit mehr Epochen gegenprüfen |
 
 Bei `[ABORT] ... loss exploded` nennt die Meldung den zuerst betroffenen
-Loss-Term, siehe [Kapitel 10](#10-troubleshooting).
+Loss-Term, siehe [Kapitel 10](#11-troubleshooting).
 
 ---
 
 ### 6.3 Wie lange dauert eine Epoche? (~10 min)
 
+Ein kurzer Lauf mit den **echten** Einstellungen. Alle Zeitangaben in Kapitel 8
 **Zuerst den Stand prüfen.** Dies ist der erste Aufruf, der `--delta-grid`
 explizit setzt — das Flag gibt es erst seit Commit `beaf673`. Auf einem älteren
 Arbeitsbaum bricht der Lauf sofort ab, noch bevor Torch überhaupt startet:
@@ -377,7 +380,7 @@ Das stoppt nichts — ein Abbruch mitten im Arm hinterließe einen Part, den der
 Report-Schritt zu Recht ablehnt. Es sagt dir nach dem ersten Punkt, was der
 ganze Block kostet, damit ein Neustart einen Punkt kostet und nicht einen Abend.
 
-Für Kapitel 8 dieselbe Rechnung mit 60 Epochen:
+Für Kapitel 9 dieselbe Rechnung mit 60 Epochen:
 
 ```
 Sekunden/Epoche × 60 Epochen ÷ 3600  = Stunden pro Gitterpunkt
@@ -390,8 +393,7 @@ Stunden/Punkt × Punkte × Seeds ÷ 24  = Tage für den Sweep
 Derselbe Lauf mit `--device cpu` beantwortet das:
 
 ```bash
-python3 PINNmodulusTwo/train.py --ops OP01 OP02 --subsample 2 --epochs 3 \
-  --history-mode hybrid --rate-lags 5 20 --grad-clip 1.0 --device cpu
+python3 PINNmodulusTwo/train.py --ops OP01 OP02 --subsample 2 --epochs 3 --history-mode hybrid --rate-lags 5 20 --grad-clip 1.0 --device cpu
 ```
 
 Die Sekunden pro Epoche aus beiden Läufen ins Verhältnis setzen — **erwarte
@@ -520,7 +522,7 @@ Auswahl), Test `OP07` (wird nur berichtet und fließt in keine Auswahl ein).
 > Verdikt aus 7.3 zu lesen ist.
 
 ---
-### 7.0 Hyperparameter — für 7.1 und 7.2 identisch
+### 8.0 Hyperparameter — für 8.1 und 8.2 identisch
 
 **Das ist die verbindliche Liste.** 7.1 und 7.2 müssen in *jedem* dieser Werte
 übereinstimmen; weicht 7.2 ab, verwirft der Lauf den gespeicherten Teil aus 7.1,
@@ -603,7 +605,7 @@ zerfallen sauber in die beiden Arme:
 | 7.2 | `w_bc` | 4 | `w_bc ∈ [0, 0.01, 1.0, 3.0]` bei festem `w_phys = 0.1` |
 
 Der Mittelpunkt `(w_phys=0.01, w_bc=0.1)` gehört zu 7.1; 7.2 überspringt ihn,
-deshalb 5 + 4 = 9 und nicht 10. Genau deshalb geht 7.1 zuerst: **7.2 allein wäre
+deshalb 5 + 4 = 9 und nicht 10. Genau deshalb geht 8.1 zuerst: **8.2 allein wäre
 nicht auswertbar**, weil der Bezugspunkt fehlt.
 
 ```bash
@@ -637,7 +639,7 @@ gespeichert** — CSV, Settings und Rohzeilen. Nur ausgewertet wird noch nichts.
 > **Ein Seed, mit Absicht.** `--seeds 0 1 2` wären 27 Trainings und damit ~18 h.
 > Der Preis: das Verdikt kann die gefundenen Unterschiede nicht vom Init-Rauschen
 > trennen und sagt das auch (`seed spread unknown`). Die Streuung klärt Schritt
-> 8.1 separat. Für „welche Dekade überhaupt" reicht ein Seed, solange die
+> 9.1 separat. Für „welche Dekade überhaupt" reicht ein Seed, solange die
 > Spannweite deutlich ist.
 
 **Zwischendurch reinschauen:**
@@ -689,14 +691,13 @@ The cross is complete. Plots and verdict:
 
 ---
 
-### 7.3 Schritt 3 — Auswertung und Plots (~1 min, ohne GPU)
+### 8.3 Schritt 3 — Auswertung und Plots (~1 min, ohne GPU)
 
 Trainiert nichts. Liest die gespeicherten Ergebnisse beider Arme, fügt sie zum
 vollständigen Kreuz zusammen und erzeugt **erst jetzt** Verdikt und Plots.
 
 ```bash
-python3 PINNmodulusTwo/benchmark_wphys_wbc.py --probe --report-only \
-  --epochs 20 --device cpu
+python3 PINNmodulusTwo/benchmark_wphys_wbc.py --probe --report-only --epochs 20 --device cpu
 ```
 
 `--device cpu` ist hier in Ordnung — es wird nicht gerechnet, das Flag geht nur
@@ -785,7 +786,7 @@ Fehler nicht — dann spart man sich das Gitter dafür.
 
 ---
 
-### 7.4 Was folgt daraus?
+### 8.4 Was folgt daraus?
 
 | Befund in der Probe | Konsequenz |
 |---|---|
@@ -794,16 +795,16 @@ Fehler nicht — dann spart man sich das Gitter dafür.
 | `vs w=0` ≈ 0 oder negativ | dieser Term hilft hier nicht — Gitter dafür überspringen |
 | Spannweite **klein / flach** | Gitter für dieses Gewicht überspringen — es bewegt den Fehler nicht |
 | beide Gewichte flach | zuerst Architektur-Benchmark (8.2): das Problem liegt woanders |
-| Läufe divergiert (`[SKIP]`) | nicht weitermachen, [Kapitel 10](#10-troubleshooting) |
+| Läufe divergiert (`[SKIP]`) | nicht weitermachen, [Kapitel 10](#11-troubleshooting) |
 
 Die Probe lief mit **einem** Seed, das Verdikt sagt deshalb „seed spread
-unknown". Ob die gefundenen Unterschiede echt sind, klärt Schritt 8.1.
+unknown". Ob die gefundenen Unterschiede echt sind, klärt Schritt 9.1.
 
 ---
 
-### 7.5 Alles zum Kopieren
+### 8.5 Alles zum Kopieren
 
-**Heute — Kapitel 6 und Schritt 7.1:**
+**Heute — Kapitel 6 und Schritt 7.1.** Kapitel 7 entscheidet, was die Gewichte in Kapitel 8 überhaupt bedeuten:
 
 ```bash
 cd ~/llmtraining
@@ -822,9 +823,7 @@ cat PINNmodulusTwo/artifacts/smallBench_results.txt
 # ---------------------------------------------------------------------------
 # 6.3  WIE LANGE DAUERT EINE EPOCHE?  (~10 min)  <- bestimmt das Budget
 # ---------------------------------------------------------------------------
-python3 PINNmodulusTwo/train.py --ops OP01 OP02 OP03 OP04 OP05 \
-  --subsample 2 --epochs 5 --history-mode hybrid --rate-lags 5 20 \
-  --delta-grid 0.2 --grad-clip 1.0 --device cuda
+python3 PINNmodulusTwo/train.py --ops OP01 OP02 OP03 OP04 OP05 --subsample 2 --epochs 5 --history-mode hybrid --rate-lags 5 20 --delta-grid 0.2 --grad-clip 1.0 --device cuda
 # Log: "[112.4s/epoch, this run ~7 min left]"
 # Sekunden/Epoche x 20 x 5 / 3600 = Stunden fuer 7.1
 # Sekunden/Epoche x 20 x 4 / 3600 = Stunden fuer 7.2
@@ -833,8 +832,7 @@ python3 PINNmodulusTwo/train.py --ops OP01 OP02 OP03 OP04 OP05 \
 # ---------------------------------------------------------------------------
 # 7.1  RANGE-PROBE, w_phys-ARM  (5 Punkte, <= 5 h)
 # ---------------------------------------------------------------------------
-nohup python3 PINNmodulusTwo/benchmark_wphys_wbc.py --probe --probe-part 1 \
-  --epochs 20 --device cuda > probe_part1.log 2>&1 &
+nohup python3 PINNmodulusTwo/benchmark_wphys_wbc.py --probe --probe-part 1 --epochs 20 --device cuda > probe_part1.log 2>&1 &
 echo $! > probe.pid
 
 echo "PID:  $(cat probe.pid)"
@@ -845,28 +843,26 @@ echo "Stop: kill \$(cat probe.pid)"
 # Das ist KEIN Fehler: Ergebnisse sind gespeichert, ausgewertet wird in 7.3.
 ```
 
-**Später — Schritte 7.2 und 7.3:**
+**Später — Schritte 8.2 und 8.3:**
 
 ```bash
 cd ~/llmtraining
 source .venv/bin/activate
 
-# Erst die Einstellungen aus 7.1 nachlesen und die Flags danach richten:
+# Erst die Einstellungen aus 8.1 nachlesen und die Flags danach richten:
 cat PINNmodulusTwo/artifacts/benchmark_wphys_wbc_settings.txt
 
 # ---------------------------------------------------------------------------
 # 7.2  RANGE-PROBE, w_bc-ARM  (4 Punkte, <= 4 h)
 # ---------------------------------------------------------------------------
-nohup python3 PINNmodulusTwo/benchmark_wphys_wbc.py --probe --probe-part 2 \
-  --epochs 20 --device cuda > probe_part2.log 2>&1 &
+nohup python3 PINNmodulusTwo/benchmark_wphys_wbc.py --probe --probe-part 2 --epochs 20 --device cuda > probe_part2.log 2>&1 &
 echo $! > probe.pid
 echo "Live: tail -f probe_part2.log"
 
 # ---------------------------------------------------------------------------
-# 7.3  AUSWERTUNG UND PLOTS  (~1 min, kein Training)
+# 8.3  AUSWERTUNG UND PLOTS  (~1 min, kein Training)
 # ---------------------------------------------------------------------------
-python3 PINNmodulusTwo/benchmark_wphys_wbc.py --probe --report-only \
-  --epochs 20 --device cpu
+python3 PINNmodulusTwo/benchmark_wphys_wbc.py --probe --report-only --epochs 20 --device cpu
 
 grep -A20 'RANGE PROBE' PINNmodulusTwo/artifacts/benchmark_wphys_wbc_best.txt
 ls -lh PINNmodulusTwo/artifacts/benchmark_wphys_wbc_probe*.png
@@ -877,7 +873,7 @@ ls -lh PINNmodulusTwo/artifacts/benchmark_wphys_wbc_probe*.png
 
 ---
 
-### 7.6 Checkliste
+### 8.6 Checkliste
 
 Vor 7.1:
 
@@ -902,14 +898,14 @@ Nach 7.3:
 - [ ] `benchmark_wphys_wbc.csv` hat 9 Datenzeilen
 - [ ] beide `*_probe*.png` existieren
 - [ ] Verdikt je Achse gelesen — welche Dekade, und bewegt sich überhaupt etwas?
-- [ ] entschieden, welcher Lauf aus Kapitel 8 als Nächstes kommt
+- [ ] entschieden, welcher Lauf aus Kapitel 9 als Nächstes kommt
 
 ---
 
-## 8. Große Benchmarks — Tage
+## 9. Große Benchmarks — Tage
 
 Alles hier läuft mit **60 Epochen** und dauert Tage, nicht Stunden. Erst starten,
-wenn Kapitel 7 durch ist und die Probe gesagt hat, wo es sich lohnt.
+wenn Kapitel 8 durch ist und die Probe gesagt hat, wo es sich lohnt.
 
 | Lauf | Trainings | Laufzeit |
 |---|---|---|
@@ -922,7 +918,7 @@ Mit Seeds multipliziert sich das entsprechend. `--epochs 20` drittelt alles und
 ist für Vergleiche zwischen Konfigurationen meist ausreichend.
 
 ---
-### 8.1 Seed-Streuung an einem Gitterpunkt
+### 9.1 Seed-Streuung an einem Gitterpunkt
 
 **Der erste Lauf dieses Kapitels**, weil er entscheidet, wie die anderen zu
 lesen sind. Er beantwortet: bewegt sich der Fehler zwischen zwei Konfigurationen
@@ -932,8 +928,7 @@ Läufe Rauschen — und ein feineres Gitter macht es nicht besser.
 
 ```bash
 # 5 Seeds an einem Punkt, ~10 h. Mit --epochs 20 sind es ~3 h.
-python3 PINNmodulusTwo/benchmark_wphys_wbc.py \
-  --w-phys 0.05 --w-bc 0.1 --seeds 0 1 2 3 4 --epochs 60 --device cuda
+python3 PINNmodulusTwo/benchmark_wphys_wbc.py --w-phys 0.05 --w-bc 0.1 --seeds 0 1 2 3 4 --epochs 60 --device cuda
 ```
 
 Dann in `benchmark_wphys_wbc_best.txt` die Spalte `+/-` ansehen — das ist die
@@ -942,12 +937,12 @@ Standardabweichung über die fünf Seeds.
 - **Streuung klein** (deutlich unter den Unterschieden, die du in einer Heatmap
   vergleichen willst): die langen Sweeps liefern lesbare Rangfolgen.
 - **Streuung groß**: ein feineres Gitter bringt nichts, weil der Sieger ohnehin
-  vom Zufall bestimmt wird. Dann in 8.2 und 8.3 **mit `--seeds 0 1 2`**
+  vom Zufall bestimmt wird. Dann in 9.2 und 9.3 **mit `--seeds 0 1 2`**
   arbeiten und die Gitter kleiner halten.
 
 ---
 
-### 8.2 Architektur-Benchmark
+### 9.2 Architektur-Benchmark
 
 Misst Breite, Tiefe und History-Lags — Werte, die im Gewichte-Sweep ungemessen
 festliegen. Läuft **eine Achse nach der anderen** gegen eine gemeinsame
@@ -956,8 +951,7 @@ Fehler überhaupt bewegt. `width × depth × lags` wären mehrere hundert Traini
 achsenweise sind es zwölf.
 
 ```bash
-nohup python3 PINNmodulusTwo/benchmark_arch.py --device cuda --seeds 0 1 2 \
-  > benchmark_arch.log 2>&1 &
+nohup python3 PINNmodulusTwo/benchmark_arch.py --device cuda --seeds 0 1 2 > benchmark_arch.log 2>&1 &
 
 # oder nur eine Achse, z. B. die Lags:
 python3 PINNmodulusTwo/benchmark_arch.py --axes lags --seeds 0 1 2 --device cuda
@@ -1014,10 +1008,10 @@ nicht, diesen Regler weiter zu drehen.
 
 ---
 
-### 8.3 5×5-Gitter der Loss-Gewichte
+### 9.3 5×5-Gitter der Loss-Gewichte
 
 Sucht das optimale Paar `(w_phys, w_bc)` auf dem 5×5-Standardgitter — zentriert
-auf die Dekade, die das Verdikt aus [Schritt 7.3](#73-schritt-3--auswertung-und-plots-1-min-ohne-gpu)
+auf die Dekade, die das Verdikt aus [Schritt 8.3](#83-schritt-3--auswertung-und-plots-1-min-ohne-gpu)
 als wirksam ausgewiesen hat.
 
 ```bash
@@ -1025,9 +1019,7 @@ cd ~/llmtraining
 source .venv/bin/activate
 
 # Werte an die Dekade aus der Probe anpassen:
-nohup python3 PINNmodulusTwo/benchmark_wphys_wbc.py --device cuda \
-  --w-phys 0.003 0.01 0.03 0.1 0.3 --w-bc 0.03 0.1 0.3 0.7 1.0 \
-  > benchmark_grid.log 2>&1 &
+nohup python3 PINNmodulusTwo/benchmark_wphys_wbc.py --device cuda --w-phys 0.003 0.01 0.03 0.1 0.3 --w-bc 0.03 0.1 0.3 0.7 1.0 > benchmark_grid.log 2>&1 &
 echo $! > benchmark.pid
 
 echo "Gitter gestartet - PID $(cat benchmark.pid), Log: benchmark_grid.log"
@@ -1048,17 +1040,17 @@ das Kommando ohne `nohup`/`&` (Detach mit `Ctrl-b`, dann `d`).
 | Epochen | 60 pro Gitterpunkt |
 | Laufzeit | 1,5–2,5 h/Punkt → **~1,5–2 Tage** |
 
-Mit `--epochs 20` sind es ~14 h. Wenn 8.1 eine große Seed-Streuung gezeigt hat,
+Mit `--epochs 20` sind es ~14 h. Wenn 9.1 eine große Seed-Streuung gezeigt hat,
 ist ein kleines Gitter mit drei Seeds aussagekräftiger als ein großes mit einem.
 
 **`--extended-grid`** schaltet auf 10×10 = 100 Punkte um, also **~6–8 Tage bei
 einem Seed**. Das lohnt praktisch nie: die Probe hat die Dekade bereits
 eingegrenzt, und 100 Punkte auf einem Seed liefern vor allem das Minimum aus 100
-Ziehungen — siehe das Rausch-Verdikt in 8.4.
+Ziehungen — siehe das Rausch-Verdikt in 9.4.
 
 ---
 
-### 8.4 Seeds — wie viele Läufe pro Gitterpunkt
+### 9.4 Seeds — wie viele Läufe pro Gitterpunkt
 
 Standard ist **ein** Seed pro Punkt. Damit ist nicht entscheidbar, ob der
 Unterschied zwischen zwei Zellen der Heatmap echt ist oder nur unterschiedliche
@@ -1081,7 +1073,7 @@ explizit, ob die Rangfolge belastbar ist oder im Rauschen liegt.
 
 ---
 
-### 8.5 Erwartete Outputs
+### 9.5 Erwartete Outputs
 
 ```
 PINNmodulusTwo/artifacts/benchmark_wphys_wbc.csv               -> alle 100 Punkte
@@ -1095,7 +1087,7 @@ PINNmodulusTwo/artifacts/checkpoints_wphys_wbc/*.pt            -> 100 Modelle (m
 
 ---
 
-### 8.6 Monitoring
+### 9.6 Monitoring
 
 Gilt für jeden der Läufe oben — Log- und PID-Datei entsprechend ersetzen (`probe.log`/`probe.pid`, `benchmark_arch.log`, `benchmark_grid.log`).
 
@@ -1134,7 +1126,7 @@ gegenseitig, also Artefakte pro Lauf wegsichern oder `--model-dir` setzen.
 
 ---
 
-### 8.7 Auswertung nach Abschluss
+### 9.7 Auswertung nach Abschluss
 
 ```bash
 cat PINNmodulusTwo/artifacts/benchmark_wphys_wbc_best.txt
@@ -1162,13 +1154,11 @@ ls -lh PINNmodulusTwo/artifacts/benchmark_wphys_wbc*.png
 
 # Top 10 nach Val-MAE - das ist die Spalte, auf der ausgewaehlt wurde.
 # Spalten: 6=MAE_in_C  7=MAE_val_C  8=MAE_val_std_C  9=MAE_test_C  10=MAE_test_std_C
-head -1 PINNmodulusTwo/artifacts/benchmark_wphys_wbc.csv && \
-  tail -n +2 PINNmodulusTwo/artifacts/benchmark_wphys_wbc.csv | sort -t',' -k7 -n | head -10
+head -1 PINNmodulusTwo/artifacts/benchmark_wphys_wbc.csv && tail -n +2 PINNmodulusTwo/artifacts/benchmark_wphys_wbc.csv | sort -t',' -k7 -n | head -10
 
 # Dieselben Punkte mit ihrer Test-MAE (Spalte 9) - die Zahl, die berichtet wird.
 # Wenn die Reihenfolge hier stark von der obigen abweicht, ist die Auswahl instabil.
-tail -n +2 PINNmodulusTwo/artifacts/benchmark_wphys_wbc.csv | sort -t',' -k7 -n | \
-  head -10 | cut -d',' -f1,2,7,8,9,10
+tail -n +2 PINNmodulusTwo/artifacts/benchmark_wphys_wbc.csv | sort -t',' -k7 -n | head -10 | cut -d',' -f1,2,7,8,9,10
 
 # Checkpoints: Anzahl und Platzbedarf
 ls PINNmodulusTwo/artifacts/checkpoints_wphys_wbc/ | wc -l   # sollte 100 sein
@@ -1177,7 +1167,7 @@ du -sh PINNmodulusTwo/artifacts/checkpoints_wphys_wbc/
 
 ---
 
-### 8.8 Abbrechen und neu starten
+### 9.8 Abbrechen und neu starten
 
 ```bash
 kill $(cat benchmark.pid)
@@ -1190,13 +1180,11 @@ ps -p $(cat benchmark.pid)   # "No such process" = gestoppt
 
 ---
 
-### 8.9 Weiter mit den besten Gewichten
+### 9.9 Weiter mit den besten Gewichten
 
 ```bash
 # Werte aus benchmark_wphys_wbc_best.txt einsetzen
-python3 PINNmodulusTwo/train.py \
-    --epochs 100 --w-phys 0.1 --w-bc 0.3 --subsample 2 \
-    --ops OP01 OP02 OP03 OP04 OP05 --test-op OP07 --device cuda
+python3 PINNmodulusTwo/train.py --epochs 100 --w-phys 0.1 --w-bc 0.3 --subsample 2 --ops OP01 OP02 OP03 OP04 OP05 --test-op OP07 --device cuda
 ```
 
 Bestes Checkpoint laden (Dateiname folgt dem Schema `model_p<w_phys>_b<w_bc>.pt`,
@@ -1216,7 +1204,7 @@ model.eval()
 
 ---
 
-## 9. Ergebnisse zurückholen
+## 10. Ergebnisse zurückholen
 
 ```bash
 rsync -avz user@gpu-server:~/llmtraining/PINNmodulusTwo/artifacts/ ./artifacts/
@@ -1241,10 +1229,11 @@ dem Server gebraucht.
 
 ---
 
-## 10. Troubleshooting
+## 11. Troubleshooting
 
 | Symptom | Ursache / Abhilfe |
 |---|---|
+| `train.py: error: unrecognized arguments: --delta-grid 0.2` (oder `--gain-lr-mult`, `--test-op`, …) | Der Code auf dem Server ist älter als diese Anleitung — das Flag gibt es dort noch nicht. `git checkout main && git pull origin main`, dann `python3 PINNmodulusTwo/train.py --help` gegenprüfen. Der Aufruf in `usage:` listet immer genau die Flags, die dein Checkout kennt. |
 | `torch.cuda.is_available()` → `False` | CPU-Wheel installiert (`torch.version.cuda` ist `None`) → torch neu vom `cu12x`-Index installieren. Oder Treiber fehlt/zu alt → Schritt 1. |
 | `--device cuda ... torch.cuda.is_available() is False` | Genau derselbe Fall — die Fehlermeldung nennt Torch- und CUDA-Version zum Abgleich. |
 | `CUDA error: no kernel image is available` | GPU zu neu für das Wheel (z. B. RTX 50xx mit `cu121`) → `cu128`-Index nehmen. |
@@ -1253,12 +1242,14 @@ dem Server gebraucht.
 | `ModuleNotFoundError: modulus` | venv nicht aktiviert oder `pip install nvidia-modulus` fehlt → Schritt 4. |
 | `FileNotFoundError: .../data_cache/OP01.npz` | Daten nicht übertragen → Schritt 5. |
 | `FileNotFoundError: .../material_properties/constants.yaml` | dito → Schritt 5. |
+| `L_phys_bal=nan` / leere Kurve im Plot | Kein Fehler: bei `w_phys 0` (bzw. `w_bc 0`) wird der Term gar nicht mehr berechnet — er kostet einen Autograd-Hessian und trägt nichts bei. Als NaN protokolliert, damit der Plot eine Lücke zeigt statt einer flachen Linie, die es nie gab. Mit `--zero-weight-terms compute` wird er zum Mitloggen weiter gerechnet. |
+| Gewichte-Probe verwirft den anderen Arm | Die Balancing-Flags stecken in der Signatur. Teil 2 braucht dieselben wie Teil 1 — den fertigen Aufruf druckt Teil 1 am Ende aus. |
 | `[CFL WARN]` beim Start | Zeitschritt zu groß für die Diffusion — `--subsample` verkleinern (z. B. `--subsample 2`) oder `--grad-clip 1.0` setzen. Unabhängig von der GPU. |
 | Training bricht mit `[ABORT] ... loss exploded` ab | Gleiche Ursache wie oben; die Meldung nennt die empfohlenen Gegenmaßnahmen. |
 | `No space left on device` während des Benchmarks | Die 100 Checkpoints brauchen mehrere GB → mit `--no-save-models` (gar keine) oder `--save-best-only` (nur das beste Modell) neu starten. |
 | Benchmark startet nicht, "läuft schon" | Alten Prozess finden und beenden: `ps aux \| grep benchmark_wphys_wbc`, dann `kill <PID>`. |
 | Loss explodiert mitten im Benchmark | Lauf stoppen (`kill $(cat benchmark.pid)`) und mit stabileren Einstellungen neu starten: `--grad-clip 2.0 --lr 0.001`. |
-| Läuft auf der GPU kaum schneller | Erwartbar: pro Epoche gibt es ~7000 *sequentielle* Rollout-Schritte je OP, die sich nicht parallelisieren lassen. Batchgrößen erhöhen hilft nur dem Physik-Term (8.6). |
+| Läuft auf der GPU kaum schneller | Erwartbar: pro Epoche gibt es ~7000 *sequentielle* Rollout-Schritte je OP, die sich nicht parallelisieren lassen. Batchgrößen erhöhen hilft nur dem Physik-Term (9.6). |
 
 ---
 
