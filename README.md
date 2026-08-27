@@ -24,11 +24,15 @@ residual, and the symmetry boundary condition `dT/dx = 0` at the cell centre.
 Start with [`PINNmodulusTwo/README.md`](PINNmodulusTwo/README.md); for the GPU
 server setup and the full benchmark session see
 [`PINNmodulusTwo/README_GPU_SERVER.md`](PINNmodulusTwo/README_GPU_SERVER.md).
+Where the model currently stands — what was broken, what is fixed, and what to
+look for in each test before spending GPU days — is in
+[`PINNmodulusTwo/README_MODEL_CRITIQUE.md`](PINNmodulusTwo/README_MODEL_CRITIQUE.md).
 
 The recurrence is deliberately **not** adaptive: the history spacing `δ`, the lag
 count `k`, the lag gates and the hybrid `rate_lags` are all fixed
-hyperparameters. Learned are the MLP weights, the per-layer swish `β`, and the
-two physics gains `src_gain` / `diff_gain`.
+hyperparameters. Learned are the MLP weights and the per-layer swish `β`. The
+physics gains `src_gain` / `diff_gain` are pinned at 1.0 (`--learn-gains` frees
+them again).
 
 ### `data_cache/` — the OP bundles
 

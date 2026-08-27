@@ -133,6 +133,22 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--use-static", action="store_true", default=True)
     p.add_argument("--use-forcing", action="store_true", default=True)
     p.add_argument("--batch-data", type=int, default=2048)
+    p.add_argument("--max-hours", type=float, default=5.0,
+                   help="wall-clock budget for THIS block. Purely advisory: from "
+                        "the first finished point on, the log projects the block "
+                        "total and says how much --epochs would have to shrink to "
+                        "fit. 0 disables the check")
+    p.add_argument("--inner-steps", type=int, default=100,
+                   help="optimiser steps per OP per epoch against that epoch's "
+                        "frozen rollout; drives both the update count and most "
+                        "of the per-epoch cost beyond the rollout itself")
+    p.add_argument("--residual-output", action=argparse.BooleanOptionalAction,
+                   default=True,
+                   help="predict the deviation from the anchor's spatial mean "
+                        "temperature level instead of the absolute value")
+    p.add_argument("--learn-gains", action=argparse.BooleanOptionalAction,
+                   default=False,
+                   help="let src_gain/diff_gain train (off: pinned at 1.0)")
     p.add_argument("--batch-phys", type=int, default=256)
     p.add_argument("--batch-bc", type=int, default=128)
     p.add_argument("--phys-norm", type=float, default=0.0)
@@ -249,7 +265,8 @@ def main() -> None:
             print(f"  [SKIP] {axis}={label}: every seed diverged or crashed - "
                   f"recorded as NaN, sweep continues", flush=True)
             results.append(failed_result(extra, train_time, len(cli.seeds)))
-            print_eta(idx, total, start_time_total, train_time)
+            print_eta(idx, total, start_time_total, train_time,
+                      budget_h=getattr(cli, 'max_hours', 0.0), epochs=cli.epochs)
             continue
 
         row = aggregate_seeds(extra, per_seed, len(cli.seeds), train_time)
@@ -259,7 +276,8 @@ def main() -> None:
         print(f"  params={row['n_params']}  "
               f"MAE(val {cli.val_op})={row['val_mae']:.3f}°C  "
               f"MAE(test {cli.test_op})={row['test_mae']:.3f}°C{spread}", flush=True)
-        print_eta(idx, total, start_time_total, train_time)
+        print_eta(idx, total, start_time_total, train_time,
+                      budget_h=getattr(cli, 'max_hours', 0.0), epochs=cli.epochs)
 
     total_time = time.time() - start_time_total
     print(f"\n{'='*60}")
