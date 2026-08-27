@@ -9,9 +9,10 @@ controller constraints.
 ## Layout
 
 ```
-PINNmodulusTwo/     <- the active model. Everything current lives here.
-data_cache/         <- OP*.npz bundles (not in git, see below)
-legacy/             <- earlier approaches, kept for reference only
+PINNmodulusTwo/              <- the active model, constant operating points
+PINNmodulusTwoExtProfiles/   <- extension of it to the OPs whose drivers are PROFILES
+data_cache/                  <- OP*.npz bundles (not in git, see below)
+legacy/                      <- earlier approaches, kept for reference only
 ```
 
 ### `PINNmodulusTwo/` — the active approach
@@ -34,6 +35,27 @@ hyperparameters. Learned are the MLP weights and the per-layer swish `β`. The
 physics gains `src_gain` / `diff_gain` are pinned at 1.0 (`--learn-gains` frees
 them again).
 
+### `PINNmodulusTwoExtProfiles/` — the profile extension
+
+`PINNmodulusTwo` trains on OP01–OP05, where every driver (C-rate, fluid inlet
+temperature, volume flow) is held constant for the whole charge. From OP08 the
+plan sheet turns those drivers into **profiles** that vary in time — a fluid
+temperature profile, a pre-simulated CC-CV current, and in OP15 a volume-flow
+profile.
+
+This folder extends the same model to the full **OP01–OP16**. The network, the
+physics residual and the recurrence are imported unchanged from
+`PINNmodulusTwo/`; what it owns is everything the profiles force: anti-aliased
+driver resampling, causal driver-rate feature channels, normalisation constants
+refitted on the wider set, and its own benchmark — **`profileBench`, the Profile
+Tier Benchmark** — because the loss weights are only meaningful relative to
+physics scales that have moved.
+
+Start with
+[`PINNmodulusTwoExtProfiles/README.md`](PINNmodulusTwoExtProfiles/README.md).
+Note that **no result from it has been measured yet**: it needs the data cache
+below, which is not in git.
+
 ### `data_cache/` — the OP bundles
 
 One `OP*.npz` per operating point. **Not tracked in git** (the `.gitignore` keeps
@@ -47,6 +69,11 @@ exists, so an existing cache keeps working wherever it already sits:
 2. `data_cache/` — **preferred**: shared, top level
 3. `legacy/battery_surrogate_agenticWorkflow/data_cache/`
 4. `battery_surrogate_agenticWorkflow/data_cache/` — pre-restructure location
+
+`PINNmodulusTwoExtProfiles/data.py` searches the same list, with its own
+`PINNmodulusTwoExtProfiles/data_cache/` ahead of it. The material-property CSVs
+in `PINNmodulusTwo/material_properties/` are equally untracked, and both
+projects read that one copy.
 
 Requesting an OP that has no bundle fails immediately and lists what is
 available, instead of surfacing after the first training run.
