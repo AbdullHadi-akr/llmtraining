@@ -519,7 +519,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--k-max", type=int, default=2, help="history lags (FIXED)")
     p.add_argument("--history-mode", choices=["raw", "hybrid"], default="hybrid",
                    help="history mode (FIXED)")
-    p.add_argument("--rate-lags", nargs="+", type=float, default=[5.0, 20.0],
+    p.add_argument("--rate-lags", nargs="+", type=float, default=[200.0, 600.0],
                    help="hybrid rate segments in seconds (FIXED)")
     p.add_argument("--delta-grid", type=float, default=0.2,
                    help="anchor lag of the hybrid history in seconds (FIXED)")

@@ -113,19 +113,25 @@ Zwei Layouts, umschaltbar über `history_mode`:
 Raten über **kumulative** Segmente:
 
 ```
-             ├──── 20 s ────┤├─ 5 s ─┤├ Δgrid ┤
-   ──────────●──────────────●─────────●────────●──────>  Zeit
-        T(t−Δgrid−25)  T(t−Δgrid−5)  T(t−Δgrid)   t
-                                      ▲
-                                    Anker
+            ├───── 600 s ─────┤├── 200 s ──┤├ Δgrid ┤
+   ─────────●─────────────────●─────────────●────────●──────>  Zeit
+       T(t−Δgrid−800)   T(t−Δgrid−200)  T(t−Δgrid)     t
+                                            ▲
+                                          Anker
 
-   Kanal 1 :  T(t−Δgrid)                              (Absolutwert)
-   Kanal 2 :  [T(t−Δgrid)   − T(t−Δgrid−5)]  ÷  5     (Rate 1)
-   Kanal 3 :  [T(t−Δgrid−5) − T(t−Δgrid−25)] ÷ 20     (Rate 2)
+   Kanal 1 :  T(t−Δgrid)                                   (Absolutwert)
+   Kanal 2 :  [T(t−Δgrid)     − T(t−Δgrid−200)] ÷ 200      (Rate 1)
+   Kanal 3 :  [T(t−Δgrid−200) − T(t−Δgrid−800)] ÷ 600      (Rate 2)
 ```
 
+> **Warum 200 und 600 und nicht 5 und 20.** Der Divisor ist `lag_n · rate_scale`,
+> und für ein glattes Signal ist das genau der RMS der Differenz über dieses
+> Segment. Der Kanal verstärkt damit alles Nicht-Glatte um
+> `A = 1/(lag_n · rate_scale)`. Bei 5 s auf einer ~1474-s-Spanne ist `A ≈ 119`
+> und der Rollout divergiert; bei 200 s ist `A ≈ 3`. Siehe Abschnitt 3.1.
+
 `Δgrid` verschiebt, **wo** das Fenster sitzt; es ist kein Teil einer Spanne. Die
-Endpunkte von Rate 1 liegen 5 s auseinander, egal wie weit der Anker zurückliegt.
+Endpunkte von Rate 1 liegen 200 s auseinander, egal wie weit der Anker zurückliegt.
 Deshalb sind `--delta-grid` und `--subsample` unabhängige Regler.
 
 > **Fallstrick, der schon einmal alles zerstört hat.** Die Rate wird durch die

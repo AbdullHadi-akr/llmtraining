@@ -144,7 +144,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--history-mode", choices=["raw", "hybrid"],
                    default=d.get("history_mode", "hybrid"))
     p.add_argument("--rate-lags", type=float, nargs="+",
-                   default=d.get("rate_lags", [5.0, 20.0]))
+                   default=d.get("rate_lags", [200.0, 600.0]))
     p.add_argument("--delta-grid", type=float, default=d.get("delta_grid", 0.2))
     p.add_argument("--width", type=int, default=d.get("layer_size", 128))
     p.add_argument("--depth", type=int, default=d.get("num_layers", 4))

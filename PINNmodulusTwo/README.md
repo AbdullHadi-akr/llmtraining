@@ -34,8 +34,10 @@ takes part in any selection.
   `delta_grid`, `rate_lags` and the lag gates are all fixed hyperparameters —
   configurable, never trained. Learned are only the MLP weights and the per-layer
   swish `β`; `src_gain`/`diff_gain` are pinned at 1.0 unless `--learn-gains`.
-  With `residual_output` (default) the net predicts the deviation from the
-  anchor's spatially averaged temperature level rather than the absolute value.
+  `residual_output` is **off by default** — the net predicts the absolute
+  normalised temperature. Switching it on makes `field()` return
+  `level(t) + net(...)`, which carries the level through an integrator of gain
+  exactly 1 with no leak and makes every rollout run away; see below.
 - `physics.py` — nondimensional anisotropic heat residual; space via autograd,
   time via the finite-difference `(T(t) − T(t−δ))/δ` over the recurrence. The
   assembled residual is divided by **one** scale, not each term by its own.
@@ -75,19 +77,25 @@ feeds the network a more compact feature block:
 - `T(t-Δgrid)` as an absolute anchor. `Δgrid` is `--delta-grid` (default
   `0.2 s`), a free knob independent of `--subsample`, and used **only** in
   hybrid mode -- raw mode spaces its lags by `δ` instead.
-- One rate channel per entry in `rate_lags` (`5 s` and `20 s` by default). The
-  segments are cumulative, each starting where the previous ended, and each rate
-  is divided by **its own segment length** — the actual distance between the two
-  points being differenced:
+- One rate channel per entry in `rate_lags` (`200 s` and `600 s` by default —
+  the old `5 s` / `20 s` diverge, see below). The segments are cumulative, each
+  starting where the previous ended, and each rate is divided by **its own
+  segment length** — the actual distance between the two points being
+  differenced:
 
-      Rate 1: [T(t-Δgrid)   - T(t-Δgrid-5)]  / 5
-      Rate 2: [T(t-Δgrid-5) - T(t-Δgrid-25)] / 20
+      Rate 1: [T(t-Δgrid)     - T(t-Δgrid-200)] / 200
+      Rate 2: [T(t-Δgrid-200) - T(t-Δgrid-800)] / 600
 
   `Δgrid` shifts where the window sits but is not part of any span: the endpoints
-  of rate 1 are 5 s apart however far back the anchor is. Dividing by the clamped
-  *elapsed* span instead is a singularity: early in the rollout that span
-  collapses to one grid step and the rate explodes, which is what made every
-  sweep point diverge to NaN.
+  of rate 1 are 200 s apart however far back the anchor is. Dividing by the
+  clamped *elapsed* span instead is a singularity: early in the rollout that span
+  collapses to one grid step and the rate explodes.
+
+  The segment length is not a free knob. Divided by `lag_n * rate_scale`, the
+  channel multiplies everything non-smooth — including an untrained net's
+  step-to-step jitter — by `A = 1/(lag_n * rate_scale)`. At `5 s` against a
+  ~1474 s reference span that is `A ≈ 119` and the rollout diverges; at
+  `200 s` it is `A ≈ 3`. `A` is printed at startup.
 
 Set `history_mode: raw` if you want the original lag stack, or `history_mode:
 hybrid` (the default) for the anchor + rates layout.

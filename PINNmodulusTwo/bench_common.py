@@ -62,7 +62,11 @@ def make_train_args(cli, overrides: dict, seed: int) -> Namespace:
         batch_data=cli.batch_data, batch_phys=cli.batch_phys,
         batch_bc=cli.batch_bc,
         inner_steps=getattr(cli, "inner_steps", 100),
-        residual_output=getattr(cli, "residual_output", True),
+        # False, nicht True: level(t) + net(...) fuehrt das Niveau durch einen
+        # Integrator der Verstaerkung 1 ohne Leck und laesst jeden Rollout
+        # weglaufen. Mit dem alten Default hier waere JEDER Benchmark in
+        # Epoche 1 mit L_data=nan abgebrochen. ARCHITECTURE.md 3.1.
+        residual_output=getattr(cli, "residual_output", False),
         learn_gains=getattr(cli, "learn_gains", False),
         weight_decay=cli.weight_decay, grad_clip=cli.grad_clip,
         gain_lr_mult=cli.gain_lr_mult,
