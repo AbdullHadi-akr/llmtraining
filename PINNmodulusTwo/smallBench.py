@@ -71,7 +71,13 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--depth", type=int, default=d.get("num_layers", 3))
     p.add_argument("--k-max", type=int, default=d.get("k_max", 2))
     p.add_argument("--history-mode", default=d.get("history_mode", "hybrid"))
-    p.add_argument("--rate-lags", nargs="+", type=float, default=d.get("rate_lags", [5.0, 20.0]))
+    p.add_argument("--rate-lags", nargs="+", type=float,
+                   default=d.get("rate_lags", [5.0, 20.0]),
+                   help="hybrid rate segments in SECONDS. What matters is "
+                        "A = 1/(lag_n * rate_scale), printed at startup: short "
+                        "segments divide a small difference by a small number "
+                        "and amplify everything non-smooth by A. 5 s gives "
+                        "A ~ 119 and the rollout diverges")
     p.add_argument("--delta-grid", type=float, default=d.get("delta_grid", 0.2),
                    help="anchor lag of the hybrid history in seconds")
     p.add_argument("--time-deriv", default=d.get("time_deriv", "bdf2"))

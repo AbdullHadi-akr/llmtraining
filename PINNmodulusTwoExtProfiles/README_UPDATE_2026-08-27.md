@@ -9,8 +9,8 @@ Kapitel 3.1.
 
 **Kurzfassung:** Der free-running Rollout eines untrainierten Netzes divergierte,
 bevor ein einziger Gradientenschritt passiert war. `L_data` war `nan`, jeder Lauf
-brach in Epoche 1 ab. Zwei Ursachen, beide Layout-Entscheidungen, beide hier
-genauso wirksam wie im Basisprojekt — eine davon **schlimmer**.
+brach in Epoche 1 ab. Die Ursache ist **`residual_output`** — und diese
+Erweiterung lief still damit, ohne Schalter dagegen.
 
 ---
 
@@ -54,9 +54,9 @@ größere Treiber ist.
 
 | Datei | Änderung |
 |---|---|
-| `config.yaml` | `residual_output: false` (neu), `rate_lags: [200.0, 600.0]` (war `[5.0, 20.0]`), `rollout_clamp: 50.0` (neu) |
+| `config.yaml` | `residual_output: false` (neu), `rollout_clamp: 50.0` (neu). `rate_lags` bleiben bei `[5.0, 20.0]` |
 | `train.py` | `--residual-output` / `--no-residual-output` und `--rollout-clamp` als CLI-Schalter; `residual_output` wird jetzt an `RecurrentField` übergeben; `rollout(...)` bekommt `clamp` |
-| `smokeBench.py`, `profileBench.py` | Default für `--rate-lags` auf `[200.0, 600.0]` |
+
 
 `model.py` kommt unverändert aus dem Basisprojekt (siehe `_paths.py`) — die
 Sättigungsgrenze und der `level_rollout`-Fix sind also automatisch geteilt.
@@ -85,13 +85,22 @@ Gemessen im Basisprojekt, 20 Epochen, 3 Seeds, ohne jedes Hilfsmittel:
 auch bei `raw`, wo es gar keine Rate-Kanäle gibt. Genau das identifiziert den
 Integrator und nicht die Verstärkung als Haupttreiber.
 
-### Ursache 2 (Nebentreiber): zu kurze `rate_lags`
+### Die Verstärkung `A` — real, aber **nicht** die Ursache
 
 Für ein glattes Signal ist `lag_n · rate_scale` auf drei Stellen genau der RMS
 der Differenz selbst. Der Divisor **ist** die Größe, auf die normiert wird — eine
 echte 5-Sekunden-Änderung auf O(1) zu ziehen kostet zwangsläufig zwei
-Größenordnungen Rauschverstärkung. Keine andere Normierung entkommt dem, nur ein
-längeres Segment.
+Größenordnungen Rauschverstärkung, `A ≈ 119` im Basisprojekt.
+
+**Das ist trotzdem nicht der Grund für die Abbrüche.** Im Basisprojekt wurde in
+der echten Geometrie (`n_t = 7000`) gemessen: ist `residual_output` aus und
+`rollout_clamp` an, gewinnt `[5, 20]` die MAE auf allen drei Seeds, vor
+`[50,150]`, `[200,600]` und `raw`, ohne einen einzigen Abbruch. Längere Segmente
+senken `A`, machen den Kanal aber zu einem Fortschrittsindikator und
+generalisieren schlechter. `--max-rate-amp` dämpft den Kanal und schadet
+ebenfalls.
+
+**Deshalb bleiben die `rate_lags` hier bei `[5.0, 20.0]`.**
 
 ### `rollout_clamp: 50.0`
 
@@ -106,10 +115,11 @@ hinreichend**.
   bei Initialisierung perfekt stabil (0/5 über 7000 Schritte). Nach 20
   Adam-Schritten erreicht der nächste Rollout 4.7e4. Layout-Problem, kein
   Startpunkt-Problem.
-* **`max_rate_amp` allein.** Skaliert einen Kanal um, statt die Segmentlänge zu
-  korrigieren. Bleibt als Notnagel, Default `0.0`. Der Hinweis in
+* **`max_rate_amp`.** Dämpft den Rate-Kanal; gemessen wird die MAE monoton
+  schlechter, je härter gedeckelt wird. Bleibt aus (`0.0`). Der Hinweis in
   `data.effective_rate_scale`, dies sei „das erste, was man probiert", ist damit
   überholt — das erste ist `--no-residual-output`.
+* **Längere `rate_lags`.** Senken `A`, verschlechtern die MAE. `[5, 20]` bleibt.
 
 ---
 
@@ -126,40 +136,35 @@ wie im Basisprojekt.
 hybrid history amplification A = 1/(lag_n * rate_scale) per lag: ...
 ```
 
-Die Regel lautet **`A` auf O(1) bringen**. Liegt `A` mit `[200, 600]` hier
-deutlich über ~10, gehören die Segmente länger — nicht `max_rate_amp` gesetzt.
+`A` ist hier **höher als die 119 des Basisprojekts**, und in diesem Bereich hat
+niemand gemessen. Falls ein Lauf trotz `residual_output: false` und
+`rollout_clamp: 50` abbricht, ist das der erste Verdächtige — dann sind längere
+Segmente die Gegenprobe. Sie sind aber kein Reflex: im Basisprojekt haben sie
+geschadet.
 
 ---
 
 ## `hybrid` gegen `raw` — offen, auch hier
 
-Im Basisprojekt gemessen (5 Seeds, MAE in °C, synthetisches Bundle):
+Im Basisprojekt gemessen, in der **echten Geometrie** (`n_t = 7000`, 3 Seeds,
+MAE in °C auf dem gehaltenen Abschnitt):
 
-| | MAE train | MAE test | Streuung test | Generalisierungslücke |
-|---|---|---|---|---|
-| `hybrid [200,600]` | **0.308** | 1.150 | 6.6× | 3.7× |
-| `raw` | 0.436 | **0.780** | **3.5×** | **1.8×** |
+| `rate_lags` | `A` | MAE train | MAE test |
+|---|---|---|---|
+| **`[5, 20]`** | 119 / 30 | 0.784 | **1.207** — bester Seed-für-Seed |
+| `[50, 150]` | 12 / 4 | **0.594** | 2.102 |
+| `[200, 600]` | 3 / 1 | 0.724 | 2.507 |
+| `raw` | — | 0.824 | 2.601 |
 
-`hybrid` passt in-sample besser und generalisiert schlechter — die Signatur von
-Überfitting. Der Mechanismus: um `A` auf O(1) zu bringen, mussten die Segmente
-von 5/20 s auf 200/600 s wachsen, und ein 600-s-Fenster auf einer 1474-s-
-Trajektorie ist keine Rate mehr, sondern ein **Fortschrittsindikator**.
+`[50, 150]` hat die beste MAE train und die zweitschlechteste MAE test — das ist
+Überfitting. Um `A` zu senken, muss das Fenster wachsen, und ein 600-s-Fenster
+auf 1474 s ist **keine Rate mehr, sondern ein Fortschrittsindikator**: es sagt
+dem Netz, *wo in der Trajektorie* es ist. In-sample hilft das, ausserhalb nicht.
 
-Daraus die Spannung, die vorher niemand sehen konnte, weil vorher nichts
-durchlief:
+`raw` ist die schlechteste der vier Varianten. `hybrid [5, 20]` bleibt Default.
 
-```
-zu kurz  →  A groß  →  Rollout divergiert
-zu lang  →  Fortschrittsindikator  →  überfittet
-```
-
-`hybrid` bleibt vorerst Default, weil die Messung synthetisch ist und ein
-Wechsel des `history_mode` die Vergleichbarkeit aller bisherigen Ergebnisse
-entwertet. Entschieden wird das auf echten Daten mit `profileBench.py` /
-`bench_profiles.py`, Kriterium ist **MAE auf gehaltenen OPs**, nicht `L_data`.
-
-> **`L_data` ist nicht das Auswahlkriterium.** Auf `L_data` lag
-> `hybrid [200,600]` 100× vor `raw`; auf MAE liegt `raw` vorn. Die beiden ordnen
+> **`L_data` ist nicht das Auswahlkriterium.** Auf `L_data` lag `[200, 600]` zwei
+> Größenordnungen vorn — auf MAE ist es das zweitschlechteste. Die beiden ordnen
 > die Konfigurationen unterschiedlich.
 
 **Für diese Erweiterung ist die Frage besonders offen**, weil die
@@ -189,6 +194,8 @@ python3 ../PINNmodulusTwo/tools/rollout_divergence.py
 * Alle Zahlen stammen aus dem **Basisprojekt** und von einem **synthetischen
   Bundle**. Die Richtung ist mechanistisch erklärt und robust (9/9 gegen 0/9);
   die Beträge sind es nicht.
+* **Die Lag-Messung gilt für OP01–05, nicht für OP01–OP16.** Sie ist bei
+  `A = 119/30` gemacht; das Pooling hier hebt `A` darüber hinaus.
 * **In dieser Erweiterung wurde noch kein Lauf gemacht.** Die Änderungen sind
   aus dem Befund des Basisprojekts abgeleitet und nicht auf OP01–OP16
   nachgemessen. Der `smokeBench.py`-Lauf oben ist der erste Prüfstein.

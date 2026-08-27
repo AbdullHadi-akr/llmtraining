@@ -118,12 +118,12 @@ Beide sind **feste Puffer, keine Parameter** — sie werden nie trainiert.
 Im Hybrid-Modus ist `k_max` **nicht** frei wählbar: es ergibt sich aus der Zahl
 der `rate_lags` und überschreibt ein übergebenes `k_max`.
 
-Die Hybrid-Kanäle im Detail, mit den ausgelieferten `rate_lags: [200.0, 600.0]`:
+Die Hybrid-Kanäle im Detail, mit den ausgelieferten `rate_lags: [5.0, 20.0]`:
 
 ```
 Anker : T(t − 0.2 s)
-Rate 1: ( T(t − 0.2)   − T(t − 200.2) ) / (200 s · rate_scale)
-Rate 2: ( T(t − 200.2) − T(t − 800.2) ) / (600 s · rate_scale)
+Rate 1: ( T(t − 0.2)  − T(t − 5.2)  ) / (5 s  · rate_scale)
+Rate 2: ( T(t − 5.2)  − T(t − 25.2) ) / (20 s · rate_scale)
 ```
 
 Die Segmente sind **kumulativ und disjunkt**: jedes beginnt, wo das vorige
@@ -337,9 +337,13 @@ einer flachen Linie, die es nie gab.
 > überhaupt". Sie sind **keine** Vorhersage der MAE auf den echten OPs.
 > Kapitel 9 sagt genau, was sich überträgt und was nicht.
 
-Aufbau: 2 OPs, 1200 Zeitschritte, Breite 128 / Tiefe 4, `w_phys = 0.1`,
-`rollout_clamp = 50`, 20 Epochen, **5 Seeds**. MAE in physikalischen Grad
-Celsius, aus dem free-running Rollout.
+Aufbau: 2 OPs, **7000 Zeitschritte** (die echte Länge), Breite 128 / Tiefe 4,
+`w_phys = 0.1`, `rollout_clamp = 50`, `residual_output: false`, 10 Epochen,
+3 Seeds. MAE in physikalischen Grad Celsius, aus dem free-running Rollout.
+
+Bei dieser Länge stimmt das Bundle mit den echten Daten überein:
+`dTdt_scale = 2.467` gegen echte `2.479`, also dieselbe Verstärkung
+`A = 119.5 / 29.9` für `[5, 20]` und dieselbe Zahl Gitterschritte im Fenster.
 
 ### Ist das Modell überhaupt von Nutzen?
 
@@ -350,29 +354,30 @@ Untergrenze:
 |---|---|---|
 | „Temperatur ändert sich nie", `T(t) = T(0)` | 5.36 °C | **11.96 °C** |
 | „konstanter Mittelwert der Trainingslabels" | 2.69 °C | **6.60 °C** |
-| **Modell (`hybrid [200,600]`)** | **0.31 °C** | **1.15 °C** |
-| **Modell (`raw`)** | **0.44 °C** | **0.78 °C** |
+| **Modell (`hybrid [5,20]`, Default)** | **0.78 °C** | **1.21 °C** |
 
-**Ja.** Das Modell liegt um den Faktor **6 bis 15** unter dem besseren der
-beiden trivialen Vorhersager. Es lernt tatsächlich die Dynamik und gibt nicht
-bloß einen Mittelwert zurück.
+**Ja.** Das Modell liegt um Faktor 5–10 unter dem besseren der beiden trivialen
+Vorhersager. Es lernt die Dynamik und gibt nicht bloß einen Mittelwert zurück.
 
-### Verlustverlauf
+### Die Segmentlänge
 
-| | `L_data` (Ende, 5 Seeds) |
-|---|---|
-| `hybrid [200,600]` | 0.013, 0.002, 0.008, 0.012, 0.002 |
-| `raw` | 0.012, 0.008, 0.008, 0.011, 0.035 |
+| `rate_lags` | `A` | MAE train | MAE test | pro Seed (test) |
+|---|---|---|---|---|
+| **`[5, 20]`** (Default) | 119 / 30 | 0.784 | **1.207** | 1.695 · 0.781 · 1.144 |
+| `[50, 150]` | 12 / 4 | 0.594 | 2.102 | 2.846 · 1.579 · 1.880 |
+| `[200, 600]` | 3 / 1 | 0.724 | 2.507 | 3.010 · 1.464 · 3.046 |
+| `raw` | — | 0.824 | 2.601 | 2.677 · 1.790 · 3.336 |
+
+`[5, 20]` gewinnt **auf allen drei Seeds**, und keiner der zwölf Läufe bricht ab.
+Kapitel 8 erklärt, warum die langen Segmente verlieren.
 
 ### Wichtig: `L_data` ist **nicht** das Auswahlkriterium
 
-`L_data` ist ein z-normierter Trainingsverlust auf dem Trainingsabschnitt. Die
-Lieferzahl ist MAE in °C auf dem gehaltenen Teil. Die beiden **ordnen die
-Konfigurationen unterschiedlich** — Details im nächsten Kapitel. Wer `rate_lags`
-oder `history_mode` nach `L_data` auswählt, wählt möglicherweise falsch. Dafür
-gibt es `benchmark_arch.py`.
+`L_data` ist ein z-normierter Trainingsverlust auf dem Trainingsabschnitt. Auf
+`L_data` lag `[200, 600]` zwei Größenordnungen vor allem anderen — auf MAE ist
+es das zweitschlechteste. Wer `rate_lags` oder `history_mode` nach `L_data`
+auswählt, wählt falsch. Dafür gibt es `benchmark_arch.py`.
 
----
 
 ## 7. Was geändert wurde und warum
 
@@ -423,7 +428,7 @@ Treiber und identifiziert den Integrator als den wichtigeren.
 
 → **`residual_output: false`**
 
-### Ursache 2 (Nebentreiber): zu kurze `rate_lags`
+### Die Verstärkung des Rate-Kanals — real, aber nicht die Ursache
 
 Der Rate-Kanal ist `(T_ende − T_start) / (lag_n · rate_scale)`. Für eine echte
 Rate ist das die richtige Normierung. Die **Rauschverstärkung** derselben Formel
@@ -433,7 +438,7 @@ ist aber
 A = 1 / (lag_n · rate_scale)
 ```
 
-und bei den alten `[5, 20] s` ist `A ≈ 119`, weil 5 s nur 0.34 % der ~1474 s
+und bei `[5, 20] s` ist `A ≈ 119`, weil 5 s nur 0.34 % der ~1474 s
 Referenzspanne sind.
 
 **Keine andere Normierung entkommt dem.** Für ein glattes Signal gilt
@@ -450,11 +455,17 @@ Differenz selbst. Nachgerechnet, auf drei Stellen:
 Der Divisor **ist** die Größe, auf die man normiert. Eine echte
 5-Sekunden-Änderung auf O(1) zu ziehen kostet zwangsläufig zwei
 Größenordnungen Rauschverstärkung. Das ist kein Formelfehler, den man
-umschreiben könnte — nur ein längeres Segment hilft.
+umschreiben könnte — `A` senken geht nur über ein längeres Segment oder über
+`--max-rate-amp`.
 
-→ **`rate_lags: [200.0, 600.0]`**
+**Beides kostet mehr, als es bringt** (Kapitel 8): `A ≈ 119` erzeugt Sättigung,
+die `rollout_clamp` abfängt, und dieser Preis ist kleiner als der Verlust an
+Signal. Die richtige Antwort auf `A ≈ 119` ist also nicht, `A` zu senken.
 
-`A` wird bei jedem Start ausgegeben und ab ~100 gewarnt.
+→ **`rate_lags: [5.0, 20.0]` bleibt.**
+
+`A` wird bei jedem Start ausgegeben und ab ~100 gewarnt — als Hinweis, nicht als
+Handlungsaufforderung.
 
 ### Die Sättigungsgrenze: `rollout_clamp: 50.0`
 
@@ -514,115 +525,102 @@ MLP-Auswertung dominiert.
 
 ---
 
-## 8. `hybrid` gegen `raw` — der Vergleich
+## 8. `hybrid` gegen `raw` — und die Segmentlänge
 
-Das ist die verbleibende offene Architekturfrage, und sie ist es wert, sauber
-ausgeschrieben zu werden.
-
-### Was die beiden Modi tun
+### Was die Modi tun
 
 | | `raw` | `hybrid` |
 |---|---|---|
 | Kanäle | `[ T(t−δ), T(t−2δ) ]` | `[ T(t−Δgrid), rate₁, rate₂ ]` |
 | `k` | 2 | 3 |
 | Was das Netz sieht | zwei vergangene **Temperaturen** | eine vergangene Temperatur plus zwei **Änderungsraten** |
-| Normierung der Kanäle | keine (Temperaturen sind bereits z-normiert) | Raten durch `lag_n · rate_scale` |
-| Verstärkung `A` | — (existiert nicht) | `1/(lag_n · rate_scale)` |
+| Normierung | keine (Temperaturen sind schon z-normiert) | Raten durch `lag_n · rate_scale` |
+| Verstärkung `A` | — | `1/(lag_n · rate_scale)` |
 
-Der Gedanke hinter `hybrid` ist gut: eine Änderungsrate ist physikalisch die
-relevantere Größe für eine Wärmeleitungsgleichung, und ein Netz, das die Rate
+Der Gedanke hinter `hybrid` ist gut: eine Änderungsrate ist für eine
+Wärmeleitungsgleichung die physikalisch relevantere Größe, und ein Netz, das sie
 direkt sieht, muss sie nicht aus zwei fast gleichen Temperaturen rekonstruieren.
 Der Preis ist der Divisor — und damit `A`.
 
 ### Die Messung
 
-5 Seeds, 20 Epochen, 128/4, `w_phys = 0.1`, `rollout_clamp = 50`,
+`n_t = 7000` (die echte Länge, `A` stimmt also mit den echten Daten überein),
+10 Epochen, 3 Seeds, 128/4, `w_phys = 0.1`, `rollout_clamp = 50`,
 `residual_output: false`. MAE in °C.
 
-| | `hybrid [200,600]` | `raw` |
-|---|---|---|
-| **MAE train**, je Seed | 0.519, 0.194, 0.411, 0.303, 0.113 | 0.451, 0.355, 0.356, 0.486, 0.531 |
-| **MAE train**, Mittel | **0.308** ✓ | 0.436 |
-| **MAE test**, je Seed | 0.620, 0.319, **2.104**, **1.984**, 0.721 | 0.606, 0.883, 0.389, 0.651, 1.374 |
-| **MAE test**, Mittel | 1.150 | **0.780** ✓ |
-| **MAE test**, schlechtester Seed | **2.104** | 1.374 |
-| **Streuung test** (max/min) | 6.6× | **3.5×** ✓ |
-| **Generalisierungslücke** (test/train) | **3.7×** | **1.8×** ✓ |
+| `rate_lags` | `A` | MAE train | MAE test | pro Seed (test) |
+|---|---|---|---|---|
+| **`[5, 20]`** | 119 / 30 | 0.784 | **1.207** | 1.695 · 0.781 · 1.144 |
+| `[50, 150]` | 12 / 4 | **0.594** | 2.102 | 2.846 · 1.579 · 1.880 |
+| `[200, 600]` | 3 / 1 | 0.724 | 2.507 | 3.010 · 1.464 · 3.046 |
+| `raw` | — | 0.824 | 2.601 | 2.677 · 1.790 · 3.336 |
 
-### Die Interpretation
+**`[5, 20]` gewinnt auf allen drei Seeds**, mit Faktor ~2 Abstand, und keiner
+der zwölf Läufe bricht ab.
 
-**`hybrid` überfittet.** Es passt den Trainingsabschnitt *besser* (0.308 gegen
-0.436) und generalisiert *schlechter* (1.150 gegen 0.780). Die
-Generalisierungslücke ist mehr als doppelt so groß, die Streuung über Seeds fast
-doppelt so groß, und der schlechteste Seed ist um 50 % schlechter.
+### Warum die langen Segmente verlieren
 
-Der Mechanismus ist plausibel und folgt direkt aus der Korrektur, die wir
-vornehmen mussten: um `A` von 119 auf O(1) zu bringen, mussten die Segmente von
-5/20 s auf 200/600 s wachsen. Ein 600-s-Fenster auf einer 1474-s-Trajektorie ist
-aber **keine Rate mehr, sondern ein Fortschrittsindikator** — es sagt dem Netz
-im Wesentlichen, *wo in der Trajektorie* es sich befindet. In-sample ist das
-extrem informativ. Jenseits von `split_t` reicht das Fenster in Bereiche, auf
-die nie gefittet wurde, und die Information wird unzuverlässig.
+`[50, 150]` hat die **beste MAE train** (0.594) und die zweitschlechteste
+MAE test (2.102). Das ist Überfitting, und der Mechanismus ist klar: um `A` zu
+senken, muss das Fenster wachsen — aber ein 600-s-Fenster auf einer
+1474-s-Trajektorie ist **keine Rate mehr, sondern ein Fortschrittsindikator**.
+Es sagt dem Netz vor allem, *wo in der Trajektorie* es sich befindet. In-sample
+ist das hochinformativ; jenseits von `split_t` reicht das Fenster in Bereiche,
+auf die nie gefittet wurde.
 
-Es gibt also eine **Spannung, die vorher niemand sehen konnte**, weil vorher
-nichts durchlief:
+`A ≈ 119` erzeugt dagegen Sättigung, die `rollout_clamp` abfängt — sichtbar an
+den `[SATURATED]`-Zeilen im Log. Dieser Preis ist kleiner als der Nutzen einer
+echten 5-Sekunden-Rate.
 
-```
-zu kurz  →  A groß  →  Rollout divergiert     (5/20 s: A = 119)
-zu lang  →  Fortschrittsindikator  →  überfittet   (200/600 s: A ≈ 1–3)
-```
+`--max-rate-amp` deckelt `A`, ohne das Fenster zu vergrößern. Es dämpft dafür
+den Kanal, das Netz bekommt weniger Signal, und es wird ebenfalls schlechter:
 
-### Was wir tun — und warum
+| | MAE test |
+|---|---|
+| `[5, 20]` ohne Deckel | **0.718** |
+| `[5, 20]`, `max_rate_amp = 3` | 1.082 |
+| `[5, 20]`, `max_rate_amp = 1` | 1.573 |
 
-**Wir behalten `history_mode: hybrid` mit `rate_lags: [200.0, 600.0]` als
-Default.** Drei Gründe:
+### Was wir tun
 
-1. **Die Messung ist synthetisch.** Meine Testtrajektorie ist eine glatte Rampe
-   plus Welligkeit. Für so etwas ist ein Fortschrittsindikator ein besonders
-   guter In-Sample-Prädiktor und ein besonders schlechter Extrapolator — der
-   Überfitting-Effekt ist hier vermutlich **überzeichnet**. Echte
-   Zelltemperaturen sind das nicht.
-2. **Ein Wechsel des `history_mode` ist eine Modellklassen-Entscheidung.** Alle
-   bisherigen Benchmarkergebnisse in diesem Ordner wurden mit `hybrid` erzeugt.
-   Sie auf Basis eines synthetischen Laufs zu entwerten wäre die falsche
-   Reihenfolge.
-3. **Das Werkzeug für diese Entscheidung existiert bereits.**
-   `benchmark_arch.py` ist genau dafür da und läuft auf den echten Daten.
+**`history_mode: hybrid` mit `rate_lags: [5.0, 20.0]`** — also die
+ursprünglichen Werte. `raw` ist mit 2.601 die schlechteste der vier Varianten.
 
-**Aber**: `raw` ist ein ernstzunehmender Kandidat, kein Fallback. Wenn der
-Benchmark auf echten Daten dasselbe Bild zeigt — bessere Test-MAE, kleinere
-Streuung, kleinere Generalisierungslücke — dann ist `raw` die richtige Wahl und
-sollte Default werden.
+Das ist eine **Korrektur gegenüber einem früheren Zwischenstand** dieses
+Dokuments, der `[200, 600]` empfahl. Der Fehler und was daraus zu lernen ist:
+
+1. **Die Messung lief auf einer verkürzten Trajektorie.** `n_t = 1200` bei einem
+   `dtn` für 7000 Schritte heißt, dass nur 1/6 der Referenzspanne überspannt
+   wurde. Dadurch war `dTdt_scale` 16.38 statt 2.5 und `[5, 20]` ergab `A = 18`
+   statt 119 — und ein 5-s-Fenster waren 4 Gitterschritte statt 25. Es wurde
+   also ein anderes Modell gemessen als das, das später läuft.
+2. **`L_data` statt MAE als Kriterium.** Auf `L_data` liegt `[200, 600]` zwei
+   Größenordnungen vorn. Auf der Lieferzahl ist es das zweitschlechteste.
+3. **Eine Korrelation in einem kaputten System ist keine Ursache.** Solange
+   `residual_output: true` war, divergierte *jede* Lag-Wahl. Daraus sah `A ≈ 119`
+   nach einer zweiten, gleichrangigen Ursache aus. Erst nachdem der Integrator
+   weg war, ließ sich `A` isoliert messen — und dann ist es tragbar.
 
 ### Der empfohlene Sweep auf echten Daten
 
-Wegen der oben beschriebenen Spannung ist die interessante Achse **nicht** nur
-„hybrid oder raw", sondern die **Segmentlänge**. Auf den echten OP01–05 gilt
-`rate_scale ≈ 2.479` und `T_span_ref ≈ 1474 s`, also:
+`benchmark_arch.py` sweept jetzt die `A`-Achse statt beliebiger Sekunden:
 
-| `rate_lags` [s] | `A` (erstes Segment) | Erwartung |
-|---|---|---|
-| `[5, 20]` | 119 | divergiert — belegt |
-| `[50, 150]` | 11.9 | **ungetestet — der interessanteste Punkt** |
-| `[100, 300]` | 5.9 | ungetestet |
-| `[200, 600]` | 3.0 | ausgeliefert, läuft |
-| `raw` | — | Referenz |
-
-Die Vermutung, die zu prüfen wäre: irgendwo zwischen `A ≈ 12` und `A ≈ 3` liegt
-ein Optimum, das kurz genug für eine echte Rate und lang genug für einen
-stabilen Rollout ist. `[50, 150]` und `[100, 300]` sind auf echten Daten nie
-gelaufen, weil vorher alles in Epoche 1 abbrach.
+| `rate_lags` [s] | `A` (erstes Segment) |
+|---|---|
+| `[5, 20]` | 119 — Default |
+| `[2, 10]` | 297 — kürzer als der Default |
+| `[10, 60]` | 59 |
+| `[50, 150]` | 11.9 |
+| `[200, 600]` | 3.0 — Fortschrittsindikator-Ende |
+| `[5, 20, 60]` | drei Segmente |
 
 ```bash
-python3 benchmark_arch.py --history-mode hybrid --rate-lags 50 150
-python3 benchmark_arch.py --history-mode hybrid --rate-lags 100 300
-python3 benchmark_arch.py --history-mode hybrid --rate-lags 200 600
+python3 benchmark_arch.py                 # sweept das Gitter oben
 python3 benchmark_arch.py --history-mode raw
 ```
 
 Entscheidungskriterium: **MAE auf dem gehaltenen OP07**, nicht `L_data`.
 
----
 
 ## 9. Einschränkungen
 
@@ -633,20 +631,16 @@ Was dieses Dokument **nicht** belegt:
    ist robust (9/9 Abbruch gegen 0/9) und mechanistisch erklärt; die *Beträge*
    sind es nicht.
 
-2. **`rate_lags` in Sekunden übertragen sich nicht — nur `A` überträgt sich.**
-   Das synthetische Bundle hat `rate_scale = 16.38`, die echten OP01–05 haben
-   `2.479`, also Faktor 6.6:
+2. **Übertragbar ist `A`, nicht die Segmentlänge in Sekunden.** `A` hängt über
+   `rate_scale = dTdt_scale` am Datensatz. Die Messungen in Kapitel 6 und 8 sind
+   in der echten Geometrie gemacht (`n_t = 7000`, `dTdt_scale = 2.467` gegen
+   echte `2.479`), gelten für OP01–05 also direkt. Für
+   `PINNmodulusTwoExtProfiles` gelten sie **nicht**: das Pooling über OP01–OP16
+   vergrößert `T_sigma`, verkleinert `dTdt_scale` und erhöht `A` über 119 hinaus.
 
-   | lag [s] | `A` synthetisch | `A` echt |
-   |---|---|---|
-   | 5 | 18.0 | **118.9** |
-   | 200 | 0.45 | 2.97 |
-   | 600 | 0.15 | 0.99 |
-
-   Die ausgelieferten `[200, 600]` ergeben auf echten Daten `A = 2.97 / 0.99`;
-   gemessen wurde bei `A = 0.45 / 0.15`. Dieselbe Größenordnung, nicht dieselbe
-   Zahl. Die übertragbare Regel lautet **„`A` auf O(1) bringen"**, nicht „nimm
-   200 und 600 Sekunden".
+   Frühere Messungen auf einer verkürzten Trajektorie (`n_t = 1200`) hatten
+   `dTdt_scale = 16.38` und damit `A = 18` statt 119 — sie taugen für die
+   Lag-Wahl nicht und sind in Kapitel 8 als Fehlerquelle dokumentiert.
 
 3. **Die Trajektorien im Test sind 1200–4000 Schritte lang, echte haben ~7000.**
    Ein Integrator-Problem wächst mit `n_t`; bei `n_t = 4000` wurde

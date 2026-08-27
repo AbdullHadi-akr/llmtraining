@@ -132,8 +132,10 @@ def parse_args() -> argparse.Namespace:
                    default=d.get("history_mode", "hybrid"))
     p.add_argument("--rate-lags", nargs="+", type=float,
                    default=d.get("rate_lags", [5.0, 20.0]),
-                   help="TEMPERATURE history segments (the recurrence); distinct "
-                        "from --driver-rate-lags, which are exogenous")
+                   help="TEMPERATURE history segments in SECONDS (the "
+                        "recurrence); distinct from --driver-rate-lags, which "
+                        "are exogenous and unaffected. What matters is "
+                        "A = 1/(lag_n * rate_scale), printed at startup")
     p.add_argument("--delta-grid", type=float, default=d.get("delta_grid", 0.2),
                    help="anchor lag of the hybrid temperature history in SECONDS")
     p.add_argument("--residual-output", action=argparse.BooleanOptionalAction,

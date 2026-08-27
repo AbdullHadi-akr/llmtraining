@@ -14,9 +14,11 @@ ansetzt, um es zu erweitern.
 >   dadurch, dass es in einer Schleife auf seinen **eigenen Ausgaben** läuft.
 > - Kein Teacher Forcing, nirgends. Der Datenverlust wird auf genau der
 >   Trajektorie genommen, die auch zur Inferenzzeit entsteht.
-> - `residual_output` ist **aus** und `rate_lags` sind **lang**. Beides ist
->   nicht optional: mit den alten Werten bricht jeder Lauf in Epoche 1 mit
->   `L_data = nan` ab — siehe Abschnitt 3.1.
+> - `residual_output` ist **aus**, und das ist nicht optional: mit `true` bricht
+>   jeder Lauf in Epoche 1 mit `L_data = nan` ab — siehe Abschnitt 3.1.
+> - `rate_lags` bleiben bei `[5, 20]`. Die Verstärkung `A ≈ 119` ist real, aber
+>   tragbar, sobald der Integrator weg ist — und gemessen besser als jede längere
+>   Variante.
 > - Die History-Anordnung (`δ`, `k_max`, `Δgrid`, `rate_lags`) ist **fest**.
 >   Gelernt werden nur MLP-Gewichte, das Swish-`β` je Schicht und zwei
 >   Physik-Gains.
@@ -113,25 +115,27 @@ Zwei Layouts, umschaltbar über `history_mode`:
 Raten über **kumulative** Segmente:
 
 ```
-            ├───── 600 s ─────┤├── 200 s ──┤├ Δgrid ┤
-   ─────────●─────────────────●─────────────●────────●──────>  Zeit
-       T(t−Δgrid−800)   T(t−Δgrid−200)  T(t−Δgrid)     t
-                                            ▲
-                                          Anker
+             ├──── 20 s ────┤├─ 5 s ─┤├ Δgrid ┤
+   ──────────●──────────────●─────────●────────●──────>  Zeit
+        T(t−Δgrid−25)  T(t−Δgrid−5)  T(t−Δgrid)   t
+                                      ▲
+                                    Anker
 
-   Kanal 1 :  T(t−Δgrid)                                   (Absolutwert)
-   Kanal 2 :  [T(t−Δgrid)     − T(t−Δgrid−200)] ÷ 200      (Rate 1)
-   Kanal 3 :  [T(t−Δgrid−200) − T(t−Δgrid−800)] ÷ 600      (Rate 2)
+   Kanal 1 :  T(t−Δgrid)                              (Absolutwert)
+   Kanal 2 :  [T(t−Δgrid)   − T(t−Δgrid−5)]  ÷  5     (Rate 1)
+   Kanal 3 :  [T(t−Δgrid−5) − T(t−Δgrid−25)] ÷ 20     (Rate 2)
 ```
 
-> **Warum 200 und 600 und nicht 5 und 20.** Der Divisor ist `lag_n · rate_scale`,
-> und für ein glattes Signal ist das genau der RMS der Differenz über dieses
-> Segment. Der Kanal verstärkt damit alles Nicht-Glatte um
-> `A = 1/(lag_n · rate_scale)`. Bei 5 s auf einer ~1474-s-Spanne ist `A ≈ 119`
-> und der Rollout divergiert; bei 200 s ist `A ≈ 3`. Siehe Abschnitt 3.1.
+> **Die Verstärkung dieses Kanals.** Der Divisor ist `lag_n · rate_scale`, und
+> für ein glattes Signal ist das genau der RMS der Differenz über dieses Segment.
+> Der Kanal verstärkt damit alles Nicht-Glatte um `A = 1/(lag_n · rate_scale)` —
+> bei 5 s auf einer ~1474-s-Spanne ist das `A ≈ 119`. Das ist viel und wird beim
+> Start ausgegeben, aber es ist **nicht** der Grund, aus dem früher jeder Lauf
+> abbrach; das war `residual_output`. Längere Segmente senken `A` und schneiden
+> gemessen schlechter ab. Siehe Abschnitt 3.1.
 
 `Δgrid` verschiebt, **wo** das Fenster sitzt; es ist kein Teil einer Spanne. Die
-Endpunkte von Rate 1 liegen 200 s auseinander, egal wie weit der Anker zurückliegt.
+Endpunkte von Rate 1 liegen 5 s auseinander, egal wie weit der Anker zurückliegt.
 Deshalb sind `--delta-grid` und `--subsample` unabhängige Regler.
 
 > **Fallstrick, der schon einmal alles zerstört hat.** Die Rate wird durch die
@@ -247,7 +251,7 @@ keine Rolle — ein Integrator interessiert sich nur dafür, dass er ein Vorzeic
 hat. Bei zufälliger Initialisierung hat er eines: Swish ist nicht
 mittelwertfrei, also mittelt sich `mean(net)` über eine Ziehung nicht weg.
 
-#### Der Nebentreiber: zu kurze `rate_lags`
+#### Die Verstärkung des Rate-Kanals — real, aber nicht die Ursache
 
 Der Rate-Kanal ist `(T_ende - T_start) / (lag_n · rate_scale)`. Für eine *echte*
 Rate ist das die richtige Normierung — `rate_scale` ist der RMS von `dTn/dtn`,
@@ -258,10 +262,19 @@ der Kanal landet bei O(1). Was niemand geprüft hat, ist die
 A = 1 / (lag_n · rate_scale)
 ```
 
-Bei den alten `[5, 20]` s ist `A ≈ 119`, weil 5 s nur 0.34 % der ~1474 s
-Referenzspanne sind. Jede Nicht-Glattheit — insbesondere das Schritt-zu-Schritt-
-Zittern eines untrainierten Netzes — kommt 119-fach verstärkt zurück in den
-Eingang. `A` wird bei jedem Start ausgegeben und ab ~100 gewarnt.
+Bei `[5, 20]` s ist `A ≈ 119`, weil 5 s nur 0.34 % der ~1474 s Referenzspanne
+sind. Jede Nicht-Glattheit — insbesondere das Schritt-zu-Schritt-Zittern eines
+untrainierten Netzes — kommt 119-fach verstärkt zurück in den Eingang. `A` wird
+bei jedem Start ausgegeben und ab ~100 gewarnt.
+
+> **Trotzdem bleiben die Lags bei `[5, 20]`.** `A ≈ 119` ist viel, aber es ist
+> nicht das, was die Läufe abbrechen liess — das war `residual_output`. Ist der
+> Integrator weg und `rollout_clamp` an, ist `A ≈ 119` tragbar, und das kurze
+> Segment trägt das bessere Signal. Die Messung dazu steht in
+> [„Die Segmentlänge — gemessen"](#die-segmentlänge--gemessen) weiter unten.
+> Diese Unterscheidung ist erst spät klar geworden: solange nur mit
+> `residual_output: true` gemessen wurde, divergierte **jede** Lag-Wahl, und das
+> sah nach zwei gleichrangigen Ursachen aus.
 
 #### Die Messung
 
@@ -282,10 +295,16 @@ bei `raw`, wo es überhaupt keine Rate-Kanäle gibt. Das ist der Beweis, dass de
 Integrator und nicht die Verstärkung der Haupttreiber ist. Bestätigt bei
 `n_t = 4000` (3.3× längere Trajektorie): alt 3/3 ABORT, neu 3/3 bei ~1e-4.
 
-Daraus die beiden Defaults in `config.yaml`: `residual_output: false` und
-`rate_lags: [200.0, 600.0]`. Beides sind **Layout-Entscheidungen, keine
-Krücken** — und die neue Kombination ist nicht bloß stabiler, sie ist zwei
-Größenordnungen besser.
+Daraus der eine entscheidende Default in `config.yaml`:
+**`residual_output: false`**.
+
+> **Achtung, Falle in dieser Tabelle.** Sie legt nahe, `[200, 600]` sei die
+> bessere Lag-Wahl — zwei Größenordnungen besser im `L_data`. Das ist ein
+> Artefakt: `L_data` ist der Trainingsverlust auf dem Trainingsabschnitt, und
+> gemessen an der Lieferzahl MAE dreht sich die Reihenfolge um. Ausserdem lief
+> diese Tabelle auf einer verkürzten Trajektorie, deren `dTdt_scale` um Faktor
+> 6.6 danebenlag. Beides ist im Abschnitt
+> [„Die Segmentlänge — gemessen"](#die-segmentlänge--gemessen) korrigiert.
 
 #### Mit aktivem Physik-Term
 
@@ -315,48 +334,81 @@ Zwei Dinge, die man ohne diesen Durchgang nicht gesehen hätte:
 
 `L_data` ist ein z-normierter Trainingsverlust auf dem Trainingsabschnitt. Die
 Lieferzahl ist MAE in °C auf dem gehaltenen Teil. Die beiden ordnen die
-Konfigurationen **nicht gleich**, und das ist kein Detail.
+Konfigurationen **nicht gleich** — und das hat mich einmal in die falsche
+Richtung geführt, siehe unten.
 
-128/4, `w_phys = 0.1`, `rollout_clamp: 50`, 12 Epochen, 3 Seeds:
+Als Untergrenze zwei triviale Vorhersager:
 
-| | MAE train [°C] | MAE test [°C] | Mittel test |
-|---|---|---|---|
-| `hybrid [200,600]` | 0.72 / 0.24 / 0.44 | 0.81 / 0.38 / **2.43** | 1.21 |
-| `raw` | 0.81 / 0.36 / 0.36 | **1.70** / 0.77 / 0.43 | 0.97 |
-| Baseline: IC festhalten | 5.36 | 11.96 | |
-| Baseline: Mittelwert der Trainingslabels | 2.69 | 6.60 | |
+| Vorhersager | MAE train | MAE test |
+|---|---|---|
+| „Temperatur ändert sich nie", `T(t) = T(0)` | 5.36 °C | **11.96 °C** |
+| „konstanter Mittelwert der Trainingslabels" | 2.69 °C | **6.60 °C** |
+| Modell | ~0.3–0.8 °C | ~0.8–2.5 °C |
 
-**Das Modell ist brauchbar**: 0.4–2.4 °C gegen 6.6–12 °C für die trivialen
-Baselines, Faktor 3–17.
+**Das Modell ist brauchbar** — es liegt um ein Mehrfaches unter dem besseren der
+beiden. Es lernt die Dynamik und gibt nicht bloß einen Mittelwert zurück.
 
-**Aber der `L_data`-Vorsprung von `[200,600]` überträgt sich nicht.** Auf
-`L_data` lag es 100× vor `raw`; auf MAE_test liegt `raw` im Mittel leicht vorn,
-und der Abstand ist kleiner als die Streuung über die Seeds. Erklärung: ein
-600-s-Fenster auf einer 1474-s-Trajektorie ist weniger eine Rate als ein
-Fortschrittsindikator. In-sample ist das extrem informativ, jenseits von
-`split_t` reicht das Fenster in Bereiche, auf die nie gefittet wurde.
+#### Die Segmentlänge — gemessen
 
-Wer `L_data` als Auswahlkriterium für `rate_lags` oder `history_mode` benutzt,
-wählt also möglicherweise falsch. Dafür ist `benchmark_arch.py` da.
+Die früheren Lag-Messungen liefen auf einer **verkürzten** Trajektorie
+(`n_t = 1200` bei einem `dtn` für 7000 Schritte). Dadurch überspannte sie nur
+1/6 der Referenzspanne, `dTdt_scale` kam auf 16.38 statt 2.5, und `[5, 20]`
+ergab dort `A = 18` statt der echten 119. Ein 5-s-Fenster waren dort ausserdem
+4 Gitterschritte statt 25. **Diese Messungen taugen für die Lag-Wahl nicht.**
+
+Bei voller Länge stimmt das Bundle mit den echten Daten überein:
+`dTdt_scale = 2.467` gegen echte `2.479`, also `A = 119.5 / 29.9` für `[5, 20]`
+wie in echt, und 5 s sind 25 Gitterschritte. Darauf gemessen — `n_t = 7000`,
+10 Epochen, 3 Seeds, 128/4, `w_phys = 0.1`, `residual_output: false`,
+`rollout_clamp: 50`, MAE in °C:
+
+| `rate_lags` | `A` | MAE train | MAE test | pro Seed (test) |
+|---|---|---|---|---|
+| **`[5, 20]`** | 119 / 30 | 0.784 | **1.207** | 1.695 · 0.781 · 1.144 |
+| `[50, 150]` | 12 / 4 | 0.594 | 2.102 | 2.846 · 1.579 · 1.880 |
+| `[200, 600]` | 3 / 1 | 0.724 | 2.507 | 3.010 · 1.464 · 3.046 |
+| `raw` | — | 0.824 | 2.601 | 2.677 · 1.790 · 3.336 |
+
+**`[5, 20]` gewinnt auf allen drei Seeds, und keiner der zwölf Läufe bricht ab.**
+Das ist kein knapper Vorsprung im Rauschen, sondern durchgängig Faktor ~2.
+
+Die Deutung: `A ≈ 119` erzeugt Sättigung, die der Clamp abfängt — sichtbar an
+den `[SATURATED]`-Zeilen. Der Preis ist aber kleiner als der Nutzen der kurzen
+Rate. Längere Segmente senken `A`, machen den Kanal aber zu einem
+**Fortschrittsindikator**: ein 600-s-Fenster auf 1474 s sagt dem Netz vor allem,
+*wo in der Trajektorie* es ist. In-sample hilft das (`[50,150]` hat mit 0.594
+die beste MAE train), jenseits von `split_t` schadet es.
+
+`--max-rate-amp` deckelt `A`, ohne die Segmentlänge anzufassen — es dämpft den
+Kanal, das Netz bekommt weniger Signal, und es wird schlechter statt besser:
+
+| | MAE test |
+|---|---|
+| `[5, 20]` ohne Deckel | **0.718** |
+| `[5, 20]`, `max_rate_amp = 3` | 1.082 |
+| `[5, 20]`, `max_rate_amp = 1` | 1.573 |
+
+Deshalb bleibt es bei `0.0` (aus).
+
+> **Was daran lehrreich ist.** Solange `residual_output: true` war, divergierte
+> **jede** Lag-Wahl, auch `raw`. Daraus sah es nach zwei gleichrangigen Ursachen
+> aus, und `A ≈ 119` wirkte zwingend behebbar. Erst nachdem der Integrator weg
+> war, liess sich `A` überhaupt isoliert messen — und dann ist es tragbar. Eine
+> Korrelation in einem kaputten System ist keine Ursache.
 
 #### Was sich auf echte Daten überträgt — und was nicht
 
-Alle Trainingszahlen hier stammen von einem synthetischen Bundle. Dessen
-`rate_scale` (= `dTdt_scale`) ist 16.38, das der echten OP01–05 ist 2.479 —
-Faktor 6.6. **`rate_lags` in Sekunden übertragen sich damit nicht; `A`
-überträgt sich.**
+Übertragbar ist **`A`**, nicht die Segmentlänge in Sekunden: `A` hängt über
+`rate_scale = dTdt_scale` am Datensatz, dieselben Sekunden ergeben also bei
+einem anderen OP-Satz ein anderes `A`. Die Startzeile gibt es aus.
 
-| lag [s] | A synthetisch | A echt |
-|---|---|---|
-| 5 | 18.0 | **118.9** |
-| 20 | 4.5 | 29.7 |
-| 200 | 0.45 | 2.97 |
-| 600 | 0.15 | 0.99 |
+Die Messung oben ist in der echten Geometrie gemacht (`A = 119/30`), sie
+überträgt sich also für OP01–05 direkt. Was **nicht** übertragbar ist:
 
-Die ausgelieferten `[200.0, 600.0]` ergeben auf echten Daten `A = 2.97 / 0.99`;
-gemessen wurde bei `A = 0.45 / 0.15`. Dieselbe Größenordnung, nicht dieselbe
-Zahl. Die übertragbare Regel lautet **`A` auf O(1) bringen**, nicht „nimm 200
-und 600 Sekunden".
+* Die absoluten MAE-Werte. Die Trajektorie ist synthetisch.
+* Die Zahlen für `PINNmodulusTwoExtProfiles`: das Pooling über OP01–OP16
+  vergrössert `T_sigma`, verkleinert `dTdt_scale` und **erhöht damit `A`** über
+  die 119 hinaus. Dort ist die Lag-Wahl ungetestet.
 
 #### Warum keine andere Normierung den Rate-Kanal rettet
 
@@ -378,13 +430,18 @@ Nachgerechnet auf einer glatten Rampe-plus-Welligkeit, auf drei Stellen genau:
 Der Divisor **ist** der RMS der Differenz selbst. Jede Normierung, die eine
 echte 5-Sekunden-Änderung auf O(1) hebt, muss durch ~0.008 teilen und verstärkt
 damit alles andere um denselben Faktor. Die Verstärkung ist also kein
-Formelfehler, den man umschreiben könnte, sondern intrinsisch: 5 s sind 0.34 %
-der Trajektorie, und eine so kleine Differenz auf O(1) zu ziehen kostet zwei
-Größenordnungen Rauschverstärkung. **Nur ein längeres Segment hilft.**
+Formelfehler, den man umschreiben könnte, sondern **intrinsisch**: 5 s sind
+0.34 % der Trajektorie, und eine so kleine Differenz auf O(1) zu ziehen kostet
+zwei Größenordnungen Rauschverstärkung. `A` senken geht nur über ein längeres
+Segment — oder über `--max-rate-amp`, das den Kanal dämpft.
 
-Der Preis: eine „Rate" über 600 s ist eher ein Fortschrittsmaß als eine Rate.
-Ob das dem Modell schadet oder sogar hilft, entscheidet `benchmark_arch.py` auf
-echten Daten — dafür ist es da.
+**Beides kostet mehr, als es bringt.** Gemessen (siehe „Die Segmentlänge —
+gemessen"): längere Segmente machen den Kanal zum Fortschrittsindikator und
+verschlechtern die MAE auf jedem Seed; `--max-rate-amp` dämpft das Signal und
+verschlechtert sie ebenfalls. Die richtige Antwort auf `A ≈ 119` ist also
+**nicht, `A` zu senken**, sondern den Integrator abzuschalten und die Sättigung
+per `rollout_clamp` abzufangen. `benchmark_arch.py` sweept die Achse trotzdem —
+auf echten Daten kann das Optimum woanders liegen.
 
 #### Was ausdrücklich NICHT hilft
 
@@ -394,10 +451,11 @@ echten Daten — dafür ist es da.
   der nächste Rollout erreicht 4.7e4. Der stabile Bereich im Gewichtsraum ist zu
   klein; gewöhnliches Training läuft in wenigen Schritten heraus. Das Problem
   ist das Layout, nicht der Startpunkt.
-* **`--max-rate-amp`.** Hebt `rate_scale`, deckelt `A` — ändert damit aber das
-  Modell, statt die Segmentlänge zu korrigieren, die tatsächlich falsch war.
-  Gemessen ohne `residual_output` half es nicht mehr als längere Lags, und mit
-  `residual_output` gar nicht.
+* **`--max-rate-amp`.** Hebt `rate_scale` und deckelt `A`, dämpft damit aber den
+  Kanal: das Netz bekommt weniger Signal. Gemessen wird die MAE monoton
+  schlechter, je härter gedeckelt wird (0.72 → 1.08 → 1.57). Bleibt aus.
+* **Längere `rate_lags`.** Senken `A`, verschlechtern die MAE auf jedem Seed —
+  siehe „Die Segmentlänge — gemessen". `[5, 20]` bleibt.
 * **`--rollout-clamp` allein.** Mit `residual_output: true` verhindert er den
   Abbruch, stabilisiert aber nicht: über 3 Seeds lief einer am Ende wieder weg.
   Er ersetzt die Layout-Korrektur nicht. *Zusätzlich* zu ihr ist er dagegen
@@ -414,6 +472,11 @@ echten Daten — dafür ist es da.
 > **Und ein Einzellauf entscheidet hier nichts.** Auf Seed 0 allein sieht die
 > Rangfolge mehrfach anders aus als über drei Seeds. Wer diese Tabellen
 > anfasst, misst bitte wieder über mehrere Seeds.
+
+> **Und die Geometrie muss stimmen.** Eine verkürzte Trajektorie verschiebt
+> `dTdt_scale` und damit `A` — bei `n_t = 1200` statt 7000 um Faktor 6.6. Wer
+> Lag-Wahl oder `A` misst, braucht die volle Länge; sonst misst er ein anderes
+> `A`, als der Lauf später hat.
 
 > **Hier geht die Zeit hin.** ~7000 sequentielle Schritte pro OP und Epoche, die
 > sich prinzipiell nicht parallelisieren lassen — jeder braucht den vorherigen.

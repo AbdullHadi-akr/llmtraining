@@ -1,10 +1,11 @@
 # PINNmodulusTwo — Approach 2 (Modulus-as-a-tool + own recurrence)
 
 > **Update 27.08.2026 — der erste durchlaufende Test.** Bis dahin brach
-> jeder Lauf in Epoche 1 mit `L_data = nan` ab.
-> [`README_ERSTER_TEST.md`](README_ERSTER_TEST.md) beschreibt Modell,
-> Architektur, Training, Daten, Loss und Ergebnisse vollständig, dazu die
-> Ursache des Abbruchs und den Vergleich `hybrid` gegen `raw`.
+> jeder Lauf in Epoche 1 mit `L_data = nan` ab; die Ursache war
+> `residual_output`. [`README_ERSTER_TEST.md`](README_ERSTER_TEST.md) beschreibt
+> Modell, Architektur, Training, Daten, Loss und Ergebnisse vollständig, dazu die
+> Ursache und den gemessenen Vergleich der `rate_lags` und von `hybrid` gegen
+> `raw`.
 
 Implementation of **method #2** from the Notion page *"Battery Model with NVIDIA
 MODULUS"*: use Modulus as much as practical, but bring our **own recurrence** in
@@ -77,25 +78,24 @@ feeds the network a more compact feature block:
 - `T(t-Δgrid)` as an absolute anchor. `Δgrid` is `--delta-grid` (default
   `0.2 s`), a free knob independent of `--subsample`, and used **only** in
   hybrid mode -- raw mode spaces its lags by `δ` instead.
-- One rate channel per entry in `rate_lags` (`200 s` and `600 s` by default —
-  the old `5 s` / `20 s` diverge, see below). The segments are cumulative, each
-  starting where the previous ended, and each rate is divided by **its own
-  segment length** — the actual distance between the two points being
-  differenced:
+- One rate channel per entry in `rate_lags` (`5 s` and `20 s` by default). The
+  segments are cumulative, each starting where the previous ended, and each rate
+  is divided by **its own segment length** — the actual distance between the two
+  points being differenced:
 
-      Rate 1: [T(t-Δgrid)     - T(t-Δgrid-200)] / 200
-      Rate 2: [T(t-Δgrid-200) - T(t-Δgrid-800)] / 600
+      Rate 1: [T(t-Δgrid)   - T(t-Δgrid-5)]  / 5
+      Rate 2: [T(t-Δgrid-5) - T(t-Δgrid-25)] / 20
 
   `Δgrid` shifts where the window sits but is not part of any span: the endpoints
-  of rate 1 are 200 s apart however far back the anchor is. Dividing by the
-  clamped *elapsed* span instead is a singularity: early in the rollout that span
+  of rate 1 are 5 s apart however far back the anchor is. Dividing by the clamped
+  *elapsed* span instead is a singularity: early in the rollout that span
   collapses to one grid step and the rate explodes.
 
-  The segment length is not a free knob. Divided by `lag_n * rate_scale`, the
-  channel multiplies everything non-smooth — including an untrained net's
-  step-to-step jitter — by `A = 1/(lag_n * rate_scale)`. At `5 s` against a
-  ~1474 s reference span that is `A ≈ 119` and the rollout diverges; at
-  `200 s` it is `A ≈ 3`. `A` is printed at startup.
+  Dividing by `lag_n * rate_scale` means the channel multiplies everything
+  non-smooth — including an untrained net's step-to-step jitter — by
+  `A = 1/(lag_n * rate_scale)`, which at `5 s` against a ~1474 s reference span
+  is `A ≈ 119`. `A` is printed at startup. It is tolerable here; longer segments
+  lower it and generalise worse — see the stability notes below.
 
 Set `history_mode: raw` if you want the original lag stack, or `history_mode:
 hybrid` (the default) for the anchor + rates layout.
@@ -200,8 +200,7 @@ Outputs land in `PINNmodulusTwo/artifacts/`: `metrics.txt`, `training_curves.png
 - Training is free-running: the data loss is taken on the model's own
   autoregressive rollout (seeded only by the measured initial condition), never
   on ground-truth history. There is NO teacher forcing anywhere in train/eval.
-- **`residual_output` is off and `rate_lags` are long, and neither is optional.**
-  With the old settings (`residual_output: true`, `rate_lags: [5, 20]`) every run
+- **`residual_output` is off, and that is not optional.** With it on every run
   aborted in epoch 1 with `L_data = nan`, before a single optimiser step.
 
   The training loop computes one rollout per OP per epoch under `no_grad` and
@@ -209,39 +208,53 @@ Outputs land in `PINNmodulusTwo/artifacts/`: `metrics.txt`, `training_curves.png
   an *input* to the first gradient step. Once it holds `inf` there is no gradient
   left to recover from.
 
-  Two things drove it there. `residual_output` made `field()` return
-  `level(t) + net(...)`, and `level(t) ~ level(t - delta_grid) + mean(net)` is an
-  integrator of gain exactly 1 with no leak -- any one-signed component of the
-  output accumulates over ~7000 steps and nothing pulls it back. Separately, the
-  hybrid rate channel divides by `lag_n * rate_scale`, which at 5 s against a
-  ~1474 s reference span is a gain of `A ~ 119` on anything non-smooth. `A` is
-  printed at startup and warned about above ~100.
+  `residual_output` made `field()` return `level(t) + net(...)`, and
+  `level(t) ~ level(t - delta_grid) + mean(net)` is an integrator of gain exactly
+  1 with no leak -- any one-signed component of the output accumulates over
+  ~7000 steps and nothing pulls it back.
 
   Measured end to end (synthetic bundle, 20 epochs, 3 seeds, no guards):
   `residual_output: true` aborted **9/9 in every history configuration**, `raw`
-  included -- which is where there are no rate channels at all, so the integrator
-  is the primary driver. With it off, all of them ran; `hybrid` + `[200, 600]`
-  reached `L_data ~ 1e-4`, two orders of magnitude better than anything else.
+  included -- which is where there are no rate channels at all. That is what
+  identifies the integrator rather than the rate channel as the cause.
   ARCHITECTURE.md 3.1 has the tables and the confirmation at `n_t = 4000`.
 
   A better initialisation does NOT fix this: zeroing the output layer makes the
   rollout perfectly stable at init (0/5 over 7000 steps), and twenty Adam steps
   later the next rollout reaches 1e4. The stable region of weight space is small
   and training walks out of it. It is a layout problem, not a starting point.
+- **`rate_lags` stays at `[5, 20]`.** The rate channel divides by
+  `lag_n * rate_scale`, so a 5 s segment amplifies anything non-smooth by
+  `A ~ 119` (printed at startup). That is real, but it is not what aborted the
+  runs -- `residual_output` was. With the integrator gone and `--rollout-clamp`
+  on, `A ~ 119` is tolerable, and the short segment carries the better signal: a
+  rate over 600 s on a ~1474 s trajectory is closer to a progress indicator than
+  to a rate, and it generalises worse.
+
+  Measured at the REAL geometry (`n_t = 7000`, synthetic `dTdt_scale` 2.467
+  against the real 2.479, so `A` matches the real 119/30), 10 epochs, 3 seeds,
+  MAE in degrees C on the held-out tail:
+
+  | `rate_lags` | `A` | MAE test |
+  |---|---|---|
+  | **`[5, 20]`** | 119 / 30 | **1.207** — best on all three seeds |
+  | `[50, 150]` | 12 / 4 | 2.102 |
+  | `[200, 600]` | 3 / 1 | 2.507 |
+  | `raw` | — | 2.601 |
+
+  No aborts in any of the twelve runs. `--max-rate-amp` caps `A` by rescaling the
+  channel and made things worse still (MAE test 0.72 -> 1.08 -> 1.57 as the cap
+  tightened), so it stays off.
 - **Is the result any good?** `L_data` is a z-scored training loss on the train
   portion; the deliverable is MAE in degrees C on the held-out tail, and the two
-  do NOT rank configurations the same way. Measured at 128/4 with `w_phys: 0.1`
-  over 3 seeds: MAE test 0.38-2.43 C for `hybrid [200, 600]` and 0.43-1.70 C for
-  `raw`, against 6.60 C for "predict the training mean" and 11.96 C for "hold the
-  initial condition". So the model is worth 3-17x over a trivial baseline -- but
-  `hybrid [200, 600]`'s 100x advantage in `L_data` does NOT survive the switch to
-  MAE, where `raw` is marginally ahead and the gap is inside the seed spread. Use
-  `benchmark_arch.py`, not `L_data`, to choose `rate_lags` or `history_mode`.
-- **What transfers to real data is `A`, not the lag in seconds.** These numbers
-  come from a synthetic bundle whose `rate_scale` is 16.38 against 2.479 for the
-  real OP01-05. The shipped `[200.0, 600.0]` gives `A = 2.97 / 0.99` on real data
-  and was measured at `A = 0.45 / 0.15`. The rule is "get `A` to O(1)", not "use
-  200 and 600 seconds".
+  do NOT rank configurations the same way -- `[200, 600]` wins on `L_data` and
+  loses on MAE. Against trivial baselines the model is worth several times over:
+  6.60 C for "predict the training mean", 11.96 C for "hold the initial
+  condition". Use `benchmark_arch.py` and MAE, never `L_data`, to choose
+  `rate_lags` or `history_mode`.
+- **What transfers between datasets is `A`, not the lag in seconds.** `A` depends
+  on `rate_scale = dTdt_scale`, which is a property of the data. The same
+  seconds give a different `A` on a different OP set -- check the startup line.
 - `--rollout-clamp` (default `50.0`) saturates the rollout buffer in normalised
   temperature units. With `w_phys: 0` it is only a diagnostic -- it keeps a
   runaway rollout finite so the log reports how much of the trajectory ran away

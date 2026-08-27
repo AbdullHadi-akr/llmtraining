@@ -199,7 +199,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--driver-rate-lags", nargs="+", type=float,
                    default=d.get("driver_rate_lags", [5.0, 20.0]))
     p.add_argument("--rate-lags", nargs="+", type=float,
-                   default=d.get("rate_lags", [200.0, 600.0]))
+                   default=d.get("rate_lags", [5.0, 20.0]))
     p.add_argument("--delta-grid", type=float, default=d.get("delta_grid", 0.2))
     p.add_argument("--max-rate-amp", type=float, default=d.get("max_rate_amp", 0.0))
     p.add_argument("--width", type=int, default=d.get("layer_size", 128))

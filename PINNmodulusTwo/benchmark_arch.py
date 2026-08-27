@@ -73,24 +73,29 @@ DEFAULT_DELTA_GRIDS = [0.2, 0.5, 1.0, 2.0]
 # Sekunden bei einem anderen OP-Satz ein anderes A ergeben. train.py gibt A beim
 # Start aus.
 #
-# Das alte Gitter ([5,20], [2,10], [10,60], [5,20,60], [30]) lag mit A zwischen
-# 20 und 297 vollstaendig im divergenten Bereich -- jeder Punkt haette in
-# Epoche 1 mit L_data=nan abgebrochen. Das ist nie aufgefallen, weil vor diesem
-# Stand ohnehin nichts durchlief.
+# Ein grosses A ist NICHT der Grund, aus dem frueher jeder Lauf abbrach -- das
+# war residual_output. Ist der Integrator weg und rollout_clamp an, ist A ~ 119
+# tragbar. Die Segmentlaenge hat aber zwei gegenlaeufige Effekte, und wo der
+# Kompromiss liegt, gehoert auf echten Daten gemessen:
+#
+#   kurz  -> A gross, mehr Saettigung, aber die Rate ist eine echte Rate
+#   lang  -> A klein, aber ein 600-s-Fenster auf 1474 s ist eher ein
+#            Fortschrittsindikator als eine Rate und generalisiert schlechter
+#
+# Auf einem synthetischen Bundle in der ECHTEN Geometrie (n_t = 7000,
+# dTdt_scale 2.467 gegen echte 2.479, A also 119/30 wie in echt) gewann [5,20]
+# die MAE auf dem gehaltenen Abschnitt auf allen drei Seeds -- vor [50,150],
+# [200,600] und raw, ohne einen einzigen Abbruch in zwoelf Laeufen. Deshalb ist
+# [5,20] die Baseline; die laengeren Segmente stehen als Gegenprobe daneben.
 #
 # A unten fuer OP01-05: rate_scale ~ 2.479, T_span_ref ~ 1474 s.
-# Das Gitter spannt bewusst den Uebergang auf, denn es gibt eine Spannung:
-#   zu kurz -> A gross -> der Rollout divergiert
-#   zu lang -> das Fenster ist keine Rate mehr, sondern ein
-#              Fortschrittsindikator -> es ueberfittet
-# Wo dazwischen das Optimum liegt, ist genau die offene Frage.
 DEFAULT_LAG_SETS = [
-    [200.0, 600.0],          # A ~ 3.0 / 1.0    <- Default aus config.yaml
-    [50.0, 150.0],           # A ~ 11.9 / 4.0   <- auf echten Daten nie gelaufen
-    [100.0, 300.0],          # A ~ 5.9 / 2.0    <- auf echten Daten nie gelaufen
-    [100.0, 300.0, 600.0],   # drei Segmente, Fenster 1000 s
-    [300.0],                 # A ~ 2.0, ein einzelnes Segment
-    [5.0, 20.0],             # A ~ 119 / 30     <- alter Default, bricht ab
+    [5.0, 20.0],             # A ~ 119 / 30     <- Default aus config.yaml
+    [2.0, 10.0],             # A ~ 297 / 59
+    [10.0, 60.0],            # A ~ 59 / 10
+    [50.0, 150.0],           # A ~ 11.9 / 4.0
+    [200.0, 600.0],          # A ~ 3.0 / 1.0    Fortschrittsindikator-Ende
+    [5.0, 20.0, 60.0],       # drei Segmente
 ]
 
 
@@ -133,7 +138,7 @@ def parse_args() -> argparse.Namespace:
     # Baseline held fixed off-axis
     p.add_argument("--width", type=int, default=128, help="baseline MLP width")
     p.add_argument("--depth", type=int, default=4, help="baseline MLP depth")
-    p.add_argument("--rate-lags", nargs="+", type=float, default=[200.0, 600.0],
+    p.add_argument("--rate-lags", nargs="+", type=float, default=[5.0, 20.0],
                    help="baseline hybrid rate segments in seconds. The number "
                         "that matters is A = 1/(lag_n * rate_scale), printed at "
                         "startup; see DEFAULT_LAG_SETS")

@@ -29,14 +29,31 @@ layer_size: 128
 num_layers: 4
 k_max: 2                   # nur im raw-Modus wirksam
 history_mode: hybrid       # raw | hybrid
-# Segment lengths of the hybrid history, in SECONDS. Not a free knob: the rate
-# channel is (T_end - T_start) / (lag_n * rate_scale), so a short segment divides
-# a small difference by a small number and multiplies everything -- signal and
-# the untrained net's jitter alike -- by A = 1/(lag_n * rate_scale). At the old
-# [5, 20] that is A ~ 119, because 5 s is 0.34 % of the ~1474 s reference span.
-# [200, 600] puts A near 1 and measured two orders of magnitude better final
-# L_data. train.py prints A at startup and warns above ~100.
-rate_lags: [200.0, 600.0]  # seconds, hybrid history mode only
+# Segment lengths of the hybrid history, in SECONDS.
+#
+# The rate channel is (T_end - T_start) / (lag_n * rate_scale), so a short
+# segment divides a small difference by a small number and multiplies everything
+# -- signal and an untrained net's jitter alike -- by
+#
+#     A = 1 / (lag_n * rate_scale)      ~ 119 at 5 s, ~ 3 at 200 s
+#
+# printed at startup. A large A on its own is NOT what made every run abort:
+# that was residual_output (see below). With the integrator gone and
+# rollout_clamp on, A ~ 119 is tolerable, and the short segment carries the more
+# useful signal -- a rate over 600 s on a ~1474 s trajectory is closer to a
+# progress indicator than to a rate.
+#
+# Measured at the real geometry (n_t = 7000, dTdt_scale 2.467 against the real
+# 2.479, so A matches the real 119/30), 10 epochs, 3 seeds, MAE on the held-out
+# tail in degrees C:
+#
+#     [5, 20]      A = 119/30   MAE_test 1.207     <- best on ALL three seeds
+#     [50, 150]    A = 12/4     MAE_test 2.102
+#     [200, 600]   A = 3/1      MAE_test 2.507
+#     raw          --           MAE_test 2.601
+#
+# No aborts in any of the twelve runs. Longer segments were tried and are worse.
+rate_lags: [5.0, 20.0]  # seconds, hybrid history mode only
 # Anchor lag of the hybrid history in seconds: the block is
 # [T(t-delta_grid), rate_1, ...] and the rate segments cascade back from
 # there. Independent of subsample_time - do not confuse the two.

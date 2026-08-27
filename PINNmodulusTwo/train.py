@@ -74,7 +74,14 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--history-mode", choices=["raw", "hybrid"],
                    default=d.get("history_mode", "raw"))
     p.add_argument("--rate-lags", nargs="+", type=float,
-                   default=d.get("rate_lags", [5.0, 25.0]))
+                   default=d.get("rate_lags", [5.0, 20.0]),
+                   help="hybrid rate segments in SECONDS. The number that "
+                        "decides stability is A = 1/(lag_n * rate_scale), "
+                        "printed at startup: a short segment divides a small "
+                        "temperature difference by a small number and so "
+                        "amplifies everything non-smooth by A. 5 s against a "
+                        "~1474 s reference span gives A ~ 119 and the rollout "
+                        "diverges; 200 s gives A ~ 3")
     p.add_argument("--delta-grid", type=float, default=d.get("delta_grid", 0.2),
                    help="anchor lag of the hybrid history in SECONDS: the block is "
                         "[T(t-delta_grid), rate_1, ...] and the rate segments "

@@ -43,15 +43,21 @@ layer_size: 128
 num_layers: 4
 k_max: 2                   # raw-mode only
 history_mode: hybrid       # raw | hybrid
-# TEMPERATURE history segments (the recurrence), in SECONDS. Not a free knob:
-# the rate channel is (T_end - T_start) / (lag_n * rate_scale), so the divisor IS
-# the RMS of the difference itself, and a short segment amplifies everything --
-# signal and an untrained net's jitter alike -- by A = 1/(lag_n * rate_scale).
-# At the old [5, 20] that is A ~ 119 in the base project and MORE here, because
-# pooling OP01-OP16 widens T_sigma with between-OP offset and so shrinks
-# dTdt_scale. train.py prints A at startup. The rule that transfers between
-# bundles is "get A to O(1)", not a particular number of seconds.
-rate_lags: [200.0, 600.0]
+# TEMPERATURE history segments (the recurrence), in SECONDS.
+#
+# The rate channel divides by lag_n * rate_scale, so it amplifies everything
+# non-smooth by A = 1/(lag_n * rate_scale) -- ~119 at 5 s in the base project,
+# and MORE here, because pooling OP01-OP16 widens T_sigma with between-OP offset
+# and so shrinks dTdt_scale. train.py prints A at startup.
+#
+# A large A is not by itself what aborts a run -- that was residual_output (see
+# below). Measured in the base project at the real geometry, [5, 20] beat
+# [50,150], [200,600] and raw on MAE for every seed, with no aborts. Longer
+# segments turn the channel into a progress indicator and generalise worse.
+#
+# Watch the A line here anyway: this extension's pooling pushes it higher than
+# the base project's 119, and that is untested.
+rate_lags: [5.0, 20.0]
 delta_grid: 0.2            # anchor lag of the hybrid temperature history, s
 time_deriv: bdf2           # bdf1 | bdf2 | autograd
 # Cap on 1/(lag_n * rate_scale) -- the factor by which the hybrid TEMPERATURE
