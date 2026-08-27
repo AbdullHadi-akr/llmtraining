@@ -14,6 +14,9 @@ ansetzt, um es zu erweitern.
 >   dadurch, dass es in einer Schleife auf seinen **eigenen Ausgaben** läuft.
 > - Kein Teacher Forcing, nirgends. Der Datenverlust wird auf genau der
 >   Trajektorie genommen, die auch zur Inferenzzeit entsteht.
+> - `residual_output` ist **aus** und `rate_lags` sind **lang**. Beides ist
+>   nicht optional: mit den alten Werten bricht jeder Lauf in Epoche 1 mit
+>   `L_data = nan` ab — siehe Abschnitt 3.1.
 > - Die History-Anordnung (`δ`, `k_max`, `Δgrid`, `rate_lags`) ist **fest**.
 >   Gelernt werden nur MLP-Gewichte, das Swish-`β` je Schicht und zwei
 >   Physik-Gains.
@@ -208,6 +211,203 @@ Drei Konsequenzen, die man kennen muss:
 3. **Truncated BPTT.** `buf[:ti].detach()` — jeder Schritt propagiert nur durch
    seine eigene Feldauswertung. Der Speicher bleibt beschränkt, aber es fließt
    kein Gradient entlang der Zeitachse.
+
+### 3.1 Warum der Rollout divergiert ist — und was daran schuld war
+
+Bis zu diesem Befund brach jeder Lauf in Epoche 1 mit `L_data = nan` ab. Der
+strukturelle Grund, warum das terminal ist: der Trainingsloop (Abschnitt 6)
+rechnet **einen** Rollout je OP und Epoche unter `no_grad` und macht dann
+`--inner-steps` Updates gegen diesen eingefrorenen Puffer. Der Puffer ist damit
+ein **Eingang** des ersten Gradientenschritts, kein Ergebnis davon. Steht dort
+`inf`, ist jede Vorhersage `nan`, und es gibt keinen ersten Gradientenschritt,
+aus dem heraus es besser werden könnte.
+
+Zwei Dinge haben ihn dorthin gebracht, und sie sind **nicht gleich wichtig**.
+
+#### Der Haupttreiber: `residual_output`
+
+`field()` lieferte `level(t) + net(...)`, wobei `level` das räumliche Mittel der
+Ankerscheibe ist. Die Begründung im Docstring lautete, das Mitführen des Niveaus
+halte den Rollout vom Driften ab. Es tut das Gegenteil:
+
+```
+level(t) ≈ level(t - Δgrid) + mean(net)
+```
+
+Das ist ein **Integrator mit Verstärkung exakt 1 und ohne Leck**. Jeder
+einseitige Anteil der Netzausgabe akkumuliert über die ~7000 Schritte
+unbeschränkt, und nichts zieht ihn zurück. Wie *klein* dieser Anteil ist, spielt
+keine Rolle — ein Integrator interessiert sich nur dafür, dass er ein Vorzeichen
+hat. Bei zufälliger Initialisierung hat er eines: Swish ist nicht
+mittelwertfrei, also mittelt sich `mean(net)` über eine Ziehung nicht weg.
+
+#### Der Nebentreiber: zu kurze `rate_lags`
+
+Der Rate-Kanal ist `(T_ende - T_start) / (lag_n · rate_scale)`. Für eine *echte*
+Rate ist das die richtige Normierung — `rate_scale` ist der RMS von `dTn/dtn`,
+der Kanal landet bei O(1). Was niemand geprüft hat, ist die
+**Rauschverstärkung** derselben Formel:
+
+```
+A = 1 / (lag_n · rate_scale)
+```
+
+Bei den alten `[5, 20]` s ist `A ≈ 119`, weil 5 s nur 0.34 % der ~1474 s
+Referenzspanne sind. Jede Nicht-Glattheit — insbesondere das Schritt-zu-Schritt-
+Zittern eines untrainierten Netzes — kommt 119-fach verstärkt zurück in den
+Eingang. `A` wird bei jedem Start ausgegeben und ab ~100 gewarnt.
+
+#### Die Messung
+
+Synthetisches Bundle, 20 Epochen, 3 Seeds, **ohne jedes Hilfsmittel** (kein
+Clamp, nichts). Angegeben ist das free-running `L_data` der letzten Epochen:
+
+| `residual_output` | History | Seed 0 | Seed 1 | Seed 2 |
+|---|---|---|---|---|
+| **true** | hybrid `[5, 20]` | ABORT | ABORT | ABORT |
+| **true** | hybrid `[200, 600]` | ABORT | ABORT | ABORT |
+| **true** | raw | ABORT | ABORT | ABORT |
+| false | hybrid `[5, 20]` | 0.0148 | ABORT | 0.0061 |
+| false | raw | 0.0074 | 0.0073 | 0.0069 |
+| false | **hybrid `[200, 600]`** | **3.3e-4** | **9.8e-5** | **7.2e-5** |
+
+`residual_output: true` bricht **9/9 ab, in jeder History-Konfiguration** — auch
+bei `raw`, wo es überhaupt keine Rate-Kanäle gibt. Das ist der Beweis, dass der
+Integrator und nicht die Verstärkung der Haupttreiber ist. Bestätigt bei
+`n_t = 4000` (3.3× längere Trajektorie): alt 3/3 ABORT, neu 3/3 bei ~1e-4.
+
+Daraus die beiden Defaults in `config.yaml`: `residual_output: false` und
+`rate_lags: [200.0, 600.0]`. Beides sind **Layout-Entscheidungen, keine
+Krücken** — und die neue Kombination ist nicht bloß stabiler, sie ist zwei
+Größenordnungen besser.
+
+#### Mit aktivem Physik-Term
+
+Die Tabelle oben lief mit `w_phys = 0`. Die Produktivkonfiguration hat
+`w_phys: 0.1`, und das verschiebt die Grenze spürbar — der Physik-Gradient
+treibt die Gewichte schneller aus dem stabilen Bereich. Gleiches Bundle,
+20 Epochen, 3 Seeds, `w_phys = 0.1`:
+
+| Konfiguration | ohne `rollout_clamp` | mit `rollout_clamp: 50` |
+|---|---|---|
+| `residual_output: true`, `[5,20]`, 64/3 | ABORT \| 2.9e6 \| ABORT | — |
+| `residual_output: false`, `[200,600]`, 64/3 | 0.0044 \| 0.0329 \| 0.0019 | — |
+| `residual_output: false`, `[200,600]`, **128/4** | **ABORT** \| 0.0023 \| 0.0076 | **0.0156 \| 5.9e-4 \| 0.0135** |
+| `residual_output: false`, **raw**, 64/3 | **ABORT \| ABORT** \| 0.0148 | **0.0134 \| 0.0095 \| 0.0148** |
+
+Zwei Dinge, die man ohne diesen Durchgang nicht gesehen hätte:
+
+1. **`residual_output: false` ist notwendig, aber nicht hinreichend.** Bei
+   Produktivbreite 128/4 bricht auch die gute Konfiguration auf einem von drei
+   Seeds ab, und `raw` — ohne Physik noch 3/3 sauber — bricht auf zweien ab.
+2. **`rollout_clamp` ist damit tragend, nicht bloß Diagnose.** Er verwandelt
+   beide Fälle in 3/3 konvergierende Läufe. Ohne Physik-Term wäre er nur ein
+   Logging-Hilfsmittel gewesen; das war die Fehleinschätzung, solange nur mit
+   `w_phys = 0` gemessen wurde.
+
+#### Ist das Ergebnis am Ende brauchbar? (MAE, nicht `L_data`)
+
+`L_data` ist ein z-normierter Trainingsverlust auf dem Trainingsabschnitt. Die
+Lieferzahl ist MAE in °C auf dem gehaltenen Teil. Die beiden ordnen die
+Konfigurationen **nicht gleich**, und das ist kein Detail.
+
+128/4, `w_phys = 0.1`, `rollout_clamp: 50`, 12 Epochen, 3 Seeds:
+
+| | MAE train [°C] | MAE test [°C] | Mittel test |
+|---|---|---|---|
+| `hybrid [200,600]` | 0.72 / 0.24 / 0.44 | 0.81 / 0.38 / **2.43** | 1.21 |
+| `raw` | 0.81 / 0.36 / 0.36 | **1.70** / 0.77 / 0.43 | 0.97 |
+| Baseline: IC festhalten | 5.36 | 11.96 | |
+| Baseline: Mittelwert der Trainingslabels | 2.69 | 6.60 | |
+
+**Das Modell ist brauchbar**: 0.4–2.4 °C gegen 6.6–12 °C für die trivialen
+Baselines, Faktor 3–17.
+
+**Aber der `L_data`-Vorsprung von `[200,600]` überträgt sich nicht.** Auf
+`L_data` lag es 100× vor `raw`; auf MAE_test liegt `raw` im Mittel leicht vorn,
+und der Abstand ist kleiner als die Streuung über die Seeds. Erklärung: ein
+600-s-Fenster auf einer 1474-s-Trajektorie ist weniger eine Rate als ein
+Fortschrittsindikator. In-sample ist das extrem informativ, jenseits von
+`split_t` reicht das Fenster in Bereiche, auf die nie gefittet wurde.
+
+Wer `L_data` als Auswahlkriterium für `rate_lags` oder `history_mode` benutzt,
+wählt also möglicherweise falsch. Dafür ist `benchmark_arch.py` da.
+
+#### Was sich auf echte Daten überträgt — und was nicht
+
+Alle Trainingszahlen hier stammen von einem synthetischen Bundle. Dessen
+`rate_scale` (= `dTdt_scale`) ist 16.38, das der echten OP01–05 ist 2.479 —
+Faktor 6.6. **`rate_lags` in Sekunden übertragen sich damit nicht; `A`
+überträgt sich.**
+
+| lag [s] | A synthetisch | A echt |
+|---|---|---|
+| 5 | 18.0 | **118.9** |
+| 20 | 4.5 | 29.7 |
+| 200 | 0.45 | 2.97 |
+| 600 | 0.15 | 0.99 |
+
+Die ausgelieferten `[200.0, 600.0]` ergeben auf echten Daten `A = 2.97 / 0.99`;
+gemessen wurde bei `A = 0.45 / 0.15`. Dieselbe Größenordnung, nicht dieselbe
+Zahl. Die übertragbare Regel lautet **`A` auf O(1) bringen**, nicht „nimm 200
+und 600 Sekunden".
+
+#### Warum keine andere Normierung den Rate-Kanal rettet
+
+Für ein glattes Signal gilt `ΔT über lag ≈ (dT/dt)·lag`, also
+
+```
+lag_n · rate_scale  ≈  RMS(ΔT über lag)
+```
+
+Nachgerechnet auf einer glatten Rampe-plus-Welligkeit, auf drei Stellen genau:
+
+| lag [s] | `lag_n · rate_scale` | `RMS(ΔT über lag)` | A |
+|---|---|---|---|
+| 5 | 0.00768 | 0.00776 | 130 |
+| 20 | 0.03070 | 0.03068 | 33 |
+| 200 | 0.30704 | 0.30035 | 3.3 |
+| 600 | 0.92112 | 0.83285 | 1.1 |
+
+Der Divisor **ist** der RMS der Differenz selbst. Jede Normierung, die eine
+echte 5-Sekunden-Änderung auf O(1) hebt, muss durch ~0.008 teilen und verstärkt
+damit alles andere um denselben Faktor. Die Verstärkung ist also kein
+Formelfehler, den man umschreiben könnte, sondern intrinsisch: 5 s sind 0.34 %
+der Trajektorie, und eine so kleine Differenz auf O(1) zu ziehen kostet zwei
+Größenordnungen Rauschverstärkung. **Nur ein längeres Segment hilft.**
+
+Der Preis: eine „Rate" über 600 s ist eher ein Fortschrittsmaß als eine Rate.
+Ob das dem Modell schadet oder sogar hilft, entscheidet `benchmark_arch.py` auf
+echten Daten — dafür ist es da.
+
+#### Was ausdrücklich NICHT hilft
+
+* **Eine bessere Initialisierung.** Setzt man die Ausgabeschicht auf 0, ist der
+  Rollout bei Initialisierung perfekt stabil (0/5 Divergenz über 7000 Schritte,
+  `max|T| = 1.19`). Nach **20 Adam-Schritten** steht `|W_out|` bei 0.042, und
+  der nächste Rollout erreicht 4.7e4. Der stabile Bereich im Gewichtsraum ist zu
+  klein; gewöhnliches Training läuft in wenigen Schritten heraus. Das Problem
+  ist das Layout, nicht der Startpunkt.
+* **`--max-rate-amp`.** Hebt `rate_scale`, deckelt `A` — ändert damit aber das
+  Modell, statt die Segmentlänge zu korrigieren, die tatsächlich falsch war.
+  Gemessen ohne `residual_output` half es nicht mehr als längere Lags, und mit
+  `residual_output` gar nicht.
+* **`--rollout-clamp` allein.** Mit `residual_output: true` verhindert er den
+  Abbruch, stabilisiert aber nicht: über 3 Seeds lief einer am Ende wieder weg.
+  Er ersetzt die Layout-Korrektur nicht. *Zusätzlich* zu ihr ist er dagegen
+  tragend, sobald der Physik-Term an ist — siehe die Tabelle oben.
+
+> **Achtung bei eigenen Messungen.** Bis zu diesem Befund hat
+> `tests/conftest.py` Modulus mit einem nackten `nn.Linear` ersetzt. Dessen
+> Default-Init (`kaiming_uniform`, `a=√5`) ist pro Schicht um `√(1/3)` weniger
+> expansiv als das `xavier_uniform` des echten `FCLayer` — über einen
+> 4-Schicht-Stack rund 9×. Eine Stabilitätsmessung gegen den alten Stub meldete
+> Kombinationen als stabil, die es nicht sind. Der Stub kopiert die Init
+> inzwischen; wer daran etwas ändert, verschiebt diese Tabellen.
+
+> **Und ein Einzellauf entscheidet hier nichts.** Auf Seed 0 allein sieht die
+> Rangfolge mehrfach anders aus als über drei Seeds. Wer diese Tabellen
+> anfasst, misst bitte wieder über mehrere Seeds.
 
 > **Hier geht die Zeit hin.** ~7000 sequentielle Schritte pro OP und Epoche, die
 > sich prinzipiell nicht parallelisieren lassen — jeder braucht den vorherigen.

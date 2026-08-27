@@ -186,6 +186,58 @@ Outputs land in `PINNmodulusTwo/artifacts/`: `metrics.txt`, `training_curves.png
 - Training is free-running: the data loss is taken on the model's own
   autoregressive rollout (seeded only by the measured initial condition), never
   on ground-truth history. There is NO teacher forcing anywhere in train/eval.
+- **`residual_output` is off and `rate_lags` are long, and neither is optional.**
+  With the old settings (`residual_output: true`, `rate_lags: [5, 20]`) every run
+  aborted in epoch 1 with `L_data = nan`, before a single optimiser step.
+
+  The training loop computes one rollout per OP per epoch under `no_grad` and
+  then takes `--inner-steps` updates against that frozen buffer, so the buffer is
+  an *input* to the first gradient step. Once it holds `inf` there is no gradient
+  left to recover from.
+
+  Two things drove it there. `residual_output` made `field()` return
+  `level(t) + net(...)`, and `level(t) ~ level(t - delta_grid) + mean(net)` is an
+  integrator of gain exactly 1 with no leak -- any one-signed component of the
+  output accumulates over ~7000 steps and nothing pulls it back. Separately, the
+  hybrid rate channel divides by `lag_n * rate_scale`, which at 5 s against a
+  ~1474 s reference span is a gain of `A ~ 119` on anything non-smooth. `A` is
+  printed at startup and warned about above ~100.
+
+  Measured end to end (synthetic bundle, 20 epochs, 3 seeds, no guards):
+  `residual_output: true` aborted **9/9 in every history configuration**, `raw`
+  included -- which is where there are no rate channels at all, so the integrator
+  is the primary driver. With it off, all of them ran; `hybrid` + `[200, 600]`
+  reached `L_data ~ 1e-4`, two orders of magnitude better than anything else.
+  ARCHITECTURE.md 3.1 has the tables and the confirmation at `n_t = 4000`.
+
+  A better initialisation does NOT fix this: zeroing the output layer makes the
+  rollout perfectly stable at init (0/5 over 7000 steps), and twenty Adam steps
+  later the next rollout reaches 1e4. The stable region of weight space is small
+  and training walks out of it. It is a layout problem, not a starting point.
+- **Is the result any good?** `L_data` is a z-scored training loss on the train
+  portion; the deliverable is MAE in degrees C on the held-out tail, and the two
+  do NOT rank configurations the same way. Measured at 128/4 with `w_phys: 0.1`
+  over 3 seeds: MAE test 0.38-2.43 C for `hybrid [200, 600]` and 0.43-1.70 C for
+  `raw`, against 6.60 C for "predict the training mean" and 11.96 C for "hold the
+  initial condition". So the model is worth 3-17x over a trivial baseline -- but
+  `hybrid [200, 600]`'s 100x advantage in `L_data` does NOT survive the switch to
+  MAE, where `raw` is marginally ahead and the gap is inside the seed spread. Use
+  `benchmark_arch.py`, not `L_data`, to choose `rate_lags` or `history_mode`.
+- **What transfers to real data is `A`, not the lag in seconds.** These numbers
+  come from a synthetic bundle whose `rate_scale` is 16.38 against 2.479 for the
+  real OP01-05. The shipped `[200.0, 600.0]` gives `A = 2.97 / 0.99` on real data
+  and was measured at `A = 0.45 / 0.15`. The rule is "get `A` to O(1)", not "use
+  200 and 600 seconds".
+- `--rollout-clamp` (default `50.0`) saturates the rollout buffer in normalised
+  temperature units. With `w_phys: 0` it is only a diagnostic -- it keeps a
+  runaway rollout finite so the log reports how much of the trajectory ran away
+  (`[SATURATED]`, with a count) instead of a single `nan` line carrying no
+  information. With the physics term on it is **load-bearing**: the physics
+  gradient walks the weights out of the stable region faster, and over 3 seeds
+  the clamp turned a 1-in-3 abort at width 128/depth 4 (and a 2-in-3 abort in
+  `raw`) into three converging runs. It still does not make a saturated
+  trajectory a prediction -- watch the count: falling is the model pulling
+  itself together, flat or rising is not.
 - `train.py` prints a simple CFL sanity check after loading the data. If the
   estimated `Δt_max` is below the current step, the log warns that the rollout
   may be unstable.
