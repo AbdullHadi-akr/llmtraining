@@ -68,7 +68,22 @@ def _model(dtype=torch.float64, **over) -> RecurrentField:
         delta_grid=0.03, weight_norm=False,
     )
     kw.update(over)
-    return RecurrentField(**kw).to(dtype)
+    model = RecurrentField(**kw).to(dtype)
+    # Damp the output layer so the free-running rollout below stays FINITE.
+    #
+    # Every assertion in this file compares the fast path against the general
+    # path over a rollout buffer, and ``torch.equal(nan, nan)`` is False -- so a
+    # buffer that reached inf does not weaken these tests, it voids them. The
+    # untrained recurrence really does diverge at these settings:
+    # ``hybrid-subgrid-anchor`` divides a temperature difference by
+    # ``0.05 * 1.3``, feeding a 15x-amplified value back into the next step, and
+    # 40 steps of that in float32 is enough. That divergence is the subject of
+    # ``test_untrained_rollout_stays_finite``, which measures it deliberately;
+    # here it is only noise, so the loop gain is taken below 1 and the equality
+    # claims stay meaningful.
+    with torch.no_grad():
+        model.mlp.out.linear.weight.mul_(0.05)
+    return model
 
 
 def _grid(dtype=torch.float64) -> torch.Tensor:
@@ -366,6 +381,11 @@ def test_gradients_match_reference_loop(over, dtype):
     assert pairs
     for (name, a), (_, b) in pairs:
         assert torch.equal(a, b), f"{name}: initial weights differ, test is void"
+        if a.grad is not None:
+            assert torch.isfinite(a.grad).all(), (
+                f"{name}: gradient is not finite, so the equality below would "
+                f"compare nan against nan and assert nothing"
+            )
         if a.grad is None and b.grad is None:
             continue
         assert torch.equal(a.grad, b.grad), f"{name}: gradient changed"
