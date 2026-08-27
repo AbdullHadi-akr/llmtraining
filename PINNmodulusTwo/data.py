@@ -33,7 +33,7 @@ import json
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List
+from typing import Dict, List, Sequence
 
 import numpy as np
 
@@ -540,6 +540,99 @@ def load_ops(
         forcing_energy=bool(forcing_energy), config_rates=bool(config_rates),
         subsample_mode=subsample_mode,
     )
+
+
+def hybrid_rate_amplification(rate_scale: float,
+                              rate_lags_n: Sequence[float]) -> np.ndarray:
+    """How much the hybrid TEMPERATURE history magnifies a one-step level jump.
+
+    ``model._history_hybrid`` feeds the network
+    ``(T_end - T_start) / (lag_n * rate_scale)``. For a genuine rate that is the
+    right normalisation and lands the channel at O(1) -- ``rate_scale`` is
+    ``dTdt_scale``, the RMS of ``dTn/dtn``, so a typical true rate maps to ~1 by
+    construction. Early in a free-running rollout it is not a genuine rate: the
+    numerator differences the untrained network's output against the imposed
+    initial condition, so it is a LEVEL jump, and the channel returns that jump
+    multiplied by
+
+        A = 1 / (lag_n * rate_scale).
+
+    At the smallBench defaults (5 s lag, T_span_ref ~ 1474 s, dTdt_scale ~ 2.48)
+    that is A ~ 119. The amplified value is fed straight back into the next
+    step's input, so the recurrence is a feedback loop whose gain is A times the
+    network's own input-to-output gain. At initialisation the latter is ~0.1, the
+    loop gain is well above 1, and float32 reaches inf and then nan inside the
+    first epoch -- before a single optimiser step has run. That is what an
+    ``L_data=nan`` abort in epoch 1 is.
+
+    A is a property of the LAYOUT, not of the data: it is fixed the moment
+    ``rate_lags`` and ``rate_scale`` are chosen, which is why it is worth
+    printing at startup.
+
+    Returned per lag so the shortest segment, which is the largest A, is visible.
+    """
+    lags = np.asarray([float(v) for v in rate_lags_n], dtype=np.float64)
+    if lags.size == 0:
+        return np.zeros(0)
+    return 1.0 / (np.maximum(lags, 1e-30) * max(float(rate_scale), 1e-30))
+
+
+def effective_rate_scale(dTdt_scale: float, rate_lags_n: Sequence[float],
+                         max_amp: float = 0.0):
+    """``(rate_scale, report_lines)`` for the hybrid temperature history.
+
+    ``max_amp <= 0`` returns ``dTdt_scale`` unchanged -- byte for byte the
+    behaviour every earlier result was produced with, which is the default on
+    purpose: silently rescaling an input channel would make the model quietly
+    different from the one those numbers describe.
+
+    With ``max_amp > 0`` the scale is raised just far enough that the worst-case
+    amplification stays at ``max_amp``. That damps the opening steps of the
+    rollout and leaves the converged rate channel scaled by a constant the
+    network can absorb into its first layer.
+
+    This is the blunt instrument, and it is rarely the right one. It lowers A by
+    rescaling a channel rather than by fixing the segment length that made A
+    large in the first place, so it changes the model. Longer ``rate_lags`` reach
+    the same A by making the segment a real span -- the shipped
+    ``[200.0, 600.0]`` puts A near 1 without touching ``rate_scale`` at all.
+
+    A is also not the primary driver of a diverging rollout; ``residual_output``
+    is (ARCHITECTURE.md 3.1). Capping A while that is still on does not help.
+    Reach for this only when you deliberately want the channel rescaled, and
+    record that you used it.
+
+    Kept deliberately identical to ``PINNmodulusTwoExtProfiles.data`` so the two
+    projects report the same number for the same layout.
+    """
+    amps = hybrid_rate_amplification(dTdt_scale, rate_lags_n)
+    lines = []
+    if amps.size:
+        lines.append(
+            "  hybrid history amplification A = 1/(lag_n * rate_scale) per lag: "
+            + ", ".join(f"{a:.4g}" for a in amps)
+            + f"   (rate_scale = dTdt_scale = {dTdt_scale:.4g})"
+        )
+    scale = float(dTdt_scale)
+    if max_amp and max_amp > 0 and amps.size and amps.max() > max_amp:
+        lags = np.asarray([float(v) for v in rate_lags_n], dtype=np.float64)
+        scale = 1.0 / (max(lags.min(), 1e-30) * float(max_amp))
+        lines.append(
+            f"  A exceeds --max-rate-amp {max_amp:g}; raising rate_scale "
+            f"{dTdt_scale:.4g} -> {scale:.4g} so the worst lag amplifies by "
+            f"{max_amp:g}. This makes the model differ from an unguarded run - "
+            f"say so when reporting the result."
+        )
+    elif amps.size and amps.max() > 100.0 and not (max_amp and max_amp > 0):
+        lines.append(
+            f"  [WARN] A reaches {amps.max():.4g}. The opening steps of the "
+            f"free-running rollout difference the untrained network against the "
+            f"initial condition, and that level jump is magnified by A. Use "
+            f"longer --rate-lags: 200 s / 600 s puts A near 1. Check "
+            f"--no-residual-output first -- that is the bigger driver of a "
+            f"non-finite L_data in epoch 1."
+        )
+    return scale, lines
 
 
 def available_ops() -> List[str]:
