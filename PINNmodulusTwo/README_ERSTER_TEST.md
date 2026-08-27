@@ -26,7 +26,8 @@ Alle Werte sind die Defaults aus [`config.yaml`](config.yaml), die identisch von
 5. [Verlustfunktion](#5-verlustfunktion)
 6. [Ergebnisse](#6-ergebnisse)
 7. [Was geändert wurde und warum](#7-was-geändert-wurde-und-warum)
-8. [`hybrid` gegen `raw` — der Vergleich](#8-hybrid-gegen-raw--der-vergleich)
+8. [`hybrid` gegen `raw` — und die Segmentlänge](#8-hybrid-gegen-raw--und-die-segmentlänge)
+8b. [Status — umgesetzt, fehlend, festgelegt](#8b-status--umgesetzt-fehlend-festgelegt)
 9. [Einschränkungen](#9-einschränkungen)
 10. [Reproduktion](#10-reproduktion)
 
@@ -222,6 +223,37 @@ Simulationsergebnisse einer Batteriezelle, je Betriebspunkt („OP") ein
 Temperaturfeld über der Zeit auf einem festen Gitter, plus die Treibergrößen
 des Betriebspunkts. Gelesen aus `data_cache/`, Materialdaten aus
 `material_properties/`.
+
+### Welche Betriebspunkte
+
+Dieses Projekt nutzt ausschließlich die **konstanten** Betriebspunkte: eine
+C-Rate, eine Fluid-Eintrittstemperatur und ein Volumenstrom, über den ganzen
+Lauf gehalten. Alle sind Ladung (CH), `V_max` 4.35 V, SOC 10–90 %.
+
+| OP | Art | C-Rate | T_start [°C] | T_fluid [°C] | Volumenstrom [l/min] | Rolle |
+|---|---|---|---|---|---|---|
+| OP01 | CC | 2.0 | 25 | 25 | 15 | Training |
+| OP02 | CC | 2.0 | 15 | 15 | 15 | Training |
+| OP03 | CC | 2.0 | 30 | 30 | 15 | Training |
+| OP04 | CC | 2.0 | 25 | 25 | 30 | Training |
+| OP05 | CC | 2.0 | 40 | 40 | 30 | Training |
+| OP06 | CC | 2.0 | 25 | 25 | 0 | gehalten |
+| OP07 | CC | 2.0 | 10 | 10 | 0 | **`test_op`** |
+
+Ab OP08 werden die Treiber zu **Profilen** (Fluidtemperaturprofil, vorsimulierte
+CC-CV-Ströme, Volumenstromprofil). Die gehören in
+`PINNmodulusTwoExtProfiles`, nicht hierher. OP17–OP19 („Abgleich mit
+Minimodul-Test": Entladung, Fast Charge, WLTP-Fahrzyklus) sind Messdaten und
+nicht Teil des Trainings.
+
+Der vollständige Plan ist in
+[`../PINNmodulusTwoExtProfiles/op_registry.py`](../PINNmodulusTwoExtProfiles/op_registry.py)
+transkribiert — inklusive der Einteilung in Tiers danach, was ein gehaltener OP
+vom Modell verlangt, das das Training nie gezeigt hat.
+
+Bemerkenswert für die Bewertung: **OP07 hat `Volumenstrom = 0`**, und im
+Training kommt diese Betriebsart gar nicht vor (OP01–OP05 haben alle 15 oder
+30). Der gehaltene OP ist damit kein reiner Interpolationstest.
 
 ### Aufteilung
 
@@ -621,6 +653,67 @@ python3 benchmark_arch.py --history-mode raw
 
 Entscheidungskriterium: **MAE auf dem gehaltenen OP07**, nicht `L_data`.
 
+
+## 8b. Status — umgesetzt, fehlend, festgelegt
+
+### Die festgelegten Werte
+
+| Schlüssel | Wert | Status |
+|---|---|---|
+| `residual_output` | **`false`** | **fest.** Der eigentliche Fix, mechanistisch begründet (Kapitel 7). Nicht anfassen ohne die Herleitung zu widerlegen. |
+| `rollout_clamp` | **`50.0`** | **fest.** Tragend, sobald `w_phys > 0`. |
+| `rate_lags` | **`[5.0, 20.0]`** | **vorläufig fest.** Gemessen am besten (Kapitel 8), aber auf synthetischen Labels. Offene Physikfrage dazu unten. |
+| `max_rate_amp` | `0.0` (aus) | **fest.** Schadet gemessen monoton. |
+| `history_mode` | `hybrid` | **vorläufig.** `raw` war die schlechteste der vier Varianten. |
+
+### Umgesetzt
+
+* `residual_output: false` als Config und CLI-Schalter, überall durchgereicht
+* `rollout_clamp` neu, inklusive `[SATURATED]`-Meldung mit Zählstand je Epoche
+* `A = 1/(lag_n · rate_scale)` wird bei jedem Start ausgegeben, Warnung ab ~100
+  (`data.hybrid_rate_amplification`, aus `PINNmodulusTwoExtProfiles` portiert)
+* Abbruchmeldung nennt `residual_output` als ersten Verdächtigen
+* `bench_common.make_train_args`: `residual_output`-Default von `True` auf
+  `False` — hätte sonst **jeden** Benchmark in Epoche 1 abbrechen lassen
+* `benchmark_arch.DEFAULT_LAG_SETS` spannt jetzt die `A`-Achse mit `[5,20]` als
+  Baseline; das alte Gitter lag mit `A` zwischen 20 und 297 vollständig im
+  divergenten Bereich
+* `level_rollout()`: `O(n_t²·P) → O(n_t·P)`, bitgleich, gemessen 1.3×
+* `tests/conftest.py`: Modulus-Stub nutzt die Init des echten `FCLayer`
+* `tests/test_rollout_stability.py`, `tools/rollout_divergence.py`, CI
+* 92 Tests grün
+
+### Fehlt
+
+* **Ein einziger Lauf auf echten Daten.** Diese Session hatte keinen Zugriff auf
+  `data_cache/` — alle Zahlen sind synthetisch.
+* Echte MAE-Werte für Kapitel 6; die dortigen sind synthetisch und markiert.
+* Eine Bewertung des Physik-Terms. Auf synthetischen Daten prinzipiell nicht
+  möglich: die erfundene Trajektorie erfüllt die erfundene
+  Wärmeleitungsgleichung nicht, der Physik-Term zieht dort gegen die Labels.
+
+### Was als nächstes zu tun ist
+
+1. **Offene Physikfrage zu den 5 Sekunden.** `A = 119` heißt: die echte
+   Temperaturänderung über 5 s beträgt `1/119 = 0.0084` in z-normierten
+   Einheiten — bei `T_sigma = 5 K` rund **42 Millikelvin**. Liegt das über der
+   Auflösung der Simulation, oder misst der Kanal dort im Wesentlichen
+   Diskretisierungsrauschen? Das entscheidet die Physik, nicht die Messung.
+   Falls letzteres: längere erste Segmente prüfen (`[20, 60]` → `A = 30/10`),
+   aber nicht so lang, dass der Kanal zum Fortschrittsindikator wird.
+2. `python3 smallBench.py` — erster echter Lauf. Prüfen: die `A`-Startzeile
+   (wirklich ~119/30?), `[CFL OK]`, kein `[ABORT] epoch 1`, und ob der
+   `[SATURATED]`-Zählstand über die Epochen fällt.
+3. `python3 tools/rollout_divergence.py` auf echten Daten — bestätigt oder
+   widerlegt die Divergenztabelle aus Kapitel 7, kostet Sekunden.
+4. `python3 benchmark_arch.py` — der Lag-Sweep, Kriterium MAE auf dem
+   gehaltenen OP, **niemals** `L_data`.
+5. `python3 benchmark_wphys_wbc.py` — was der Physik-Term bringt.
+
+Die vollständige Übergabe steht in
+[`../UEBERGABE_2026-08-27.txt`](../UEBERGABE_2026-08-27.txt).
+
+---
 
 ## 9. Einschränkungen
 

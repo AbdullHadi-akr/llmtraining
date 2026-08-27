@@ -174,6 +174,58 @@ kann bei einem CC-CV-Profil etwas ganz anderes bedeuten.
 
 ---
 
+## Status — umgesetzt, fehlend, festgelegt
+
+### Die festgelegten Werte
+
+| Schlüssel | Wert | Status |
+|---|---|---|
+| `residual_output` | **`false`** | **fest.** Der Fix. Vorher gab es hier nicht einmal einen Schalter dafür. |
+| `rollout_clamp` | **`50.0`** | **fest.** Tragend, sobald `w_phys > 0`. |
+| `rate_lags` | **`[5.0, 20.0]`** | **vorläufig.** Aus dem Basisprojekt übernommen; `A` ist hier höher und ungetestet. |
+| `driver_rate_lags` | `[5.0, 20.0]` | **unverändert.** Exogene Treiberkanäle ohne Rückkopplung — davon war nie etwas betroffen. |
+| `max_rate_amp` | `0.0` (aus) | **fest.** Schadet im Basisprojekt gemessen monoton. |
+| `history_mode` | `hybrid` | **vorläufig.** |
+
+### Umgesetzt
+
+* `residual_output` als Config-Schlüssel und CLI-Schalter (`--residual-output` /
+  `--no-residual-output`), Default `false`, **und tatsächlich an
+  `RecurrentField` übergeben** — vorher wurde es dort schlicht nicht gesetzt
+* `rollout_clamp` als Config und CLI, am `rollout(...)`-Aufruf durchgereicht
+* `model.py` kommt unverändert aus dem Basisprojekt (siehe `_paths.py`), die
+  Sättigungsgrenze und der `level_rollout`-Fix sind also automatisch geteilt
+
+### Fehlt
+
+* **Hier wurde noch gar nichts ausgeführt.** Alle Änderungen sind aus dem
+  Befund des Basisprojekts abgeleitet und auf OP01–OP16 nicht nachgemessen.
+* Ob `[5, 20]` hier ebenfalls gewinnt. `A` ist durch das Pooling höher als die
+  119 des Basisprojekts, und in diesem Bereich hat niemand gemessen.
+* Ob das Ergebnis für **Profil**-Betriebspunkte trägt. Der Lag-Vergleich im
+  Basisprojekt lief auf konstanten Treibern (OP01–OP07). Ein Rate-Kanal, der bei
+  konstanter C-Rate gut funktioniert, kann bei einem CC-CV-Profil oder einem
+  Fluidtemperaturprofil etwas ganz anderes bedeuten.
+
+### Was als nächstes zu tun ist
+
+1. `python3 smokeBench.py` — erster Prüfstein. **Zuerst die `A`-Startzeile
+   lesen:** `hybrid history amplification A = ...`. Sie ist hier höher als 119,
+   und wie viel höher, weiß niemand.
+2. Läuft Epoche 1 durch? Falls nicht, ist `--no-residual-output` bereits an —
+   dann `--rollout-clamp` prüfen und danach längere Segmente als Gegenprobe.
+   Längere Segmente sind aber **kein Reflex**: im Basisprojekt haben sie
+   geschadet.
+3. `profileBench.py` / `bench_profiles.py` über `history_mode` und `rate_lags`.
+   Kriterium: **MAE auf gehaltenen OPs**, niemals `L_data`.
+4. `python3 ../PINNmodulusTwo/tools/rollout_divergence.py` — Divergenz bei
+   Initialisierung, braucht weder Modulus noch Daten.
+
+Die vollständige Übergabe steht in
+[`../UEBERGABE_2026-08-27.txt`](../UEBERGABE_2026-08-27.txt).
+
+---
+
 ## Nächste Schritte hier
 
 1. `A` beim ersten Lauf prüfen (Startzeile), Segmente anpassen falls ≫ 10.
