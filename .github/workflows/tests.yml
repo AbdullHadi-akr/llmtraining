@@ -20,6 +20,12 @@ jobs:
         with:
           python-version: "3.11"
           cache: pip
+          # The dependency list lives inline in the next step. Without a path,
+          # setup-python looks for requirements.txt / pyproject.toml -- neither
+          # of which this repo has -- and fails the job outright. Keying the
+          # cache on this file means it invalidates exactly when that list
+          # changes.
+          cache-dependency-path: .github/workflows/tests.yml
 
       - name: Install dependencies
         # CPU torch only: nothing here trains, and the CUDA wheels are ~2 GB.
