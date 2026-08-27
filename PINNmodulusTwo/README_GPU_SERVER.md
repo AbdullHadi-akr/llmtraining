@@ -78,6 +78,16 @@ pip install --upgrade pip
 >
 > Bricht ein Aufruf später mit `error: unrecognized arguments: ...` ab, ist genau
 > das die Ursache — der Code auf dem Server ist älter als diese Anleitung.
+**Immer `main`, nie ein `claude/...`-Branch.** Die Feature-Branches sind
+Momentaufnahmen und bleiben stehen, wo sie gemergt wurden — der Stand aus dem
+GPU-Setup kennt die Flags aus Kapitel 6 und 7 noch nicht. **Schon geklont?**
+Dann zuerst nachziehen:
+
+```bash
+cd ~/llmtraining
+git checkout main
+git pull origin main
+```
 
 ---
 
@@ -174,6 +184,7 @@ das Training, und wie lange dauert eine Epoche wirklich.
 
 ```bash
 cd ~/llmtraining
+git checkout main && git pull origin main   # 6.3 braucht den aktuellen Stand
 source .venv/bin/activate
 
 # 6.1  rechnet die GPU?  (< 1 min)
@@ -282,6 +293,25 @@ Loss-Term, siehe [Kapitel 10](#11-troubleshooting).
 ### 6.3 Wie lange dauert eine Epoche? (~10 min)
 
 Ein kurzer Lauf mit den **echten** Einstellungen. Alle Zeitangaben in Kapitel 8
+**Zuerst den Stand prüfen.** Dies ist der erste Aufruf, der `--delta-grid`
+explizit setzt — das Flag gibt es erst seit Commit `beaf673`. Auf einem älteren
+Arbeitsbaum bricht der Lauf sofort ab, noch bevor Torch überhaupt startet:
+
+```
+train.py: error: unrecognized arguments: --delta-grid 0.2
+```
+
+Das ist kein Tippfehler im Aufruf, sondern ein veralteter Checkout — typisch,
+wenn Kapitel 2 auf einem `claude/...`-Branch stehen geblieben ist. Zwei weitere
+Merkmale desselben Stands: `--gain-lr-mult` fehlt, und das längst entfernte
+`--delta-init-steps` ist noch da. Prüfen und nachziehen:
+
+```bash
+python3 PINNmodulusTwo/train.py --help | grep -e --delta-grid   # muss etwas ausgeben
+git checkout main && git pull origin main                       # falls nicht
+```
+
+Ein kurzer Lauf mit den **echten** Einstellungen. Alle Zeitangaben in Kapitel 7
 und 8 hängen an dieser einen Zahl:
 
 ```
@@ -740,6 +770,7 @@ unknown". Ob die gefundenen Unterschiede echt sind, klärt Schritt 9.1.
 
 ```bash
 cd ~/llmtraining
+git checkout main && git pull origin main   # 6.3 braucht den aktuellen Stand
 source .venv/bin/activate
 
 # ---------------------------------------------------------------------------
@@ -1178,6 +1209,7 @@ dem Server gebraucht.
 | `--device cuda ... torch.cuda.is_available() is False` | Genau derselbe Fall — die Fehlermeldung nennt Torch- und CUDA-Version zum Abgleich. |
 | `CUDA error: no kernel image is available` | GPU zu neu für das Wheel (z. B. RTX 50xx mit `cu121`) → `cu128`-Index nehmen. |
 | `CUDA out of memory` | `--batch-phys` / `--batch-data` / `--batch-bc` senken oder `--subsample` erhöhen. Belegt ein Zombie-Prozess die Karte? → `nvidia-smi`, ggf. `kill`. |
+| `error: unrecognized arguments: --delta-grid` | Arbeitsbaum älter als `beaf673`, meist ein `claude/...`-Branch statt `main` → `git checkout main && git pull origin main` (Schritt 2). Gleicher Stand, gleiches Bild: `--gain-lr-mult` fehlt, `--delta-init-steps` ist noch da. |
 | `ModuleNotFoundError: modulus` | venv nicht aktiviert oder `pip install nvidia-modulus` fehlt → Schritt 4. |
 | `FileNotFoundError: .../data_cache/OP01.npz` | Daten nicht übertragen → Schritt 5. |
 | `FileNotFoundError: .../material_properties/constants.yaml` | dito → Schritt 5. |
