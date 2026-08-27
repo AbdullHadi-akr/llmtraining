@@ -1,5 +1,98 @@
 # Battery temperature surrogate
 
+## TODO — the data is missing from a fresh clone
+
+Nothing in `data_cache/` or `data_raw/` is tracked in git (the `.gitignore`
+keeps only sources, READMEs and a few configs), so a fresh clone **cannot
+train**. Everything below has to be copied onto the machine by hand. Tick a box
+once that OP is on disk.
+
+### 1. Fast path — the `.npz` bundles (this is what training reads)
+
+Copy the finished bundles into the **top-level** `data_cache/`, one file per OP,
+named exactly `OP01.npz`, `OP02.npz`, …:
+
+```
+llmtraining/
+└── data_cache/          <- create this folder, put the .npz files here
+    ├── OP01.npz
+    ├── OP02.npz
+    └── ...
+```
+
+`PINNmodulusTwo/data.py` also accepts three fallback locations (see
+[`data_cache/`](#data_cache--the-op-bundles) below), but **`data_cache/` at the
+top level is the one to use** for anything new.
+
+Which OPs are needed, in priority order — the defaults in
+[`PINNmodulusTwo/config.yaml`](PINNmodulusTwo/config.yaml) are
+`ops: [OP01…OP05]`, validation on OP06, report on OP07:
+
+- [ ] `OP01.npz` — train (25 °C, ṁ 0.0013)
+- [ ] `OP02.npz` — train (15 °C, ṁ 0.0013)
+- [ ] `OP03.npz` — train (30 °C, ṁ 0.0013)
+- [ ] `OP04.npz` — train (25 °C, ṁ 0.0026)
+- [ ] `OP05.npz` — train (40 °C, ṁ 0.0026)
+- [ ] `OP06.npz` — **validation**, benchmark selection ranks on this one (25 °C, ṁ 0)
+- [ ] `OP07.npz` — **report only**, never part of any selection (10 °C, ṁ 0)
+- [ ] `OP08.npz` … `OP16.npz`, `OP19.npz` — optional, only for wider sweeps.
+      `OP16` is what `python3 PINNmodulusTwo/data.py` uses as its held-out demo.
+
+Without OP01–OP05 nothing trains; without OP06 the benchmarks cannot select a
+model; without OP07 there is no report number.
+
+### 2. Full path — the raw CSVs (only if the cache has to be rebuilt)
+
+`PINNmodulusTwo/generate_cache.py` builds the `.npz` from raw exports through
+the legacy assembly. Those raw OP folders go **two levels deep**, `OP<NN>/OP<NN>/`
+(that nesting is what `assemble_op()` expects, not a typo):
+
+```
+legacy/battery_surrogate_agenticWorkflow/
+└── data_raw/            <- create this folder
+    └── OP01/
+        └── OP01/
+            ├── *_Batemo FMU1.csv
+            ├── *_Heat Source.csv
+            ├── *_Fluidstoffwerte.csv
+            ├── *_T_grid_cc_i.csv
+            ├── *_T_grid_g_i.csv
+            ├── *_T_grid_jr1c_i.csv
+            ├── *_Inputsignale.csv        (OP03–OP07 export it as "Input Signale.csv")
+            └── profile files, only where Inputsignale points at one:
+                *_CellCurrent(t).csv
+                *_FluidMassFlow(t).csv
+                *_FluidInletTemperature(t).csv   (OP08: only as .xlsx)
+                *_ModuleTestData*.csv            (OP19)
+```
+
+- [ ] `data_raw/OP01/OP01/` … `data_raw/OP07/OP07/` — the seven OPs the defaults use
+- [ ] `data_raw/OP08/OP08/` … `data_raw/OP19/OP19/` — optional, for the wider sweeps
+
+Already in git, so nothing to copy: the three coordinate CSVs under
+`legacy/battery_surrogate_agenticWorkflow/coordinates/`, `op_matrix.yaml`,
+`build.yaml`.
+
+Then, from the repo root:
+
+```bash
+python3 PINNmodulusTwo/generate_cache.py OP01 OP02 OP03 OP04 OP05 OP06 OP07
+```
+
+which writes straight into the top-level `data_cache/`.
+
+### 3. Check it worked
+
+```bash
+ls data_cache/
+python3 -c "import sys; sys.path.insert(0, 'PINNmodulusTwo'); import data; print(data.available_ops())"
+```
+
+The second command needs the training environment (numpy) and should list every
+OP you copied. A missing OP fails immediately with the list of
+what is available, rather than after the first training run.
+
+---
 Predicting the internal temperature field of a battery cell from operating-point
 inputs, so cell temperature can feed an aging model without measuring inside the
 cell. High-fidelity Batemo + StarCCM+ simulations are run offline to produce
