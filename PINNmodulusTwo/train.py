@@ -23,9 +23,9 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from data import CONFIG_ORDER, load_ops
+from data import load_ops
 from device_utils import enable_tf32, resolve_device, seed_everything
-from model import RecurrentField, rollout, rollout_train
+from model import RecurrentField, rollout
 from physics import heat_residual, boundary_condition_loss
 
 THIS_DIR = Path(__file__).resolve().parent
@@ -94,54 +94,27 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--w-data", type=float, default=d.get("w_data", 1.0))
     p.add_argument("--w-phys", type=float, default=d.get("w_phys", 0.1))
     p.add_argument("--w-bc", type=float, default=d.get("w_bc", 0.1))
-    p.add_argument("--loss-balance", choices=["ema", "legacy", "fixed"],
-                   default=d.get("loss_balance", "ema"),
-                   help="which loss terms are divided by their own magnitude. "
-                        "ema = all three (w_* are then true ratios that mean the "
-                        "same in epoch 1 and 60); legacy = only phys and bc, so "
-                        "the mix drifts towards physics as L_data falls and the "
-                        "best w_phys depends on --epochs; fixed = freeze the "
-                        "divisors after --balance-warmup epochs. NOTE: legacy is "
-                        "the historical SCHEME, not a byte-identical replay -- it "
-                        "keeps the corrected divisor (previous estimate, not one "
-                        "that includes the current sample), so a long run drifts "
-                        "slightly from pre-fix numbers")
-    p.add_argument("--ema-decay", type=float, default=d.get("ema_decay", 0.9),
-                   help="EMA decay PER EPOCH for the loss balancing. Corrected "
-                        "internally for the number of OPs, so the horizon no "
-                        "longer changes when --ops does")
-    p.add_argument("--balance-warmup", type=int, default=d.get("balance_warmup", 1),
-                   help="epochs the divisors track before --loss-balance fixed "
-                        "freezes them; ignored in the other modes")
-    p.add_argument("--data-floor", type=float, default=d.get("data_floor", 1e-8),
-                   help="lower bound on the L_data divisor, so a nearly perfect "
-                        "fit cannot amplify its own gradient without bound")
     p.add_argument("--phys-norm", type=float, default=d.get("phys_norm", 0.0),
-                   help="fixed divisor for L_phys; 0 = follow --loss-balance")
-    p.add_argument("--bc-norm", type=float, default=d.get("bc_norm", 0.0),
-                   help="fixed divisor for L_bc; 0 = follow --loss-balance")
-    p.add_argument("--residual-norm", choices=["rms", "legacy"],
-                   default=d.get("residual_norm", "rms"),
-                   help="rms divides each residual term by its own training RMS, "
-                        "which is what puts them at unit scale. legacy keeps the "
-                        "original division by sqrt(RMS), which leaves the three "
-                        "terms with their size gap intact")
-    p.add_argument("--zero-weight-terms", choices=["skip", "compute"],
-                   default=d.get("zero_weight_terms", "skip"),
-                   help="skip avoids computing a loss term whose weight is 0 "
-                        "(it costs an autograd Hessian and changes nothing); "
-                        "compute keeps evaluating it for the logs")
-    p.add_argument("--subsample-mode", choices=["stride", "mean"],
-                   default=d.get("subsample_mode", "stride"),
-                   help="stride keeps every N-th sample; mean averages each block "
-                        "of N as a crude anti-alias filter (changes the data)")
-    p.add_argument("--forcing-energy", action="store_true",
-                   default=d.get("forcing_energy", False),
-                   help="add cumulative injected heat as a second forcing channel")
-    p.add_argument("--config-rates", action="store_true",
-                   default=d.get("config_rates", False),
-                   help="add d(config)/dt for config channels that are real time "
-                        "profiles (no effect when every config is constant)")
+                   help="scale L_phys down before weighting: 0 = adaptive EMA "
+                        "(auto-balance to ~data scale), >0 = fixed divisor")
+    p.add_argument("--inner-steps", type=int, default=d.get("inner_steps", 100),
+                   help="optimiser steps per OP per epoch, all against that "
+                        "epoch's frozen rollout. The rollout is the expensive "
+                        "part, so this raises the update count at roughly "
+                        "constant cost; 1 reproduces the old one-step-per-OP "
+                        "behaviour")
+    p.add_argument("--residual-output", action=argparse.BooleanOptionalAction,
+                   default=d.get("residual_output", True),
+                   help="predict the deviation from the spatially averaged "
+                        "temperature level of the anchor slice instead of the "
+                        "absolute value, so the level is carried through the "
+                        "rollout rather than re-predicted at every step")
+    p.add_argument("--learn-gains", action=argparse.BooleanOptionalAction,
+                   default=d.get("learn_gains", False),
+                   help="let src_gain/diff_gain train. Off: they are pinned at "
+                        "1.0, because the residual no longer needs them to undo "
+                        "a per-term normalisation -- and free gains can be driven "
+                        "to 0, which satisfies L_phys with a constant field")
     p.add_argument("--batch-data", type=int, default=d.get("batch_data", 2048))
     p.add_argument("--batch-phys", type=int, default=d.get("batch_phys", 256))
     p.add_argument("--batch-bc", type=int, default=d.get("batch_bc", 128))
@@ -202,89 +175,13 @@ def _check_finite_inputs(ops) -> None:
               ".npz bundles for these OPs.", flush=True)
 
 
-class _LossBalancer:
-    """Divides each loss term by an estimate of its own magnitude.
-
-    The point is to make ``w_data``, ``w_phys`` and ``w_bc`` mean the same thing
-    throughout a run. A term divided by its own running average sits near 1, so
-    the weights express a ratio between terms rather than a ratio between their
-    accidental units -- but only for the terms that actually get divided, which
-    is what the ``mode`` selects (see the block in ``fit``).
-
-    Two details that look like nitpicks and are not:
-
-    * The divisor is the estimate from BEFORE this step. Folding the current
-      value in first (as the original code did) lets a spike partly cancel
-      itself: a term jumping 10x would be reported as ~5x. The signal being
-      damped here is exactly the one worth seeing.
-    * A non-finite sample never enters the average. ``decay * nan`` is ``nan``,
-      so a single bad step would otherwise pin the divisor at nan for the rest
-      of the run and silently poison every later epoch.
-    """
-
-    KEYS = ("data", "phys", "bc")
-
-    def __init__(self, *, mode: str, decay: float, warmup_steps: int,
-                 phys_norm: float, bc_norm: float, data_floor: float) -> None:
-        self.mode = mode
-        self.decay = decay
-        self.warmup_steps = max(1, warmup_steps)
-        self.data_floor = data_floor
-        self.override = {"data": 0.0, "phys": phys_norm, "bc": bc_norm}
-        self._ema: dict = {k: None for k in self.KEYS}
-        self._frozen: dict = {k: None for k in self.KEYS}
-        self.last: dict = {k: 1.0 for k in self.KEYS}
-        self._steps = 0
-
-    def divisor(self, key: str, value: float) -> float:
-        override = self.override.get(key, 0.0)
-        if override > 0.0:
-            self.last[key] = override
-            return override
-        if key == "data" and self.mode == "legacy":
-            self.last[key] = 1.0          # historical behaviour: L_data stays raw
-            return 1.0
-        if self._frozen[key] is not None:
-            self.last[key] = self._frozen[key]
-            return self._frozen[key]
-
-        prev = self._ema[key]
-        den = value if prev is None else prev
-        if np.isfinite(value):
-            self._ema[key] = (value if prev is None
-                              else self.decay * prev + (1.0 - self.decay) * value)
-        if not np.isfinite(den) or den <= 0.0:
-            den = 1.0
-        if key == "data":
-            den = max(den, self.data_floor)
-        self.last[key] = den
-        return den
-
-    def end_step(self) -> None:
-        """Advance the step counter and, in ``fixed`` mode, freeze after warm-up."""
-        self._steps += 1
-        if self.mode != "fixed" or self._steps < self.warmup_steps:
-            return
-        for key in self.KEYS:
-            if self._frozen[key] is None and self._ema[key] is not None:
-                floor = self.data_floor if key == "data" else 1e-30
-                self._frozen[key] = max(self._ema[key], floor)
-
-
 def fit(args):
     """Train on ``args.ops`` and return ``(model, bundle, ops_packed, dtn, history)``."""
     seed_everything(args.seed)
     device = resolve_device(args.device)
     enable_tf32(getattr(args, "tf32", False))
 
-    bundle = load_ops(
-        op_ids=args.ops, subsample_time=args.subsample,
-        subsample_mode=str(getattr(args, "subsample_mode", "stride")),
-        forcing_energy=bool(getattr(args, "forcing_energy", False)),
-        config_rates=bool(getattr(args, "config_rates", False)),
-    )
-    residual_norm = str(getattr(args, "residual_norm", "rms"))
-    skip_zero_terms = str(getattr(args, "zero_weight_terms", "skip")) == "skip"
+    bundle = load_ops(op_ids=args.ops, subsample_time=args.subsample)
     ops = _to_tensor_ops(bundle, device)
     _check_finite_inputs(ops)
     # Optional extra input features (default OFF: the richer features empirically
@@ -324,17 +221,6 @@ def fit(args):
         f"rate_lags_s={rate_lags_s}",
         flush=True,
     )
-    if bundle.config_label is not None and bundle.config_label.any():
-        labels = [n for n, f in zip(CONFIG_ORDER, bundle.config_label) if f]
-        profiles = [n for n, f in zip(CONFIG_ORDER, bundle.config_profile) if f]
-        print(
-            f"  config profiles (vary in time) : {profiles or '-'}\n"
-            f"  config labels (constant per OP): {labels}\n"
-            f"  Label channels are constants the net can memorise per OP; with "
-            f"{len(args.ops)} training OPs they can act as an OP identifier that "
-            f"cannot transfer to the held-out OPs.",
-            flush=True,
-        )
 
     model = RecurrentField(
         n_config=bundle.n_config, n_static=n_static, n_forcing=n_forcing,
@@ -343,24 +229,28 @@ def fit(args):
         delta_seconds=1.0, dtn=dtn, t_span_ref=bundle.T_span_ref,
         rate_scale=bundle.dTdt_scale, delta_grid=delta_grid_n,
         use_autograd_time=(args.time_deriv == "autograd"),
+        residual_output=bool(getattr(args, "residual_output", True)),
+        learn_gains=bool(getattr(args, "learn_gains", False)),
     ).to(device)
-    # src_gain / diff_gain correct a ~100x scale gap between the source and the
-    # diffusion term of the heat equation. At the base LR they barely move and sit
-    # at their init of 1.0 for the whole run, leaving the gap uncorrected, so they
-    # get their own group with a much higher LR. No weight decay on them: decaying
-    # log_gain towards 0 would pull gain back to 1.0, which is the very bias we are
-    # trying to escape.
-    gain_params = [model.log_src_gain, model.log_diff_gain]
+    # src_gain / diff_gain used to carry a ~100x scale gap that ``physics.py``
+    # created itself, by dividing each residual term by a different RMS. The
+    # residual is now assembled in its own consistent units and divided by one
+    # scale, so there is no gap left for the gains to close: they stay pinned at
+    # 1.0 and never reach the optimiser. --learn-gains restores the old free
+    # gains (and with them their own high-LR group, since at the base LR they
+    # barely move at all).
+    gain_params = [p for p in (model.log_src_gain, model.log_diff_gain)
+                   if isinstance(p, torch.nn.Parameter)]
     gain_ids = {id(p) for p in gain_params}
     base_params = [p for p in model.parameters() if id(p) not in gain_ids]
     gain_lr_mult = float(getattr(args, "gain_lr_mult", 25.0))
     weight_decay = float(getattr(args, "weight_decay", 0.0))
-    opt = torch.optim.Adam(
-        [
-            {"params": base_params, "lr": args.lr, "weight_decay": weight_decay},
-            {"params": gain_params, "lr": args.lr * gain_lr_mult, "weight_decay": 0.0},
-        ]
-    )
+    groups = [{"params": base_params, "lr": args.lr, "weight_decay": weight_decay}]
+    if gain_params:
+        groups.append(
+            {"params": gain_params, "lr": args.lr * gain_lr_mult, "weight_decay": 0.0}
+        )
+    opt = torch.optim.Adam(groups)
     n_params = sum(p.numel() for p in model.parameters())
     print(
         f"model params={n_params} k_max={model.k_max} (fixed) "
@@ -376,194 +266,191 @@ def fit(args):
     print(f"BC points (x=0): {bc_mask.sum().item()}/{len(bc_mask)}", flush=True)
 
     history = {"epoch": [], "L_data": [], "L_phys": [], "L_bc": [], "delta": [],
-               "L_phys_bal": [], "L_bc_bal": [],   # balanced losses for fair comparison
-               "ratio_phys": [], "ratio_bc": []}   # weighted term / weighted data term
+                "L_phys_bal": [], "L_bc_bal": []}  # balanced losses for fair comparison
     history["aborted"] = False
     best_train_loss = float("inf")
     epochs_without_improvement = 0
     early_stopping_patience = int(getattr(args, "early_stopping_patience", 0))
 
-    # ---- loss balancing -------------------------------------------------------
-    # L_phys typically lands ~100x above L_data, so a raw w_phys is not a fair
-    # mixing weight. Every mode below divides each term by an estimate of its own
-    # magnitude; they differ in WHICH terms get that treatment and how the
-    # estimate is formed.
-    #
-    #   ema     all three terms (data included) are divided by their own EMA.
-    #           w_data:w_phys:w_bc is then a genuine scale-free ratio that means
-    #           the same thing in epoch 1 and epoch 60.
-    #   legacy  the historical behaviour: phys and bc are normalised, L_data is
-    #           NOT. Because L_data falls by orders of magnitude while the two
-    #           normalised terms stay pinned near 1, the effective mixing drifts
-    #           steadily towards physics over a run -- so the best w_phys depends
-    #           on --epochs, and a weight tuned in a 20-epoch probe is too large
-    #           for a 60-epoch run. Kept for reproducing earlier results.
-    #   fixed   divisors are frozen after the warm-up window instead of tracking.
-    #           Fully deterministic, no feedback between loss and its own scale.
-    #
-    # --phys-norm/--bc-norm override the corresponding divisor with a constant in
-    # any mode, which is also how "fixed" is expressed once warm-up has ended.
-    balance_mode = str(getattr(args, "loss_balance", "ema"))
-    if balance_mode not in ("ema", "legacy", "fixed"):
-        raise SystemExit(f"unknown --loss-balance {balance_mode!r} "
-                         f"(expected ema|legacy|fixed)")
-    ema_decay = float(getattr(args, "ema_decay", 0.9))
-    if not 0.0 <= ema_decay < 1.0:
-        raise SystemExit(f"--ema-decay must be in [0, 1), got {ema_decay}")
-    # The EMA used to be updated once per OP, so its horizon silently depended on
-    # how many OPs were being trained: 1/(1-decay) steps is ~2 epochs at 5 OPs
-    # but ~10 epochs at one. Runs with different --ops were therefore balanced
-    # differently. Correcting the per-step decay by the number of OPs makes the
-    # horizon what it claims to be -- a number of EPOCHS -- for any --ops.
-    n_ops = max(1, len(ops))
-    step_decay = ema_decay ** (1.0 / n_ops)
-    warmup_steps = int(getattr(args, "balance_warmup", 0)) * n_ops
+    # Physics-loss balancing: L_phys typically lands ~100x above L_data, so a raw
+    # w_phys is not a fair mixing weight. phys_norm=0 -> adaptive EMA of L_phys's
+    # own magnitude (keeps the weighted term ~O(1)); phys_norm>0 -> fixed divisor.
     phys_norm = float(getattr(args, "phys_norm", 0.0))
-    bc_norm = float(getattr(args, "bc_norm", 0.0))
-    # Floor for the data divisor: once L_data approaches zero, dividing by it
-    # would amplify its gradient without bound. The floor turns the data term
-    # back into an ordinary MSE long before that happens.
-    data_floor = float(getattr(args, "data_floor", 1e-8))
-    balance = _LossBalancer(
-        mode=balance_mode, decay=step_decay, warmup_steps=warmup_steps,
-        phys_norm=phys_norm, bc_norm=bc_norm, data_floor=data_floor,
-    )
+    phys_ema = None
+    bc_ema = None
+
+    # Optimiser steps taken per OP per epoch, all against the one frozen rollout
+    # that epoch computed. The rollout is what costs time (~7000 sequential steps
+    # that cannot be parallelised); a minibatch step is cheap, so this is where the
+    # update count comes from.
+    inner_steps = max(1, int(getattr(args, "inner_steps", 100)))
+    batch_data = int(getattr(args, "batch_data", 2048))
     print(
-        f"loss balance: mode={balance_mode} ema_decay={ema_decay:g}/epoch "
-        f"(={step_decay:.4g}/step over {n_ops} OPs) "
-        f"phys_norm={phys_norm:g} bc_norm={bc_norm:g} "
-        f"residual_norm={getattr(args, 'residual_norm', 'rms')}",
+        f"optimiser steps = {inner_steps} per OP per epoch x {len(ops)} OPs "
+        f"x {args.epochs} epochs = {inner_steps * len(ops) * args.epochs} total "
+        f"(batch_data={batch_data})",
         flush=True,
     )
-
-    # A term with weight 0 contributes nothing but still costs a full forward
-    # pass plus an autograd Hessian -- that is most of the runtime of the
-    # w_phys=0 / w_bc=0 sweep points. Skipped terms are logged as NaN rather than
-    # 0.0, so the convergence plots show a gap instead of a flat line that never
-    # happened. Constant for the whole run, hence hoisted out of both loops.
-    want_phys = args.w_phys != 0.0 or not skip_zero_terms
-    want_bc = args.w_bc != 0.0 or not skip_zero_terms
 
     for epoch in range(1, args.epochs + 1):
         epoch_start = time.time()
         model.train()
         ep_data, ep_phys, ep_bc = 0.0, 0.0, 0.0
-        ep_ratio_phys, ep_ratio_bc = 0.0, 0.0
+        # Split the epoch's wall time into its two halves. Every runtime estimate
+        # in README_GPU_SERVER chapters 7 and 8 is derived from one measured
+        # seconds-per-epoch, and --inner-steps moves only the second half, so the
+        # split is what makes the budget plannable instead of guessed.
+        t_roll_s, t_inner_s = 0.0, 0.0
+        aborted_epoch = False
         for op in ops:
             n_t, n_pts = op["n_t"], op["n_points"]
             Tn_seq = op["Tn"]
 
-            # ---- data term: free-running on the model's OWN past -------------
-            # No teacher forcing: history is the model's rolled-out predictions,
-            # seeded only by the measured initial condition.
-            buf = rollout_train(
-                model, op["xn"], op["static"], op["cfg"], op["forcing"],
-                op["Tn_ic"], op["tn"], dtn,
-            )
-            L_data = torch.mean((buf[1:] - Tn_seq[1:]) ** 2)
+            # ---- the model's OWN trajectory, computed ONCE per OP per epoch ---
+            # No teacher forcing: this is the free-running rollout, seeded only by
+            # the measured initial condition.
+            #
+            # Why it is frozen and then reused. The recurrence always detached its
+            # history between steps (truncated BPTT), so the gradient at time t
+            # never left that step's own field evaluation even before this change.
+            # The gradient of the old full-sequence L_data is therefore EXACTLY a
+            # sum of independent per-(t, point) gradients against a trajectory the
+            # weights are treated as constant in -- which is the same quantity a
+            # minibatch of (t, point) pairs estimates without bias.
+            #
+            # What that buys: the old loop paid one ~7000-step sequential rollout
+            # for ONE optimiser step, so a 60-epoch run on 5 OPs finished after
+            # 300 Adam updates -- far too few for a 70k-parameter MLP, which is the
+            # single biggest reason the rollout error stayed large. Now the same
+            # rollout carries ``inner_steps`` updates.
+            #
+            # The cost of freezing: after a few updates the buffer is no longer
+            # quite the trajectory the current weights would produce. It is
+            # refreshed every epoch, so inner_steps trades update count against
+            # how stale the trajectory may get -- keep it in the hundreds, not the
+            # tens of thousands.
+            _t0 = time.time()
+            with torch.no_grad():
+                own_hist = rollout(
+                    model, op["xn"], op["static"], op["cfg"], op["forcing"],
+                    op["Tn_ic"], op["tn"], dtn,
+                )
+            t_roll_s += time.time() - _t0
+            _t0 = time.time()
 
-            own_hist = buf.detach()
-            nan = torch.tensor(float("nan"), device=device)
+            op_data = op_phys = op_bc = 0.0
+            for _ in range(inner_steps):
+                # ---- data term on a minibatch of (t, point) ------------------
+                # Labels are only read up to split_t. The rollout still covers the
+                # whole trajectory -- the recurrence needs it, and the physics and
+                # BC terms below are unsupervised and use all of it -- but fitting
+                # LABELS past split_t would train on the very rows that
+                # ``metrics.txt`` and the benchmarks' MAE_in column report as a
+                # held-out in-time check. data.py already treats that tail as
+                # held out: T_mu/T_sigma and every config/source statistic are
+                # pooled over [:split_t] only.
+                # t starts at 1: row 0 is the imposed initial condition, never a
+                # prediction.
+                bt = torch.randint(1, op["split_t"], (batch_data,), device=device)
+                bp = torch.randint(0, n_pts, (batch_data,), device=device)
+                tq = op["tn"][bt]
+                hist = model._history(own_hist, dtn, tq, bp)
+                pred = model.field(
+                    op["xn"][bp], op["static"][bp], op["cfg"][bt],
+                    op["forcing"][bt], hist, model.level(own_hist, dtn, tq),
+                )
+                L_data = torch.mean((pred - Tn_seq[bt, bp]) ** 2)
 
-            # ---- physics term (autograd space + FD time) ---------------------
-            # History for the residual also comes from the model's OWN rollout.
-            if want_phys:
+                # ---- physics term (autograd space + FD time) -----------------
+                # History for the residual comes from the same frozen rollout.
                 pt = torch.randint(0, n_t, (args.batch_phys,), device=device)
                 pp = torch.randint(0, n_pts, (args.batch_phys,), device=device)
                 res = heat_residual(
                     model, op["xn"], op["static"], op["cfg"][pt], op["forcing"][pt],
                     op["Fo"], op["Qsrc"][pt, pp], own_hist, dtn, op["tn"][pt], pp,
-                    phys_scale, bundle.dTdt_scale, bundle.aniso_scale,
-                    bundle.Qsrc_scale, time_deriv=args.time_deriv,
-                    residual_norm=residual_norm,
+                    phys_scale, time_deriv=args.time_deriv,
                 )
                 L_phys = torch.mean(res ** 2)
-            else:
-                L_phys = nan
 
-            # ---- boundary condition term (dT/dx = 0 at x=0) ------------------
-            if want_bc:
+                # ---- boundary condition term (dT/dx = 0 at x=0) --------------
                 pt_bc = torch.randint(0, n_t, (args.batch_bc,), device=device)
                 bc_res = boundary_condition_loss(
                     model, op["xn"], op["static"], op["cfg"][pt_bc],
-                    op["forcing"][pt_bc], own_hist, dtn, op["tn"][pt_bc], bc_mask,
-                    bundle.bc_scale, residual_norm=residual_norm,
+                    op["forcing"][pt_bc], own_hist, dtn, op["tn"][pt_bc],
+                    bc_mask, bundle.bc_scale,
                 )
                 L_bc = torch.mean(bc_res ** 2)
-            else:
-                L_bc = nan
 
-            # Every enabled term is divided by an estimate of its own magnitude,
-            # so w_data:w_phys:w_bc is a ratio between terms and not between
-            # their units. Which terms get divided depends on --loss-balance.
-            data_den = balance.divisor("data", float(L_data.detach()))
-            L_data_bal = L_data / data_den
-            L_phys_bal = (L_phys / balance.divisor("phys", float(L_phys.detach()))
-                          if want_phys else nan)
-            L_bc_bal = (L_bc / balance.divisor("bc", float(L_bc.detach()))
-                        if want_bc else nan)
-            balance.end_step()
+                # Balance L_phys and L_bc onto the data scale so weights are fair
+                # 0-1 knobs. A single non-finite sample would otherwise pin the EMA
+                # at nan for the rest of the run (0.9 * nan == nan), so only finite
+                # values update it.
+                if phys_norm > 0.0:
+                    phys_den = phys_norm
+                else:
+                    cur = float(L_phys.detach())
+                    if np.isfinite(cur):
+                        phys_ema = cur if phys_ema is None else 0.9 * phys_ema + 0.1 * cur
+                    phys_den = phys_ema if phys_ema is not None else 1.0
+                L_phys_bal = L_phys / (phys_den + 1e-8)
 
-            # Only add terms that are actually switched on: ``0.0 * nan`` is nan,
-            # so a zero weight does NOT neutralise a non-finite term -- it would
-            # poison the whole loss, the gradients, and every later epoch. This is
-            # what made even the w_phys=0, w_bc=0 sweep point report L_data=nan.
-            loss = args.w_data * L_data_bal
-            if args.w_phys != 0.0:
-                loss = loss + args.w_phys * L_phys_bal
-            if args.w_bc != 0.0:
-                loss = loss + args.w_bc * L_bc_bal
+                # BC balancing similar to physics
+                bc_cur = float(L_bc.detach())
+                if np.isfinite(bc_cur):
+                    bc_ema = bc_cur if bc_ema is None else 0.9 * bc_ema + 0.1 * bc_cur
+                L_bc_bal = L_bc / ((bc_ema if bc_ema is not None else 1.0) + 1e-8)
 
-            # Never let a non-finite loss reach the optimiser: clip_grad_norm_ does
-            # not rescue it (total_norm=nan -> clip_coef=nan -> all grads nan), so
-            # one bad step would permanently destroy the weights.
-            if not torch.isfinite(loss):
-                # Only terms that were actually computed can be to blame; a term
-                # skipped for having weight 0 is NaN on purpose and must not be
-                # reported as the cause.
-                candidates = [("L_data", L_data)]
-                if want_phys:
-                    candidates.append(("L_phys", L_phys))
-                if want_bc:
-                    candidates.append(("L_bc", L_bc))
-                bad = [n for n, v in candidates if not torch.isfinite(v)]
-                print(
-                    f"  [ABORT] epoch {epoch}, {op['op_id']}: non-finite loss; "
-                    f"first offending term(s): {', '.join(bad) or 'weighted sum'}",
-                    flush=True,
-                )
-                ep_data = float("nan")
+                # Only add terms that are actually switched on: ``0.0 * nan`` is
+                # nan, so a zero weight does NOT neutralise a non-finite term -- it
+                # would poison the whole loss, the gradients, and every later
+                # epoch. This is what made even the w_phys=0, w_bc=0 sweep point
+                # report L_data=nan.
+                loss = args.w_data * L_data
+                if args.w_phys != 0.0:
+                    loss = loss + args.w_phys * L_phys_bal
+                if args.w_bc != 0.0:
+                    loss = loss + args.w_bc * L_bc_bal
+
+                # Never let a non-finite loss reach the optimiser: clip_grad_norm_
+                # does not rescue it (total_norm=nan -> clip_coef=nan -> all grads
+                # nan), so one bad step would permanently destroy the weights.
+                if not torch.isfinite(loss):
+                    bad = [n for n, v in (("L_data", L_data), ("L_phys", L_phys),
+                                          ("L_bc", L_bc)) if not torch.isfinite(v)]
+                    print(
+                        f"  [ABORT] epoch {epoch}, {op['op_id']}: non-finite loss; "
+                        f"first offending term(s): {', '.join(bad) or 'weighted sum'}",
+                        flush=True,
+                    )
+                    ep_data = float("nan")
+                    aborted_epoch = True
+                    break
+
+                opt.zero_grad()
+                loss.backward()
+                grad_clip = float(getattr(args, "grad_clip", 0.0))
+                if grad_clip > 0.0:
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=grad_clip)
+                opt.step()
+                op_data += float(L_data.detach())
+                op_phys += float(L_phys.detach())
+                op_bc += float(L_bc.detach())
+
+            t_inner_s += time.time() - _t0
+            if aborted_epoch:
                 break
-
-            opt.zero_grad()
-            loss.backward()
-            grad_clip = float(getattr(args, "grad_clip", 0.0))
-            if grad_clip > 0.0:
-                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=grad_clip)
-            opt.step()
-            ep_data += float(L_data.detach())
-            ep_phys += float(L_phys.detach())
-            ep_bc += float(L_bc.detach())
-            # Ratio each weighted term actually contributes against the data
-            # term. This is the number the loss weights are really setting, and
-            # without it the balance can only be guessed at from w_phys alone.
-            if np.isfinite(float(L_data.detach())) and float(L_data.detach()) > 0:
-                base = args.w_data * float(L_data_bal.detach())
-                if want_phys and base > 0:
-                    ep_ratio_phys += args.w_phys * float(L_phys_bal.detach()) / base
-                if want_bc and base > 0:
-                    ep_ratio_bc += args.w_bc * float(L_bc_bal.detach()) / base
+            # Mean over the inner steps, so the logged epoch loss stays a
+            # per-step number and does not change meaning with --inner-steps.
+            ep_data += op_data / inner_steps
+            ep_phys += op_phys / inner_steps
+            ep_bc += op_bc / inner_steps
 
         ep_data /= len(ops)
         ep_phys /= len(ops)
         ep_bc /= len(ops)
-        ep_ratio_phys /= len(ops)
-        ep_ratio_bc /= len(ops)
 
-        # Early NaN/inf detection - abort before wasting epochs. A term that was
-        # skipped for having weight 0 is NaN by design, so it is not a failure.
-        phys_broken = want_phys and not np.isfinite(ep_phys)
-        if not np.isfinite(ep_data) or phys_broken:
+        # Early NaN/inf detection - abort before wasting epochs
+        if not np.isfinite(ep_data) or not np.isfinite(ep_phys):
             print(f"  [ABORT] epoch {epoch}: loss exploded (L_data={ep_data:.4g}, L_phys={ep_phys:.4g})")
             print("  L_data non-finite means the free-running rollout diverged; check the")
             print("  history channels feeding back into the net (--history-mode raw isolates it).")
@@ -577,18 +464,13 @@ def fit(args):
             history["L_bc"].append(ep_bc)
             history["L_phys_bal"].append(float("nan"))
             history["L_bc_bal"].append(float("nan"))
-            history["ratio_phys"].append(float("nan"))
-            history["ratio_bc"].append(float("nan"))
             history["delta"].append(float(model.delta.detach()))
             history["aborted"] = True
             break
 
-        # Balanced losses for fair logging. These use the divisors that were
-        # actually applied, whatever the mode -- the old version divided by
-        # phys_ema even in fixed-divisor mode, where phys_ema stays None and the
-        # logged column was therefore a constant 1.0 that reported nothing.
-        ep_phys_bal = ep_phys / balance.last["phys"] if want_phys else float("nan")
-        ep_bc_bal = ep_bc / balance.last["bc"] if want_bc else float("nan")
+        # Compute balanced losses for fair logging (all ~O(1) when stable)
+        ep_phys_bal = ep_phys / (phys_ema + 1e-8) if phys_ema else 1.0
+        ep_bc_bal = ep_bc / (bc_ema + 1e-8) if bc_ema else 1.0
 
         history["epoch"].append(epoch)
         history["L_data"].append(ep_data)
@@ -596,8 +478,6 @@ def fit(args):
         history["L_bc"].append(ep_bc)
         history["L_phys_bal"].append(ep_phys_bal)
         history["L_bc_bal"].append(ep_bc_bal)
-        history["ratio_phys"].append(ep_ratio_phys if want_phys else float("nan"))
-        history["ratio_bc"].append(ep_ratio_bc if want_bc else float("nan"))
         history["delta"].append(float(model.delta.detach()))
         if ep_data < best_train_loss:
             best_train_loss = ep_data
@@ -627,9 +507,23 @@ def fit(args):
                 f"  epoch {epoch:3d}  L_data={ep_data:.4e}  L_phys_bal={ep_phys_bal:.4e}  "
                 f"L_bc_bal={ep_bc_bal:.4e}  delta={float(model.delta.detach()):.4g}  "
                 f"src_gain={sg:.3g}  diff_gain={dg:.3g}{lags_str}  betas={betas}  "
-                f"[{epoch_s:.1f}s/epoch, this run ~{eta_min:.0f} min left]",
+                f"[{epoch_s:.1f}s/epoch = {t_roll_s:.1f}s rollout + "
+                f"{t_inner_s:.1f}s x{inner_steps} inner, "
+                f"this run ~{eta_min:.0f} min left]",
                 flush=True,
             )
+            if epoch == 1 and device.type == "cuda":
+                # Peak VRAM, once. The batch sizes are the only real GPU knob here
+                # (see README_GPU_SERVER 6.4) and guessing how much headroom is
+                # left is exactly the thing a measurement should answer.
+                peak = torch.cuda.max_memory_allocated(device) / 1e9
+                total = torch.cuda.get_device_properties(device).total_memory / 1e9
+                print(
+                    f"  peak VRAM {peak:.2f} GB of {total:.1f} GB "
+                    f"(batch_data={batch_data} batch_phys={args.batch_phys} "
+                    f"batch_bc={args.batch_bc})",
+                    flush=True,
+                )
         if early_stopping_patience > 0 and epochs_without_improvement >= early_stopping_patience:
             print(
                 f"  early stopping after epoch {epoch}: training data loss did not improve "

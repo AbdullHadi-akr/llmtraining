@@ -506,12 +506,20 @@ def load_ops(
     dTdt_scale = float(np.sqrt((np.concatenate(dTdt_pool) ** 2).mean())) + 1e-6
     aniso_scale = float(np.sqrt(np.mean(np.sum(Fo ** 2, axis=(1, 2))))) + 1e-6
     Qsrc_scale = float(np.sqrt((np.concatenate(Qsrc_pool) ** 2).mean())) + 1e-6
-    # BC scale: the RMS spatial gradient the training data actually carries, so a
-    # BC residual of 1 means "as steep as a typical gradient in this cell". The
-    # old 1/L_ref was a guess that never looked at a temperature.
-    bc_scale, bc_pairs = _measure_bc_scale(xn, ops, fallback=1.0 / L_ref)
-    # phys_scale: RMS of the combined residual magnitude to scale entire PDE loss
-    phys_scale = float(np.sqrt(dTdt_scale**2 + aniso_scale**2 + Qsrc_scale**2)) + 1e-6
+    # BC scale: expected magnitude of temperature spatial gradient dT/dx
+    # Heuristic: typical temperature variation (T_sigma) over typical length (L_ref)
+    # Since T is z-scored, T_sigma~1 in normalized units, and x is in [0, L_axis/L_ref]
+    bc_scale = 1.0 / L_ref  # normalized temperature per normalized length
+    # phys_scale: the ONE scale ``physics.py`` divides the assembled residual by,
+    # so L_phys lands at O(1) without altering the equation. Built from the two
+    # genuine term magnitudes: dTdt_scale and Qsrc_scale are RMS values of terms
+    # that actually appear in the residual, both already in the shared
+    # nondimensional units. ``aniso_scale`` is deliberately NOT in here -- it is
+    # the RMS of the Fourier tensor alone, with the ``grad^2 T`` factor missing,
+    # so it is not the magnitude of the diffusion TERM and mixing it in would set
+    # the scale by a quantity the residual never contains. It stays on the bundle
+    # for logging only.
+    phys_scale = float(np.sqrt(dTdt_scale**2 + Qsrc_scale**2)) + 1e-6
 
     return NormBundle(
         ops=ops, T_mu=T_mu, T_sigma=T_sigma, T_span_ref=T_span_ref, L_ref=L_ref,

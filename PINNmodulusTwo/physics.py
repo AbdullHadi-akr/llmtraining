@@ -64,9 +64,14 @@ def boundary_condition_loss(
     forcing_sample = forcing[t_idx]
     
     # Evaluate model at boundary points
-    xb = xn[p_idx].clone().requires_grad_(True)
+    # ``xn[p_idx]`` is advanced indexing, which already allocates a fresh
+    # tensor sharing no storage with xn -- the clone was a second copy.
+    xb = xn[p_idx].requires_grad_(True)
     hist = model._history(Tn_seq, dtn, tn_sample, p_idx)
-    T = model.field(xb, static[p_idx], cfg_sample, forcing_sample, hist)
+    # ``level`` is spatially constant, so it drops out of d/dx exactly -- it is
+    # passed anyway so T is the same absolute field the data term sees.
+    T = model.field(xb, static[p_idx], cfg_sample, forcing_sample, hist,
+                    model.level(Tn_seq, dtn, tn_sample))
     
     # Compute dT/dx (gradient wrt first coordinate)
     grad_T = _grad(T, xb)  # (n_samples, 3)
@@ -92,40 +97,66 @@ def heat_residual(
     tn_q: torch.Tensor,      # (B,) query times (normalised)
     p_idx: torch.Tensor,     # (B,) point index per sample
     phys_scale: float,
-    dTdt_scale: float = 1.0,
-    aniso_scale: float = 1.0,
-    Qsrc_scale: float = 1.0,
     time_deriv: TimeDerivMethod = "bdf2",
     residual_norm: ResidualNorm = "rms",
 ) -> torch.Tensor:
     """Return the scaled heat-equation residual at the sampled points.
-    
+
+    All three terms -- ``dT/dt``, the anisotropic Laplacian ``Fo : grad^2 T`` and
+    the source ``Qsrc`` -- are already expressed in the SAME nondimensional units
+    by ``data.py`` (shared ``T_span_ref``, ``L_ref``, ``T_sigma``). The residual
+    is therefore assembled first and divided by ONE scale at the end.
+
+    Dividing each term by its own RMS instead, as this did before, does not
+    rescale the equation -- it changes it. ``dTdt/sqrt(a) - aniso/sqrt(b) -
+    Qsrc/sqrt(c)`` is only equivalent to ``dTdt - aniso - Qsrc`` when
+    ``a == b == c``, and here they differ by orders of magnitude (``aniso_scale``
+    was not even a term magnitude: it is the RMS of the Fourier tensor, with the
+    ``grad^2 T`` factor missing). The learnable ``src_gain``/``diff_gain`` existed
+    to undo that damage, which is why they needed a 25x learning rate -- and why
+    the optimiser could instead drive both to 0 and satisfy the residual with a
+    constant field. One scale, no gains to collapse.
+
     Time derivative methods:
       - bdf1: 1st-order backward difference, O(Δt) error
       - bdf2: 2nd-order backward difference, O(Δt²) error (recommended)
       - autograd: continuous autograd derivative, O(ε_machine) error
     """
-    xb = xn[p_idx].clone().requires_grad_(True)   # (B, 3)
+    xb = xn[p_idx].requires_grad_(True)   # (B, 3); indexing already copies
     hist = model._history(Tn_seq, dtn, tn_q, p_idx)
+    level = model.level(Tn_seq, dtn, tn_q)
     
     if time_deriv == "autograd":
         # Continuous time derivative via autograd
         # Time as additional input, requires_grad=True for dT/dt
         t_input = tn_q.clone().requires_grad_(True)
-        T = model.field_with_time(xb, static[p_idx], cfg, forcing, hist, t_input)
+        T = model.field_with_time(xb, static[p_idx], cfg, forcing, hist, t_input,
+                                  level)
         dTdt = _grad(T, t_input)
     else:
-        T = model.field(xb, static[p_idx], cfg, forcing, hist)
+        T = model.field(xb, static[p_idx], cfg, forcing, hist, level)
         
+        # In RAW mode the history block already IS the BDF stencil: column i-1 is
+        # ``interp_history(tn_q - i*delta)``, the same tensor and the same call
+        # ``history_at(lag=i)`` would make, so re-fetching it is duplicate work.
+        # Hybrid packs [anchor, rates...] instead, and a raw run with too few
+        # columns has nothing to reuse -- both fall back to the explicit lookup.
+        raw_hist = model.history_mode != "hybrid"
+
+        def _lag(n: int) -> torch.Tensor:
+            if raw_hist and model.k_max >= n:
+                return hist[:, n - 1]
+            return model.history_at(Tn_seq, dtn, tn_q, p_idx, lag=n)
+
         if time_deriv == "bdf2":
             # BDF2: 2nd-order backward difference, O(Δt²) error
             # dT/dt ≈ (3*T - 4*T_{-1} + T_{-2}) / (2*Δt)
-            T_1 = model.history_at(Tn_seq, dtn, tn_q, p_idx, lag=1)
-            T_2 = model.history_at(Tn_seq, dtn, tn_q, p_idx, lag=2)
+            T_1 = _lag(1)
+            T_2 = _lag(2)
             dTdt = (3.0 * T - 4.0 * T_1 + T_2) / (2.0 * model.delta + 1e-8)
         else:
             # BDF1: 1st-order backward difference, O(Δt) error
-            T_prev = model.history_at(Tn_seq, dtn, tn_q, p_idx, lag=1)
+            T_prev = _lag(1)
             dTdt = (T - T_prev) / (model.delta + 1e-8)
 
     # Spatial derivatives via autograd (always continuous)
@@ -144,18 +175,11 @@ def heat_residual(
         + 2.0 * (fo[:, 0, 1] * Txy + fo[:, 0, 2] * Txz + fo[:, 1, 2] * Tyz)
     )
 
-    # Each term is divided by its own training RMS, so all three enter the
-    # residual at unit scale and the equation is balanced BEFORE the learnable
-    # gains touch it. src_gain/diff_gain then express a genuine physical
-    # correction rather than having to travel decades just to undo a scaling
-    # mistake -- and dTdt, which has no gain at all, could never be corrected.
-    dTdt_n = dTdt / _term_norm(dTdt_scale, residual_norm)
-    aniso_n = model.diff_gain * (aniso / _term_norm(aniso_scale, residual_norm))
-    src_n = model.src_gain * (Qsrc / _term_norm(Qsrc_scale, residual_norm))
-    residual = dTdt_n - aniso_n - src_n
-    # In "rms" mode the terms are already unit-scale, so a further division by a
-    # combined scale would only re-introduce an arbitrary factor -- and under EMA
-    # balancing in train.py any constant here cancels out anyway.
-    if residual_norm == "legacy":
-        return residual / (phys_scale ** 0.5)
-    return residual
+    # The nondimensional heat equation, assembled in its own units. The gains are
+    # 1.0 unless --learn-gains restores the old free-gain behaviour.
+    residual = dTdt - model.diff_gain * aniso - model.src_gain * Qsrc
+    # One scale for the assembled residual: an equation is not rescaled by
+    # dividing its terms by different numbers. phys_scale is the RMS magnitude a
+    # term of this equation has on the training data, so this lands L_phys at
+    # O(1) without touching what the equation says.
+    return residual / (phys_scale + 1e-30)

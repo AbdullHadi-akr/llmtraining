@@ -23,9 +23,21 @@ Deliberately fixed (configured once, never trained):
   channel is always fully on. The method is kept so logging and checkpoints keep
   a stable shape.
 * ``rate_lags`` -- hybrid-mode segment lengths, also a buffer.
+* ``src_gain`` / ``diff_gain`` -- pinned at 1.0. They only ever existed to undo a
+  per-term normalisation that ``physics.py`` no longer does; ``learn_gains=True``
+  brings the old free gains back.
 
-Learned: the MLP weights, the per-layer swish ``beta``, and the physics gains
-``src_gain``/``diff_gain``. Nothing about the history layout is trained.
+Learned: the MLP weights and the per-layer swish ``beta`` (plus the gains, when
+``learn_gains`` asks for it). Nothing about the history layout is trained.
+
+Output parameterisation
+-----------------------
+With ``residual_output`` (the default) the network predicts the deviation from
+the spatially averaged temperature level of the anchor slice, and :meth:`field`
+adds that level back. The level is spatially constant, so the autograd Laplacian
+in ``physics.py`` and the ``dT/dx = 0`` boundary term are untouched, while the
+rollout carries the overall temperature level instead of re-deriving it at every
+one of its ~7000 steps.
 """
 
 from __future__ import annotations
@@ -195,9 +207,13 @@ class RecurrentField(nn.Module):
         weight_norm: bool = True,
         beta_init: float = 1.0,
         use_autograd_time: bool = False,
+        residual_output: bool = True,
+        learn_gains: bool = False,
     ) -> None:
         super().__init__()
         self.history_mode = history_mode
+        self.residual_output = bool(residual_output)
+        self.learn_gains = bool(learn_gains)
         self._n_lags = len(rate_lags)
         # In hybrid mode the channel count follows from the history layout itself
         # (1 anchor + one rate per lag), so the ``k_max`` argument does not apply
@@ -252,8 +268,21 @@ class RecurrentField(nn.Module):
         )
         self.rate_scale = float(rate_scale)
 
-        self.log_src_gain = nn.Parameter(torch.zeros(()))
-        self.log_diff_gain = nn.Parameter(torch.zeros(()))
+        # The three residual terms (dT/dt, the anisotropic Laplacian, the source)
+        # are already in the SAME nondimensional units -- that is what the shared
+        # ``T_span_ref`` / ``L_ref`` / ``T_sigma`` scaling in ``data.py`` buys.
+        # ``physics.py`` therefore divides the assembled residual by one scale
+        # instead of each term by its own, and these gains have nothing left to
+        # correct: they stay pinned at exactly 1.0 unless ``learn_gains`` asks
+        # for the old behaviour. Learnable gains multiply two of the three terms,
+        # which lets the optimiser drive both towards 0 and satisfy L_phys with a
+        # constant field -- the physics term switching itself off.
+        if self.learn_gains:
+            self.log_src_gain = nn.Parameter(torch.zeros(()))
+            self.log_diff_gain = nn.Parameter(torch.zeros(()))
+        else:
+            self.register_buffer("log_src_gain", torch.zeros(()))
+            self.register_buffer("log_diff_gain", torch.zeros(()))
 
     @property
     def delta(self) -> torch.Tensor:
@@ -294,6 +323,21 @@ class RecurrentField(nn.Module):
         and the benchmark checkpoints keep a stable, k_max-shaped field.
         """
         return torch.ones(self.k_max, dtype=self._delta.dtype, device=self._delta.device)
+
+    def _causal(self, tn_q: torch.Tensor, t_query: torch.Tensor,
+                dtn: float) -> torch.Tensor:
+        """Clamp a history query to at most one full grid step before ``tn_q``.
+
+        The history must never read at or after the time being predicted. That
+        used to be guaranteed implicitly, by handing the recurrence the truncated
+        view ``buf[:ti]`` so a too-recent query simply clamped to the last row.
+        The training loop now hands over the whole frozen rollout buffer -- one
+        rollout, many minibatch steps -- and in that buffer the row at ``tn_q``
+        exists, so an unclamped lookup with ``delta_grid < dt`` would interpolate
+        the very value the data term is fitting. Clamping here restores the old
+        semantics for every caller and every buffer view.
+        """
+        return torch.minimum(t_query, tn_q - float(dtn))
 
     def _padded_lookup(
         self,
@@ -343,31 +387,32 @@ rate_lags are CUMULATIVE segment lengths (not absolute boundaries), and each
             return tn_q.new_zeros((tn_q.shape[0], 0))
 
         dgrid = self._delta_grid.to(tn_q.dtype)
-        T_anchor = self._padded_lookup(Tn_seq, dtn, tn_q - dgrid, p_idx)
+        # Causal anchor; every rate segment then runs backwards from here, so
+        # clamping this one point makes the whole block causal.
+        t_anchor = self._causal(tn_q, tn_q - dgrid, dtn)
+        T_anchor = self._padded_lookup(Tn_seq, dtn, t_anchor, p_idx)
 
         rates = []
-        t_boundary = tn_q - dgrid  # start at t - delta_grid (the anchor point)
+        t_boundary = t_anchor  # start at t - delta_grid (the anchor point)
         for i in range(len(rate_lags)):
             seg_len = rate_lags[i]
-            t_next = t_boundary - seg_len  # cumulative: subtract segment length
-
-            T_end = self._padded_lookup(Tn_seq, dtn, t_boundary, p_idx)
-            T_start = self._padded_lookup(Tn_seq, dtn, t_next, p_idx)
+            t_boundary = t_boundary - seg_len  # cumulative: subtract segment length
+            T_bounds.append(self._padded_lookup(Tn_seq, dtn, t_boundary, p_idx))
 
             # Span = the segment's own length. That is exactly how far apart the
             # two endpoints of this difference are, so it is the divisor that
             # turns the difference into a rate. delta_grid only shifts WHERE the
             # window sits; it is not part of the window. Floored at one grid
             # step: a span below the time resolution is not resolvable.
-            span = torch.clamp(seg_len, min=float(dtn))
+            spans.append(torch.clamp(seg_len, min=float(dtn)))
 
-            # Normalised d T / d t: rate_scale keeps this channel O(1) so it sits
-            # on the same scale as the z-scored anchor channel next to it.
-            rate = (T_end - T_start) / (span * self.rate_scale)
-            rates.append(rate)
-            t_boundary = t_next  # next segment starts here
-
-        return torch.cat([T_anchor.unsqueeze(1), torch.stack(rates, dim=1)], dim=1)
+        # Normalised d T / d t: rate_scale keeps this channel O(1) so it sits on
+        # the same scale as the z-scored anchor channel next to it.
+        rates = [
+            (T_bounds[i] - T_bounds[i + 1]) / (spans[i] * self.rate_scale)
+            for i in range(len(rate_lags))
+        ]
+        return torch.cat([T_bounds[0].unsqueeze(1), torch.stack(rates, dim=1)], dim=1)
 
     def _history_raw(
         self,
@@ -383,9 +428,45 @@ rate_lags are CUMULATIVE segment lengths (not absolute boundaries), and each
         delta = self.delta
         cols = []
         for i in range(1, self.k_max + 1):
-            tq = tn_q - i * delta
-            cols.append(interp_history(Tn_seq, dtn, tq, p_idx))
+            tq = self._causal(tn_q, tn_q - i * delta, dtn)
+            cols.append(self._padded_lookup(Tn_seq, dtn, tq, p_idx))
         return torch.stack(cols, dim=1)
+
+    def level(
+        self,
+        Tn_seq: torch.Tensor,
+        dtn: float,
+        tn_q: torch.Tensor,
+    ) -> torch.Tensor | None:
+        """Spatially CONSTANT reference level of the field, one value per query time.
+
+        This is the spatial mean of the anchor slice ``T(t - delta_grid)``, read
+        with the same interpolation as the history channels. ``field`` adds it
+        back, so the network only has to produce the deviation from the current
+        temperature level instead of re-deriving the absolute level at every one
+        of the ~7000 rollout steps. That is what keeps the free-running rollout
+        from drifting: the level is carried, not re-predicted.
+
+        Why the SPATIAL MEAN and not the per-point anchor ``hist[:, 0]``:
+        ``physics.py`` takes the Laplacian of ``field``'s output by autograd with
+        respect to ``xn``. A per-point anchor is read from a discrete buffer and
+        is therefore invisible to autograd, so ``nabla^2 T`` would silently come
+        back as the Laplacian of the deviation alone -- missing the anchor's own
+        curvature, which is most of it. A spatially constant level has Laplacian
+        zero exactly, so the residual and the ``dT/dx = 0`` boundary term stay
+        correct with no correction term. It also carries the drift-prone part:
+        what wanders over a long rollout is the overall level, not the shape.
+
+        Returns ``None`` when the residual parameterisation is off, which makes
+        ``field`` fall back to predicting the absolute value.
+        """
+        if not self.residual_output:
+            return None
+        dgrid = self._delta_grid.to(tn_q.dtype)
+        mean_seq = Tn_seq.mean(dim=1, keepdim=True)     # (n_t, 1)
+        p_zero = torch.zeros_like(tn_q, dtype=torch.long)
+        t_anchor = self._causal(tn_q, tn_q - dgrid, dtn)
+        return self._padded_lookup(mean_seq, dtn, t_anchor, p_zero)
 
     def field(
         self,
@@ -394,9 +475,13 @@ rate_lags are CUMULATIVE segment lengths (not absolute boundaries), and each
         cfg: torch.Tensor,
         forcing: torch.Tensor,
         hist: torch.Tensor,
+        level: torch.Tensor | None = None,
     ) -> torch.Tensor:
         feats = torch.cat([xn, static, cfg, forcing, hist], dim=1)
-        return self.mlp(feats).squeeze(-1)
+        out = self.mlp(feats).squeeze(-1)
+        if level is None:
+            return out
+        return level + out
 
     def field_with_time(
         self,
@@ -406,10 +491,14 @@ rate_lags are CUMULATIVE segment lengths (not absolute boundaries), and each
         forcing: torch.Tensor,
         hist: torch.Tensor,
         t: torch.Tensor,
+        level: torch.Tensor | None = None,
     ) -> torch.Tensor:
         t_col = t.unsqueeze(-1) if t.dim() == 1 else t
         feats = torch.cat([xn, static, cfg, forcing, hist, t_col], dim=1)
-        return self.mlp_with_time(feats).squeeze(-1)
+        out = self.mlp_with_time(feats).squeeze(-1)
+        if level is None:
+            return out
+        return level + out
 
     def _history(
         self,
@@ -421,6 +510,122 @@ rate_lags are CUMULATIVE segment lengths (not absolute boundaries), and each
         if self.history_mode == "hybrid":
             return self._history_hybrid(Tn_seq, dtn, tn_q, p_idx, self.rate_lags)
         return self._history_raw(Tn_seq, dtn, tn_q, p_idx)
+
+    def rollout_plan(self, tn: torch.Tensor, dtn: float) -> dict:
+        """Precomputed bracketing rows/weights for every rollout step.
+
+        A rollout query is special in a way the general path cannot assume: the
+        time is ONE scalar broadcast over all P points and ``p_idx`` is
+        ``arange(P)``. So ``interp_history``'s bracketing indices do not depend on
+        the point at all -- ``lo``/``hi`` collapse to whole ROWS of the buffer and
+        ``frac`` to a single scalar. Both are pure functions of the step index on a
+        uniform grid, yet the general path recomputed the whole clamp/floor/gather
+        chain ``k_max`` times per step, every step, every epoch, every OP.
+
+        This hoists that arithmetic out of the loop and evaluates it once.
+
+        Bit-exactness is deliberate, not incidental: the tables are built by
+        running the SAME expressions the general path runs, in the same dtype and
+        with the same rounding at every step -- successive
+        subtraction for the hybrid boundaries (never a pre-summed offset, which is
+        algebraically equal but a different sequence of rounding steps) and the
+        same clamp order. ``tests/test_history_fastpath.py`` asserts equality with
+        ``torch.equal``, not ``allclose``.
+
+        Causality: the general path passes the SLICE ``buf[:ti]``, and that slice
+        is the only thing stopping a step from reading its own future. The fast
+        path reads the whole buffer, so the bound moves into ``cap = ti - 1`` here.
+        A wrong cap would leak future temperature into the history and quietly
+        make training look better, so the test asserts the bound directly.
+
+        The plan is cached and rebuilt whenever the layout it was derived from
+        changes (n_t differs per OP, and the benchmarks sweep rate_lags).
+        """
+        device = self._delta.device
+        n_t = int(tn.shape[0])
+        key = (
+            n_t, float(dtn), str(device), str(tn.dtype), self.history_mode,
+            int(self.k_max), float(self._delta), float(self._delta_grid),
+            tuple(float(v) for v in self._rate_lags),
+        )
+        cached = getattr(self, "_hist_plan_cache", None)
+        if cached is not None and cached[0] == key:
+            return cached[1]
+
+        # Follow ``tn``'s dtype, not the module's. The general path derives its
+        # query times from tn_q = tn[ti], so tying the plan to the parameter dtype
+        # instead would silently diverge for a model whose weights and time grid
+        # are not the same precision.
+        tn_c = tn.to(device=device)
+        if self.history_mode == "hybrid":
+            # Same walk as _history_hybrid, vectorised over all steps at once:
+            # elementwise ops, so per-element results are untouched, and the
+            # subtraction stays SUCCESSIVE rather than becoming a pre-summed offset.
+            t_boundary = tn_c - self._delta_grid.to(tn_c.dtype)
+            times = [t_boundary]
+            for i in range(self._n_lags):
+                t_boundary = t_boundary - self._rate_lags[i]
+                times.append(t_boundary)
+            # _padded_lookup's clamp: T(t) := T(0) for t < 0.
+            times = [torch.clamp(t, min=0.0) for t in times]
+            denoms = [
+                torch.clamp(self._rate_lags[i], min=float(dtn)) * self.rate_scale
+                for i in range(self._n_lags)
+            ]
+        else:
+            times = [tn_c - i * self._delta for i in range(1, self.k_max + 1)]
+            denoms = []
+        dtype = times[0].dtype if times else tn_c.dtype
+
+        plan: dict = {"n_off": len(times), "denoms": denoms}
+        if not times:
+            self._hist_plan_cache = (key, plan)
+            return plan
+
+        # ``cap`` is float(n_t - 1) of the SLICE the general path would have seen,
+        # i.e. ti - 1. Step 0 never queries; clamping keeps its row well-formed.
+        steps = torch.arange(n_t, device=device)
+        cap_i = (steps - 1).clamp(min=0).unsqueeze(1)
+        cap_f = cap_i.to(dtype)
+
+        tq = torch.stack(times, dim=1)                       # (n_t, n_off)
+        pos = torch.minimum(torch.clamp(tq / dtn, min=0.0), cap_f)
+        lo = torch.minimum(torch.floor(pos).long().clamp(min=0), cap_i)
+        hi = torch.minimum(lo + 1, cap_i)
+        plan["lo"], plan["hi"] = lo, hi
+        plan["frac"] = pos - lo.to(dtype)
+
+        self._hist_plan_cache = (key, plan)
+        return plan
+
+    def history_rollout(self, buf: torch.Tensor, ti: int, plan: dict) -> torch.Tensor:
+        """History block at rollout step ``ti``, using a :meth:`rollout_plan`.
+
+        Equivalent to ``self._history(buf[:ti], dtn, tn[ti].expand(P), arange(P))``
+        but without rebuilding the index arithmetic, and reading rows of ``buf``
+        directly instead of running a two-index gather whose indices are constant
+        across the batch.
+        """
+        n_off = plan["n_off"]
+        if n_off == 0:
+            return buf.new_zeros((buf.shape[1], 0))
+
+        lo, hi, frac = plan["lo"], plan["hi"], plan["frac"]
+        vals = []
+        for j in range(n_off):
+            # frac and the row indices stay 0-dim TENSORS. Calling ``.item()`` /
+            # ``float()`` on them would be numerically identical (the values round
+            # the same either way) but forces a device-to-host sync per channel per
+            # step -- on CUDA that alone would undo the point of the fast path.
+            f = frac[ti, j]
+            vals.append(buf[lo[ti, j]] * (1.0 - f) + buf[hi[ti, j]] * f)
+
+        if self.history_mode != "hybrid":
+            return torch.stack(vals, dim=1)
+
+        denoms = plan["denoms"]
+        rates = [(vals[i] - vals[i + 1]) / denoms[i] for i in range(len(denoms))]
+        return torch.cat([vals[0].unsqueeze(1), torch.stack(rates, dim=1)], dim=1)
 
     def forward(
         self,
@@ -434,7 +639,8 @@ rate_lags are CUMULATIVE segment lengths (not absolute boundaries), and each
         p_idx: torch.Tensor,
     ) -> torch.Tensor:
         hist = self._history(Tn_seq, dtn, tn_q, p_idx)
-        return self.field(xn, static, cfg, forcing, hist)
+        return self.field(xn, static, cfg, forcing, hist,
+                          self.level(Tn_seq, dtn, tn_q))
 
     def history_at(
         self,
@@ -445,40 +651,17 @@ rate_lags are CUMULATIVE segment lengths (not absolute boundaries), and each
         lag: int = 1,
     ) -> torch.Tensor:
         """Ungated history at a single ``lag`` (used by the FD time derivative)."""
-        tq = tn_q - lag * self.delta
-        return interp_history(Tn_seq, dtn, tq, p_idx)
+        tq = self._causal(tn_q, tn_q - lag * self.delta, dtn)
+        return self._padded_lookup(Tn_seq, dtn, tq, p_idx)
 
 
-def rollout_train(
-    model: RecurrentField,
-    xn: torch.Tensor,        # (P, 3) normalised coords
-    static: torch.Tensor,    # (P, n_static) per-point static features
-    cfg_seq: torch.Tensor,   # (n_t, n_config) config features over time
-    forcing_seq: torch.Tensor,  # (n_t, n_forcing) forcing (q_dot) over time
-    Tn_ic: torch.Tensor,     # (P,) normalised initial condition (seed)
-    tn: torch.Tensor,        # (n_t,) normalised time grid
-    dtn: float,
-) -> torch.Tensor:
-    """Free-running autoregressive rollout that KEEPS gradients (for training).
-
-    Identical stepping to :func:`rollout`, but differentiable so the data loss can
-    be taken directly on the model's own trajectory -- there is NO teacher forcing.
-    The buffer is seeded with the measured IC and every step reads history from the
-    model's OWN earlier predictions. History values are detached between steps
-    (truncated BPTT): each step's gradient flows through its own field evaluation
-    only, keeping memory bounded. ``delta`` and the gates are fixed, so no
-    gradient runs along the time axis through them.
-    """
-    n_t, P = tn.shape[0], xn.shape[0]
-    p_idx = torch.arange(P, device=xn.device)
-    buf = torch.zeros(n_t, P, dtype=xn.dtype, device=xn.device)
-    buf[0] = Tn_ic
-    for ti in range(1, n_t):
-        hist = model._history(buf[:ti].detach(), dtn, tn[ti].expand(P), p_idx)
-        cfg = cfg_seq[ti].expand(P, -1)
-        forcing = forcing_seq[ti].expand(P, -1)
-        buf[ti] = model.field(xn, static, cfg, forcing, hist)
-    return buf
+# ``rollout_train`` -- a gradient-keeping twin of ``rollout`` -- used to live here.
+# It detached its history between steps anyway (truncated BPTT), so the gradient at
+# time t never left that step's own field evaluation: the whole differentiable
+# rollout produced exactly the gradient a minibatch of (t, point) pairs against a
+# FROZEN trajectory produces, at ~7000 sequential steps for a single optimiser
+# update. ``train.py`` now takes that cheaper equivalent -- one ``rollout`` under
+# no_grad per OP per epoch, then ``--inner-steps`` minibatch updates against it.
 
 
 @torch.no_grad()
@@ -503,10 +686,13 @@ def rollout(
     n_t, P = tn.shape[0], xn.shape[0]
     buf = torch.zeros(n_t, P, dtype=xn.dtype, device=xn.device)
     buf[0] = Tn_ic
-    p_idx = torch.arange(P, device=xn.device)
+    plan = model.rollout_plan(tn, dtn)
     for ti in range(1, n_t):
-        hist = model._history(buf[:ti], dtn, tn[ti].expand(P), p_idx)
+        past = buf[:ti]
+        tq = tn[ti].expand(P)
+        hist = model._history(past, dtn, tq, p_idx)
         cfg = cfg_seq[ti].expand(P, -1)
         forcing = forcing_seq[ti].expand(P, -1)
-        buf[ti] = model.field(xn, static, cfg, forcing, hist)
+        buf[ti] = model.field(xn, static, cfg, forcing, hist,
+                              model.level(past, dtn, tq))
     return buf

@@ -26,30 +26,29 @@ takes part in any selection.
 - `model.py` — `LearnableSwish`, `ModulusMLP` (Modulus `FCLayer`s), and
   `RecurrentField`. The recurrence is deliberately **not** adaptive: `δ`, `k`,
   `delta_grid`, `rate_lags` and the lag gates are all fixed hyperparameters —
-  configurable, never trained. Learned are only the MLP weights, the per-layer
-  swish `β`, and the physics gains `src_gain`/`diff_gain`.
+  configurable, never trained. Learned are only the MLP weights and the per-layer
+  swish `β`; `src_gain`/`diff_gain` are pinned at 1.0 unless `--learn-gains`.
+  With `residual_output` (default) the net predicts the deviation from the
+  anchor's spatially averaged temperature level rather than the absolute value.
 - `physics.py` — nondimensional anisotropic heat residual; space via autograd,
-  time via the finite-difference `(T(t) − T(t−δ))/δ` over the recurrence.
-- `train.py` — training loop + evaluation, plots, metrics.
+  time via the finite-difference `(T(t) − T(t−δ))/δ` over the recurrence. The
+  assembled residual is divided by **one** scale, not each term by its own.
+- `train.py` — training loop + evaluation, plots, metrics. One free-running
+  rollout per OP per epoch, then `--inner-steps` minibatch updates against it.
 - `bench_common.py` — shared benchmark machinery: per-seed training, mean/std
   aggregation over seeds, the val/test split, and the seed-noise verdict. A
   benchmark only describes its own sweep axis.
 - `benchmark_wphys_wbc.py` — 2D sweep of the loss weights `w_phys` x `w_bc`.
-- `benchmark_balance.py` — **run this before the weight sweep**: how the loss
-  terms are scaled relative to each other, and whether the optional input
-  channels help. A weight only means something once the scaling under it is
-  settled (see *Loss balancing* below).
 - `benchmark_arch.py` — width, depth, history lags and anchor lag (`delta_grid`),
   one axis at a time.
 - `smallBench.py` — 2-5 minute smoke test; run it before any long sweep.
-- `selftest.py` — seconds-long arithmetic checks on the loss balancing and
-  residual scaling. No data, no GPU. The properties it guards are invisible
-  in a training log, and the next chance to notice is a multi-hour sweep.
 - `config.yaml` — hyperparameters, matching what the benchmarks run
   (CLI overrides available).
-- `ARCHITECTURE.md` — **[Kontrollfluss und Modellbeschreibung](ARCHITECTURE.md)**:
-  wie ein Lauf abläuft, was gelernt wird und was fest ist, wo man für eine
-  Erweiterung ansetzt, und welche Fallstricke schon einmal zugeschlagen haben.
+- [`README_MODEL_CRITIQUE.md`](README_MODEL_CRITIQUE.md) — what was wrong with the
+  model, what is fixed, what is still open, and **what you have to see in which
+  test to know which step comes next**. Everything in it is so far verified
+  mathematically only, not measured on real data; it names the run that settles
+  that. Read it before committing GPU days to a sweep.
 
 ## Why recurrence (profiles)
 
@@ -61,8 +60,8 @@ these cases — this is the whole reason method #2 needs recurrence.
 `k` (how many history points) and `δ` (their spacing) are **fixed
 hyperparameters**, not learned — as are the `rate_lags` in hybrid mode and the
 lag gates, which are permanently on. The history layout is configured once and
-stays put; only the network and the two physics gains train. Sweep the layout
-with `benchmark_arch.py` rather than expecting the model to find it.
+stays put; only the network trains. Sweep the layout with `benchmark_arch.py`
+rather than expecting the model to find it.
 
 Hybrid history keeps the same raw interpolation for the physics residual, but
 feeds the network a more compact feature block:
@@ -92,54 +91,29 @@ the default and remains the recommended choice when the history buffer is long
 enough; `history_at()` always uses raw interpolation so the derivative is not
 coupled to the hybrid feature layout.
 
-## Loss balancing — what `w_phys` and `w_bc` actually mean
+## Training budget (`--inner-steps`)
 
-The three loss terms live on completely different scales, so a raw weight is not
-a mixing ratio. Each term is therefore divided by a running estimate of its own
-magnitude before its weight is applied (`--loss-balance`, `config.yaml:
-loss_balance`):
+The rollout is what costs time: ~7000 *sequential* steps per OP per epoch that
+cannot be parallelised. The loop used to spend one of those on a single optimiser
+step, so a 60-epoch run over 5 OPs finished after **300 Adam updates** — far too
+few for a ~70k-parameter MLP, and the main reason the rollout error stayed large.
 
-| mode | which terms are divided | consequence |
-|---|---|---|
-| `ema` (default) | `L_data`, `L_phys`, `L_bc` | `w_data:w_phys:w_bc` is a genuine ratio. `w_phys = 1` means "physics contributes as much as data", and it means that in epoch 1 as much as in epoch 60. |
-| `legacy` | only `L_phys`, `L_bc` | the historical scheme. `L_data` stays raw and falls by orders of magnitude during a run, while the two normalised terms stay pinned near 1 — so the mixture drifts steadily towards physics, and the best `w_phys` becomes a function of `--epochs`. |
-| `fixed` | all three, frozen after warm-up | deterministic, no feedback between a loss and its own scale. |
+Now each rollout is computed once under `no_grad` and reused for `--inner-steps`
+minibatch updates of `batch_data` random `(t, point)` pairs. That is not an
+approximation of the old objective: the recurrence always detached its history
+between steps, so the old full-sequence gradient was already a plain sum of
+independent per-`(t, point)` gradients against a trajectory it held constant — a
+minibatch estimates the same quantity. At the default 100 the same run takes
+**30 000** updates instead of 300, for one rollout's worth of extra cost.
 
-This is why `benchmark_balance.py` runs first. It trains at one fixed weight
-point and logs `w_phys*L_phys_bal / (w_data*L_data_bal)` per epoch — the mixture
-the optimiser actually saw. Under `legacy` that number moves during the run;
-under `ema` it does not. Tuning weights before knowing which regime you are in
-measures the drift as much as the weights.
+The tradeoff is staleness: after a few updates the frozen buffer is no longer
+quite what the current weights would produce. It is refreshed every epoch, so
+keep `--inner-steps` in the hundreds. `--inner-steps 1` reproduces the old
+budget exactly, which is the honest baseline to compare against.
 
-Two related scaling knobs:
-
-- `--residual-norm` (default `rms`). The `*_scale` constants in `data.py` are RMS
-  values, so `x / scale` is what gives `mean(res²) = 1`. The original code
-  divided by `sqrt(scale)`, leaving `mean(res²) = scale` — i.e. the `dTdt`,
-  `aniso` and `Qsrc` terms kept their original size gap despite the
-  normalisation. `legacy` restores that behaviour for comparison.
-- `bc_scale` is now **measured** from the training data (the RMS spatial
-  gradient across x-neighbouring grid points) instead of the old `1 / L_ref`
-  guess, which never involved a temperature at all. `--residual-norm legacy`
-  does *not* restore the old value, so pre-fix `L_bc` numbers are not
-  reproducible.
-
-## Optional input features (off by default)
-
-Both widen the network input, so they are measured rather than assumed —
-`benchmark_balance.py --part 2` is the axis for them.
-
-- `--forcing-energy`: cumulative injected heat as a second forcing channel,
-  expressed as an adiabatic temperature rise in sigmas. A thermal system
-  *integrates* power; the instantaneous `q_dot` the net gets says how hard it is
-  being heated right now, never how much heat is already in the cell.
-- `--config-rates`: `d(config)/dt` for the config channels that are genuine time
-  profiles. Same argument as the temperature recurrence, applied to the configs.
-
-`train.py` also reports which config channels are **profiles** (varying in time
-within an OP) and which are **labels** (constant per OP, differing between them).
-Label channels are constants the network can memorise per OP — with five
-training OPs they can act as an OP identifier that cannot transfer to OP06/OP07.
+Measure the new per-epoch time with step 6.3 of `README_GPU_SERVER.md` before
+starting a long sweep — every runtime estimate in chapters 7 and 8 hangs on that
+one number, and the inner loop shifts it.
 
 ## Run
 

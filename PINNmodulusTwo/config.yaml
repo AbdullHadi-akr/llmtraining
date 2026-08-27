@@ -37,14 +37,28 @@ delta_grid: 0.2            # ONLY used when history_mode: hybrid
 time_deriv: bdf2           # bdf1 | bdf2 | autograd
 use_static: true
 use_forcing: true
+# Predict the deviation from the spatially averaged temperature level of the
+# anchor slice instead of the absolute value. The level is spatially constant,
+# so the physics Laplacian and the dT/dx boundary term are unchanged, but the
+# rollout carries the overall level instead of re-deriving it at every one of
+# the ~7000 steps -- which is the mode that drifts.
+residual_output: true
 
 # ---- optimisation -----------------------------------------------------------
 epochs: 60
+# Optimiser steps per OP per epoch, all against that epoch's one frozen rollout.
+# The rollout is what costs time; a minibatch step is cheap. At 100 a 60-epoch
+# run on 5 OPs takes 30000 Adam steps instead of the 300 it used to take.
+# Set to 1 to reproduce the old one-step-per-OP behaviour.
+inner_steps: 100
 lr: 2.0e-3
 weight_decay: 0.0
-# src_gain/diff_gain learn this many times faster than the rest; at 1.0 they
-# stay at their 1.0 init and the source/diffusion scale gap is never corrected.
-gain_lr_mult: 25.0
+# src_gain/diff_gain: off by default. physics.py no longer normalises each
+# residual term by its own RMS, so there is no scale gap left for them to
+# correct -- and free gains can be driven to 0, which satisfies L_phys with a
+# constant field instead of a physical one.
+learn_gains: false
+gain_lr_mult: 25.0         # only applies when learn_gains: true
 grad_clip: 1.0             # 0 disables clipping
 early_stopping_patience: 0 # 0 disables early stopping
 seed: 0
@@ -87,6 +101,9 @@ config_rates: false        # d(config)/dt for config channels that are profiles
 # ---- batch sizes ------------------------------------------------------------
 # On a GPU these can be raised a lot (that is where the speed-up comes from);
 # lower them again if you hit "CUDA out of memory".
+# batch_data is the number of (time, point) pairs drawn per optimiser step. It
+# used to be parsed and then ignored -- the data term ran full-batch over the
+# whole trajectory -- so changing it had no effect at all.
 batch_data: 2048
 batch_phys: 256
 batch_bc: 128

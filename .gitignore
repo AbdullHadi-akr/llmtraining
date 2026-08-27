@@ -4,17 +4,19 @@
 # Keep directories traversable so unignore rules can match files inside
 !*/
 
-# Keep only source notebooks and documentation
+# Keep only source notebooks and README files
 !*.py
 !*.ipynb
 !README
 !README.*
 !README_*.md
-!ARCHITECTURE.md
 
 # Keep the PINNmodulusTwo server setup files tracked (config + deps)
 !PINNmodulusTwo/config.yaml
 !PINNmodulusTwo/requirements-gpu.txt
+
+# Same for the profile extension (its config.yaml IS the benchmark configuration)
+!PINNmodulusTwoExtProfiles/config.yaml
 
 # Keep this file tracked
 !.gitignore
