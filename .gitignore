@@ -12,6 +12,9 @@
 !README_*.md
 !ARCHITECTURE.md
 
+# Keep the CI workflow tracked (the allowlist above is .py/.md only)
+!.github/workflows/*.yml
+
 # Keep the PINNmodulusTwo server setup files tracked (config + deps)
 !PINNmodulusTwo/config.yaml
 !PINNmodulusTwo/requirements-gpu.txt

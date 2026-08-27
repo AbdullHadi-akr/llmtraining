@@ -1,0 +1,57 @@
+# The NameError that made model.rollout unrunnable reached main unnoticed,
+# because nothing ran the tests. They need neither Modulus nor the data cache
+# (tests/conftest.py substitutes the three Modulus symbols model.py imports) and
+# finish in seconds, so there is no reason for that to be possible twice.
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        # CPU torch only: nothing here trains, and the CUDA wheels are ~2 GB.
+        run: |
+          python -m pip install --upgrade pip
+          pip install --index-url https://download.pytorch.org/whl/cpu torch
+          pip install numpy pandas pyyaml matplotlib pytest
+
+      - name: pytest
+        run: python -m pytest PINNmodulusTwo/tests -q
+
+      - name: selftest (loss balancing and residual scaling)
+        # Pure arithmetic on the scaling machinery; the properties it checks are
+        # invisible in a training log and the next chance to notice would be a
+        # multi-hour benchmark. Routed through the conftest stub because
+        # selftest.py imports train.py, which imports Modulus at module scope.
+        working-directory: PINNmodulusTwo
+        run: |
+          python -c "
+          import sys, runpy
+          sys.path.insert(0, 'tests'); import conftest
+          runpy.run_path('selftest.py', run_name='__main__')"
+
+      - name: import check
+        # The failure mode this workflow exists for -- a merge that leaves a
+        # module unimportable -- for the entry points the tests never import.
+        working-directory: PINNmodulusTwo
+        run: |
+          python -c "
+          import sys
+          sys.path.insert(0, 'tests'); import conftest
+          import model, physics, data, materials, device_utils, train
+          import bench_common, smallBench, generate_cache
+          import benchmark_arch, benchmark_balance, benchmark_wphys_wbc
+          print('all modules import')"
