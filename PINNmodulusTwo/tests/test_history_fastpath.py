@@ -21,7 +21,7 @@ from __future__ import annotations
 import pytest
 import torch
 
-from model import RecurrentField, rollout, rollout_train
+from model import RecurrentField, rollout
 
 DTN = 0.02
 N_T = 40
@@ -142,26 +142,26 @@ def test_step_one_reads_only_the_initial_condition():
 # 3. end-to-end: the rollouts themselves are unchanged
 # --------------------------------------------------------------------------
 
-def _reference_rollout(model, xn, static, cfg_seq, forcing_seq, Tn_ic, tn, dtn,
-                       detach_history=False):
-    """The pre-optimisation loop, kept verbatim as the oracle.
+def _reference_rollout(model, xn, static, cfg_seq, forcing_seq, Tn_ic, tn, dtn):
+    """The pre-optimisation loop, kept as the oracle for the fast path.
 
-    ``detach_history`` picks which of the two originals to be: ``rollout`` read
-    ``buf[:ti]`` while ``rollout_train`` read ``buf[:ti].detach()``. The values are
-    the same either way, but the GRADIENTS are not -- without the detach this is
-    full BPTT through the whole trajectory instead of the truncated BPTT the
-    training loop actually does, so the training comparisons must pass True.
+    It reads the causal SLICE ``buf[:ti]`` through the general history path, which
+    is exactly what ``history_rollout`` replaces. The residual ``level`` is passed
+    the same slice, so the only difference left between this and ``rollout`` is the
+    index arithmetic under test.
     """
     n_t, n_p = tn.shape[0], xn.shape[0]
     buf = torch.zeros(n_t, n_p, dtype=xn.dtype, device=xn.device)
     buf[0] = Tn_ic
     p_idx = torch.arange(n_p, device=xn.device)
     for ti in range(1, n_t):
-        past = buf[:ti].detach() if detach_history else buf[:ti]
-        hist = model._history(past, dtn, tn[ti].expand(n_p), p_idx)
+        past = buf[:ti]
+        tq = tn[ti].expand(n_p)
+        hist = model._history(past, dtn, tq, p_idx)
         cfg = cfg_seq[ti].expand(n_p, -1)
         forcing = forcing_seq[ti].expand(n_p, -1)
-        buf[ti] = model.field(xn, static, cfg, forcing, hist)
+        buf[ti] = model.field(xn, static, cfg, forcing, hist,
+                              model.level(past, dtn, tq))
     return buf
 
 
@@ -189,20 +189,18 @@ def test_rollout_matches_reference_loop(over, dtype):
     assert torch.equal(got, want)
 
 
-@pytest.mark.parametrize("dtype", DTYPES)
-@pytest.mark.parametrize("over", LAYOUTS)
-def test_rollout_train_matches_and_keeps_gradients(over, dtype):
-    model = _model(dtype=dtype, **over)
-    args = _rollout_inputs(dtype)
-    got = rollout_train(model, **args)
-    with torch.no_grad():
-        want = _reference_rollout(model, **args, detach_history=True)
-    assert torch.equal(got, want)
-    assert got.requires_grad, "rollout_train must stay differentiable"
+def test_rollout_carries_no_gradient():
+    """``rollout`` is the frozen-trajectory generator, not a differentiable path.
 
-    got.sum().backward()
-    grads = [p.grad for p in model.mlp.parameters() if p.grad is not None]
-    assert grads and any(g.abs().sum() > 0 for g in grads)
+    Its gradient-keeping twin ``rollout_train`` was removed: the history was
+    detached between steps anyway, so ~7000 sequential steps bought exactly the
+    gradient a minibatch against a FROZEN trajectory gives. ``train.py`` now takes
+    that cheaper equivalent, and this asserts the buffer really is frozen -- a
+    buffer that still required grad would mean the no_grad guard was lost again.
+    """
+    model = _model()
+    buf = rollout(model, **_rollout_inputs())
+    assert not buf.requires_grad
 
 
 def test_history_is_detached_in_training_rollout():
@@ -338,17 +336,31 @@ def test_plan_stays_out_of_the_checkpoint():
 def test_gradients_match_reference_loop(over, dtype):
     """Identical forward values are only worth something if the grads follow.
 
-    History carries no gradient (it is detached in both training paths), so it
-    enters ``field()`` as a constant. Equal constants plus equal weights must give
-    equal parameter gradients -- this asserts it rather than arguing it.
+    Since the training loop optimises against a FROZEN buffer, the gradient that
+    matters is the one through a single ``field()`` evaluation fed by the history
+    the fast path produced. History carries no gradient either way, so it enters
+    ``field()`` as a constant: equal constants plus equal weights must give equal
+    parameter gradients -- this asserts it rather than arguing it.
     """
     args = _rollout_inputs(dtype)
+    tn, dtn, n_p = args["tn"], args["dtn"], args["xn"].shape[0]
+    ti = N_T - 1
 
     fast = _model(dtype=dtype, **over)
-    rollout_train(fast, **args).pow(2).sum().backward()
+    buf = rollout(fast, **args)
+    plan = fast.rollout_plan(tn, dtn)
+    tq = tn[ti].expand(n_p)
+    cfg = args["cfg_seq"][ti].expand(n_p, -1)
+    forcing = args["forcing_seq"][ti].expand(n_p, -1)
+    fast.field(args["xn"], args["static"], cfg, forcing,
+               fast.history_rollout(buf, ti, plan),
+               fast.level(buf[:ti], dtn, tq)).pow(2).sum().backward()
 
     ref = _model(dtype=dtype, **over)          # same seed -> same init
-    _reference_rollout(ref, **args, detach_history=True).pow(2).sum().backward()
+    p_idx = torch.arange(n_p)
+    ref.field(args["xn"], args["static"], cfg, forcing,
+              ref._history(buf[:ti], dtn, tq, p_idx),
+              ref.level(buf[:ti], dtn, tq)).pow(2).sum().backward()
 
     pairs = list(zip(fast.named_parameters(), ref.named_parameters()))
     assert pairs
@@ -399,13 +411,17 @@ def _heat_residual_original(model, xn, static, cfg, forcing, Fo, Qsrc, Tn_seq,
 
     Carries both of the things that changed: the ``.clone()`` on the coordinate
     slice, and the explicit ``history_at`` re-lookups instead of reusing the
-    history block that was just built.
+    history block that was just built. Everything else -- the residual level, and
+    the assembly of the equation before ONE division by ``phys_scale`` -- is the
+    current formulation, because those are deliberate changes to what the residual
+    IS. What this asserts is only that the lookup reuse changed nothing.
     """
     from physics import _grad
 
     xb = xn[p_idx].clone().requires_grad_(True)
     hist = model._history(Tn_seq, dtn, tn_q, p_idx)
-    T = model.field(xb, static[p_idx], cfg, forcing, hist)
+    level = model.level(Tn_seq, dtn, tn_q)
+    T = model.field(xb, static[p_idx], cfg, forcing, hist, level)
     if time_deriv == "bdf2":
         T_1 = model.history_at(Tn_seq, dtn, tn_q, p_idx, lag=1)
         T_2 = model.history_at(Tn_seq, dtn, tn_q, p_idx, lag=2)
@@ -425,10 +441,8 @@ def _heat_residual_original(model, xn, static, cfg, forcing, Fo, Qsrc, Tn_seq,
         fo[:, 0, 0] * Txx + fo[:, 1, 1] * Tyy + fo[:, 2, 2] * Tzz
         + 2.0 * (fo[:, 0, 1] * Txy + fo[:, 0, 2] * Txz + fo[:, 1, 2] * Tyz)
     )
-    dTdt_n = dTdt / (1.0**0.5 + 1e-8)
-    aniso_n = model.diff_gain * (aniso / (1.0**0.5 + 1e-8))
-    src_n = model.src_gain * (Qsrc / (1.0**0.5 + 1e-8))
-    return (dTdt_n - aniso_n - src_n) / (phys_scale**0.5)
+    residual = dTdt - model.diff_gain * aniso - model.src_gain * Qsrc
+    return residual / (phys_scale + 1e-30)
 
 
 @pytest.mark.parametrize("time_deriv", ["bdf1", "bdf2"])

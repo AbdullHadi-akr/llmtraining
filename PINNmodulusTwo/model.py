@@ -390,10 +390,15 @@ rate_lags are CUMULATIVE segment lengths (not absolute boundaries), and each
         # Causal anchor; every rate segment then runs backwards from here, so
         # clamping this one point makes the whole block causal.
         t_anchor = self._causal(tn_q, tn_q - dgrid, dtn)
-        T_anchor = self._padded_lookup(Tn_seq, dtn, t_anchor, p_idx)
 
-        rates = []
+        # Walk the boundary points ONCE. The segments are disjoint and cascade, so
+        # the anchor is also segment 0's upper endpoint and every segment's lower
+        # endpoint is the next segment's upper one -- looking each one up per
+        # segment meant 1 + 2k lookups for 1 + k distinct times. Same times, same
+        # order of subtraction, so the values are unchanged bit for bit.
         t_boundary = t_anchor  # start at t - delta_grid (the anchor point)
+        T_bounds = [self._padded_lookup(Tn_seq, dtn, t_boundary, p_idx)]
+        spans = []
         for i in range(len(rate_lags)):
             seg_len = rate_lags[i]
             t_boundary = t_boundary - seg_len  # cumulative: subtract segment length
@@ -557,11 +562,17 @@ rate_lags are CUMULATIVE segment lengths (not absolute boundaries), and each
         # instead would silently diverge for a model whose weights and time grid
         # are not the same precision.
         tn_c = tn.to(device=device)
+        # Every query the general path builds runs through ``_causal`` first, so
+        # the plan has to as well -- and through the SAME expression, because the
+        # equality asserted by tests/test_history_fastpath.py is torch.equal and
+        # not allclose. With ``delta_grid < dtn`` the clamp is what stops the
+        # anchor from reading the very row being predicted; without it here, the
+        # fast path would read a row the general path never would.
         if self.history_mode == "hybrid":
             # Same walk as _history_hybrid, vectorised over all steps at once:
             # elementwise ops, so per-element results are untouched, and the
             # subtraction stays SUCCESSIVE rather than becoming a pre-summed offset.
-            t_boundary = tn_c - self._delta_grid.to(tn_c.dtype)
+            t_boundary = self._causal(tn_c, tn_c - self._delta_grid.to(tn_c.dtype), dtn)
             times = [t_boundary]
             for i in range(self._n_lags):
                 t_boundary = t_boundary - self._rate_lags[i]
@@ -573,7 +584,8 @@ rate_lags are CUMULATIVE segment lengths (not absolute boundaries), and each
                 for i in range(self._n_lags)
             ]
         else:
-            times = [tn_c - i * self._delta for i in range(1, self.k_max + 1)]
+            times = [self._causal(tn_c, tn_c - i * self._delta, dtn)
+                     for i in range(1, self.k_max + 1)]
             denoms = []
         dtype = times[0].dtype if times else tn_c.dtype
 
@@ -688,11 +700,10 @@ def rollout(
     buf[0] = Tn_ic
     plan = model.rollout_plan(tn, dtn)
     for ti in range(1, n_t):
-        past = buf[:ti]
         tq = tn[ti].expand(P)
-        hist = model._history(past, dtn, tq, p_idx)
+        hist = model.history_rollout(buf, ti, plan)
         cfg = cfg_seq[ti].expand(P, -1)
         forcing = forcing_seq[ti].expand(P, -1)
         buf[ti] = model.field(xn, static, cfg, forcing, hist,
-                              model.level(past, dtn, tq))
+                              model.level(buf[:ti], dtn, tq))
     return buf

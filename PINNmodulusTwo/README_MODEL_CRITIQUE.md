@@ -131,10 +131,15 @@ sinnvoll ist.
 # neu
 python3 PINNmodulusTwo/smallBench.py
 
-# alter Stand als Baseline -- exakt die Konfiguration vor dem Umbau
+# alter Stand als Baseline -- die Konfiguration vor dem Umbau
 python3 PINNmodulusTwo/smallBench.py \
-    --inner-steps 1 --no-residual-output --learn-gains
+    --inner-steps 1 --no-residual-output --learn-gains --loss-balance legacy
 ```
+
+`--loss-balance legacy` gehoert dazu: im Default `ema` wird auch `L_data` durch
+seine eigene laufende Groesse geteilt, vorher blieb es roh. Ohne das Flag misst
+der Baseline-Lauf eine Mischung aus altem und neuem Stand, und der Vergleich
+beantwortet nicht mehr die Frage, fuer die er da ist.
 
 Beide schreiben nach `artifacts/smallBench_results.txt`. Verglichen wird
 `Test MAE`.
@@ -147,17 +152,23 @@ Beide schreiben nach `artifacts/smallBench_results.txt`. Verglichen wird
 | `✗ SOME CHECKS FAILED`, Loss NaN | CFL oder History-Rückkopplung | [Kapitel 10](README_GPU_SERVER.md#10-troubleshooting), nicht weitermachen |
 | Test-MAE > 20 °C in **beiden** | Das Modell lernt grundsätzlich nicht | Daten prüfen, nicht Hyperparameter |
 
-**Zwei Zahlen im Baseline-Lauf, die die Diagnose 1.3 bestätigen oder widerlegen:**
+**Zwei Zahlen im Baseline-Lauf** — `src_gain(final)` und `diff_gain(final)` in
+`artifacts/metrics.txt`:
 
-`src_gain(final)` und `diff_gain(final)` in `artifacts/metrics.txt`.
-
-- Weit weg von 1.0 (etwa > 5 oder < 0.2) → die termweise Normierung hat die
-  Gleichung tatsächlich verbogen und die Gains mussten das ausgleichen. Diagnose
-  1.3 bestätigt.
-- Nahe bei 1.0 → sie hatten nichts zu korrigieren, und 1.3 war kosmetisch. Der
-  Fix ist trotzdem richtig, aber er erklärt den Fehler nicht.
+- Nahe bei 1.0 → die freigegebenen Gains hatten nichts zu korrigieren.
+- Weit weg von 1.0 (etwa > 5 oder < 0.2) → sie korrigieren etwas an der einen
+  Skalierung, das der feste Wert 1.0 nicht trifft.
 - Nahe bei **0** → der degenerierte Fall: `L_phys` wurde durch Abschalten der
-  Physik minimiert.
+  Physik minimiert. Das ist der Grund, warum die Gains ueberhaupt festgesetzt
+  wurden.
+
+> **Was dieser Lauf NICHT mehr beantwortet:** Diagnose 1.3 laesst sich damit
+> nicht bestaetigen oder widerlegen. Die termweise Normierung ist aus
+> `heat_residual` in *jedem* Modus verschwunden — auch der Baseline-Lauf rechnet
+> also schon mit der Ein-Skalen-Assemblierung, und `--residual-norm legacy`
+> stellt nur den alten Gesamtdivisor `sqrt(phys_scale)` her, nicht die drei
+> verschiedenen Term-Divisoren. 1.3 haengt an der Handrechnung unter
+> **Verifiziert** in Abschnitt 1.3, nicht an diesem Lauf.
 
 **Und der Drift-Test** — die einzige Prüfung von 1.2, die überhaupt möglich ist,
 weil ein 60-Schritt-Rollout auf synthetischen Daten Drift nicht erzeugen kann:
@@ -306,3 +317,12 @@ mehr sweepen.
 Die Prüfungen liefen gegen einen Modulus-Stub (Torch war verfügbar, Modulus und
 `data_cache/` nicht). Sie prüfen die Mathematik der geänderten Pfade, nicht das
 Ergebnis.
+
+**Nachtrag nach dem Zusammenführen der Parallel-PRs.** Die Zeile *"History liest
+nie den Vorhersagezeitpunkt"* galt nach dem Merge nur noch für den allgemeinen
+Pfad: der schnelle Rollout-Pfad (`rollout_plan`) kannte den kausalen Clamp nicht
+und las bei `delta_grid < dtn` eine Zeile, die der allgemeine Pfad nie liest.
+Beide laufen jetzt durch denselben Ausdruck. `tests/test_history_fastpath.py`
+prüft die Gleichheit mit `torch.equal` statt `allclose` und deckt beide Pfade in
+allen History-Layouts ab (84 passed, 1 skipped); die Datei brach nach dem Merge
+schon beim Import ab, weil sie eine entfernte Funktion importierte.

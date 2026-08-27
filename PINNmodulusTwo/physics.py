@@ -182,4 +182,13 @@ def heat_residual(
     # dividing its terms by different numbers. phys_scale is the RMS magnitude a
     # term of this equation has on the training data, so this lands L_phys at
     # O(1) without touching what the equation says.
+    #
+    # ``residual_norm`` can only still act on that ONE divisor. The per-term
+    # variant it used to select is gone on purpose (see the note above: it
+    # changed the equation rather than scaling it), so ``legacy`` no longer
+    # restores the old size gap between dTdt / aniso / Qsrc -- it restores only
+    # the old OVERALL divisor, ``sqrt(phys_scale)``, which leaves
+    # ``mean(res**2) == phys_scale`` instead of 1.
+    if residual_norm == "legacy":
+        return residual / (phys_scale ** 0.5 + 1e-30)
     return residual / (phys_scale + 1e-30)

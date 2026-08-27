@@ -188,12 +188,17 @@ happened to come before it* — an OP-order-dependent weighting nobody chose. Ea
 OP now carries its own EMA, so `w_phys` means the same thing everywhere.
 
 For the same reason the OP order is reshuffled every epoch from a seeded RNG
-(`shuffle_ops: true`): one step per OP per epoch otherwise lets the last OP in
-the list always take the last word of every epoch.
+(`shuffle_ops: true`): a fixed order otherwise lets the last OP in the list
+always take the last word of every epoch.
+
+Each OP contributes `inner_steps` optimiser updates per epoch, all against that
+epoch's frozen rollout — the same scheme the base project moved to. The rollout
+is the expensive part, so the update count rises at roughly constant cost;
+`--inner-steps 1` reproduces the old one-update-per-OP behaviour.
 
 ### 6. The late-window metric is labelled honestly
 
-The data loss covers the whole rollout, so the base project's "MAE test" on a
+The data loss samples the whole rollout, so the base project's "MAE test" on a
 *training* OP is in-sample — it is a split of the metric, not of the training
 data. That is now labelled as such everywhere. `--holdout-tail` makes it real by
 truncating the training rollout at `split_t`.

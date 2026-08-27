@@ -78,17 +78,24 @@ w_bc: 0.1
 #           orders of magnitude during a run, so the mixture drifts towards
 #           physics and the best w_phys becomes a function of `epochs`.
 #   fixed   divisors frozen after `balance_warmup` epochs.
+# `ema` divides L_data too, so a w_phys measured under the old scheme (L_data
+# raw) does not carry over. README.md has the comparison rules and the flags
+# that reproduce the old scheme.
 loss_balance: ema
-ema_decay: 0.9             # per EPOCH; corrected internally for len(ops)
+ema_decay: 0.9             # per EPOCH; corrected for len(ops) x inner_steps
 balance_warmup: 1          # only used by loss_balance: fixed
 data_floor: 1.0e-8         # lower bound on the L_data divisor
 phys_norm: 0.0             # >0 overrides the L_phys divisor with a constant
 bc_norm: 0.0               # >0 overrides the L_bc divisor with a constant
 
-# Residual term scaling. The *_scale constants in data.py are RMS values, so
-# dividing by the scale is what gives mean(res^2) = 1. `legacy` keeps the
-# original division by sqrt(scale), which leaves mean(res^2) = scale and so
-# leaves dTdt / aniso / Qsrc with their original size gap.
+# Residual scaling. phys_scale (and bc_scale) are RMS values, so dividing by the
+# scale is what gives mean(res^2) = 1. `legacy` keeps the original division by
+# sqrt(scale), which leaves mean(res^2) = scale.
+# NOTE: legacy no longer restores the per-TERM size gap between dTdt / aniso /
+# Qsrc. The residual is assembled first and divided once, because dividing the
+# terms of an equation by different numbers changes the equation instead of
+# scaling it (see physics.heat_residual). legacy only restores the old overall
+# divisor.
 residual_norm: rms
 # A loss term with weight 0 still costs a forward pass and an autograd Hessian.
 zero_weight_terms: skip    # skip | compute

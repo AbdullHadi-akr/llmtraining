@@ -2,9 +2,9 @@
 
 ## TODO — the data is missing from a fresh clone
 
-Nothing in `data_cache/` or `data_raw/` is tracked in git (the `.gitignore`
-keeps only sources, READMEs and a few configs), so a fresh clone **cannot
-train**. Everything below has to be copied onto the machine by hand. Tick a box
+Nothing in `data_cache/`, `data_raw/` or `material_properties/` is tracked in git
+(the `.gitignore` keeps only sources, documentation and a few configs), so a
+fresh clone **cannot train**. Everything below has to be copied onto the machine by hand. Tick a box
 once that OP is on disk.
 
 ### 1. Fast path — the `.npz` bundles (this is what training reads)
@@ -20,13 +20,39 @@ llmtraining/
     └── ...
 ```
 
-`PINNmodulusTwo/data.py` also accepts three fallback locations (see
-[`data_cache/`](#data_cache--the-op-bundles) below), but **`data_cache/` at the
-top level is the one to use** for anything new.
+Both projects find it there: `PINNmodulusTwo/data.py` and
+`PINNmodulusTwoExtProfiles/data.py` each search their own folder first and fall
+back to this shared one (full list under [`data_cache/`](#data_cache--the-op-bundles)
+below). **`data_cache/` at the top level is the one to use** for anything new —
+one copy, both projects.
+
+### 1b. The material-property CSVs — equally missing, equally required
+
+`PINNmodulusTwo/materials.py` reads these from `PINNmodulusTwo/material_properties/`,
+and the extension reads that same copy. They are untracked too, so they also have
+to be put there by hand:
+
+```
+PINNmodulusTwo/material_properties/
+├── constants.yaml                                  <- jr1 + housing scalars
+├── Cell Center/
+│   ├── Density_Grid_CellCenter.csv
+│   ├── SpecificHeat_Grid_CellCenter.csv
+│   └── ThermalConductivity{XX,YY,ZZ}_Grid_CellCenter.csv
+└── JR1 Center/
+    └── ThermalConductivity{XX,XY,YY}_Grid_JR1Center.csv
+```
+
+- [ ] `material_properties/` present
+
+Without it nothing runs at all — `materials.py` is imported by `data.py` in both
+projects, so this fails before the first OP is even looked up.
 
 Which OPs are needed, in priority order — the defaults in
 [`PINNmodulusTwo/config.yaml`](PINNmodulusTwo/config.yaml) are
 `ops: [OP01…OP05]`, validation on OP06, report on OP07:
+
+**`PINNmodulusTwo/` — the constant-driver model** (`ops` in its `config.yaml`):
 
 - [ ] `OP01.npz` — train (25 °C, ṁ 0.0013)
 - [ ] `OP02.npz` — train (15 °C, ṁ 0.0013)
@@ -35,11 +61,19 @@ Which OPs are needed, in priority order — the defaults in
 - [ ] `OP05.npz` — train (40 °C, ṁ 0.0026)
 - [ ] `OP06.npz` — **validation**, benchmark selection ranks on this one (25 °C, ṁ 0)
 - [ ] `OP07.npz` — **report only**, never part of any selection (10 °C, ṁ 0)
-- [ ] `OP08.npz` … `OP16.npz`, `OP19.npz` — optional, only for wider sweeps.
-      `OP16` is what `python3 PINNmodulusTwo/data.py` uses as its held-out demo.
 
 Without OP01–OP05 nothing trains; without OP06 the benchmarks cannot select a
 model; without OP07 there is no report number.
+
+**`PINNmodulusTwoExtProfiles/` — the profile extension** needs **all sixteen**,
+not a subset: OP01–OP05, OP07, OP08, OP10, OP11, OP12, OP14 to train, OP06 and
+OP09 to select on, OP13, OP15 and OP16 to report. Its `README.md` states that
+**no result has been measured yet**, and this cache is the only reason why.
+
+- [ ] `OP08.npz` … `OP16.npz` — required by the extension, on top of the seven above
+- [ ] `OP19.npz` — optional; used by neither config, module-test data (see `op_matrix.yaml`)
+
+`OP16` is also what `python3 PINNmodulusTwo/data.py` uses as its held-out demo.
 
 ### 2. Full path — the raw CSVs (only if the cache has to be rebuilt)
 
@@ -66,8 +100,9 @@ legacy/battery_surrogate_agenticWorkflow/
                 *_ModuleTestData*.csv            (OP19)
 ```
 
-- [ ] `data_raw/OP01/OP01/` … `data_raw/OP07/OP07/` — the seven OPs the defaults use
-- [ ] `data_raw/OP08/OP08/` … `data_raw/OP19/OP19/` — optional, for the wider sweeps
+- [ ] `data_raw/OP01/OP01/` … `data_raw/OP07/OP07/` — the seven `PINNmodulusTwo` uses
+- [ ] `data_raw/OP08/OP08/` … `data_raw/OP16/OP16/` — the rest of what the extension needs
+- [ ] `data_raw/OP19/OP19/` — optional, module-test data, in neither config
 
 Already in git, so nothing to copy: the three coordinate CSVs under
 `legacy/battery_surrogate_agenticWorkflow/coordinates/`, `op_matrix.yaml`,
@@ -76,21 +111,27 @@ Already in git, so nothing to copy: the three coordinate CSVs under
 Then, from the repo root:
 
 ```bash
+# what PINNmodulusTwo needs
 python3 PINNmodulusTwo/generate_cache.py OP01 OP02 OP03 OP04 OP05 OP06 OP07
+# the rest, for PINNmodulusTwoExtProfiles
+python3 PINNmodulusTwo/generate_cache.py OP08 OP09 OP10 OP11 OP12 OP13 OP14 OP15 OP16
 ```
 
-which writes straight into the top-level `data_cache/`.
+which writes straight into the top-level `data_cache/`, where both projects
+find it.
 
 ### 3. Check it worked
 
 ```bash
 ls data_cache/
 python3 -c "import sys; sys.path.insert(0, 'PINNmodulusTwo'); import data; print(data.available_ops())"
+python3 -c "import sys; sys.path.insert(0, 'PINNmodulusTwoExtProfiles'); import data; print(data.available_ops())"
 ```
 
-The second command needs the training environment (numpy) and should list every
-OP you copied. A missing OP fails immediately with the list of
-what is available, rather than after the first training run.
+The last two need the training environment (numpy, torch) and should list every
+OP you copied — the second from the base project's view, the third from the
+extension's. A missing OP fails immediately with the list of what is available,
+rather than after the first training run.
 
 ---
 Predicting the internal temperature field of a battery cell from operating-point
@@ -108,11 +149,10 @@ data_cache/                  <- OP*.npz bundles (not in git, see below)
 legacy/                      <- earlier approaches, kept for reference only
 ```
 
-Es gibt nur eine Abhängigkeitsliste: `PINNmodulusTwo/requirements-gpu.txt`. Die
-frühere `requirements.txt` im Root ist gelöscht — ein UTF-16-kodierter
-Windows-`pip freeze`, der die CPU-Wheels installierte und den die
-GPU-Anleitung ohnehin als Falle führte. Aus der Git-Historie holbar, falls
-jemand sie noch braucht.
+There is exactly one dependency list: `PINNmodulusTwo/requirements-gpu.txt`. The
+former root-level `requirements.txt` is deleted — a UTF-16 encoded Windows
+`pip freeze` that installed the CPU wheels, and which the GPU guide already
+listed as a trap. Recoverable from the git history if anyone still needs it.
 
 ### `PINNmodulusTwo/` — the active approach
 
@@ -121,10 +161,10 @@ wrapped in a PyTorch recurrence that feeds the model's own past predictions back
 in as temperature history. The loss combines a data term, the anisotropic heat
 residual, and the symmetry boundary condition `dT/dx = 0` at the cell centre.
 
-Start with [`PINNmodulusTwo/README.md`](PINNmodulusTwo/README.md). Wie das Ganze
-intern abläuft — Kontrollfluss, Modell, Erweiterungspunkte — steht in
-[`PINNmodulusTwo/ARCHITECTURE.md`](PINNmodulusTwo/ARCHITECTURE.md); für das
-GPU-Server-Setup und die volle Benchmark-Session siehe
+Start with [`PINNmodulusTwo/README.md`](PINNmodulusTwo/README.md). How it works
+internally — control flow, the model, where to extend it — is in
+[`PINNmodulusTwo/ARCHITECTURE.md`](PINNmodulusTwo/ARCHITECTURE.md) (in German);
+for the GPU server setup and the full benchmark session see
 [`PINNmodulusTwo/README_GPU_SERVER.md`](PINNmodulusTwo/README_GPU_SERVER.md).
 Where the model currently stands — what was broken, what is fixed, and what to
 look for in each test before spending GPU days — is in
@@ -160,7 +200,7 @@ below, which is not in git.
 ### `data_cache/` — the OP bundles
 
 One `OP*.npz` per operating point. **Not tracked in git** (the `.gitignore` keeps
-only source and README files), so it never arrives with a fresh clone — it has to
+only sources and documentation), so it never arrives with a fresh clone — it has to
 be present on each machine.
 
 `PINNmodulusTwo/data.py` searches these locations and takes the first that
