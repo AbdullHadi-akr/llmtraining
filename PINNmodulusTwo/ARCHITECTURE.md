@@ -522,6 +522,139 @@ Symmetrieebene `x = 0`. Der Maßstab ist der **gemessene** RMS-Ortsgradient übe
 x-benachbarte Gitterpunkte (`data._measure_bc_scale`), nicht mehr das frühere
 `1/L_ref`, in dem gar keine Temperatur vorkam.
 
+> ⚠️ **Zwei Stellen oben sind veraltet** (Stand 2026-08-28, Code ist maßgeblich):
+>
+> 1. **Das Kastendiagramm zeigt die Divergenzform** `∇·(Fo ∇T)`. Der Code
+>    rechnet `Fo : ∇²T`, die **nicht-konservative** Form. Siehe 4.1.
+> 2. **Die Zeile „jeder Term ÷ eigener Trainings-RMS" gilt nicht mehr.** Die
+>    termweise Normierung ist aus `heat_residual` verschwunden; das Residuum
+>    wird zusammengesetzt und **am Ende durch EINE Skala** (`phys_scale`)
+>    geteilt. Begründung im Docstring von `physics.heat_residual`: Terme durch
+>    verschiedene Zahlen zu teilen skaliert die Gleichung nicht, es ändert sie.
+
+---
+
+### 4.1 Materialkonstanten, Divergenzform und Materialgrenzen — offener Befund
+
+> **Status: dokumentiert, nicht behoben.** Bewusst so: erst Schritt A aus
+> [`README_MODEL_CRITIQUE.md`](README_MODEL_CRITIQUE.md) laufen lassen, bevor am
+> Physik-Term geschraubt wird. Eine Änderung hier wäre sonst eine zweite
+> unabhängige Variable in einem A/B, das ohnehin noch aussteht.
+
+#### Was gerechnet wird
+
+`λ` ist **fest**. `Fo` wird einmal in `data.py:240` gebaut
+(`Fo = lam · T_span_ref / (ρ·Cp·L_ref²)`), in `train.py:198` als
+`torch.as_tensor(...)` **ohne** `requires_grad` übergeben und in `physics.py`
+nur per `Fo[p_idx]` nachgeschlagen. Kein Gradientenpfad zu `xb`, nie trainiert.
+
+**Das ist richtig so und soll bleiben** — die Begründung steht unter
+„Warum λ glätten die falsche Reparatur wäre".
+
+#### Was fehlt
+
+```
+∇·(λ ∇T)  =  λ : ∇²T  +  (∇λ) · ∇T
+                 │             │
+                 │             └─  FEHLT im Code
+                 └────────────────  `aniso` in physics.heat_residual
+```
+
+Der Code berechnet ausschließlich `aniso = Fo : ∇²T`. Der Term `(∇λ)·∇T` ist
+stillschweigend weg — nicht approximiert, nicht kommentiert.
+
+#### Wo das harmlos ist und wo nicht
+
+`materials.py` kennt drei Regionen: `cc` (0), `jr1c` (1), `g`/Gehäuse (2).
+`∇λ ≠ 0` an zwei sehr verschiedenen Stellen:
+
+| Ort | `∇λ` | Bewertung |
+|---|---|---|
+| **innerhalb** `cc` / `jr1c` | glatt, klein (λ kommt per Punkt aus CSV) | echter, beschränkter Korrekturterm. Ob er zählt, ist eine **Messfrage** |
+| **an Regionsgrenzen** | Sprung → Dirac-Distribution | nicht klein, **unbeschränkt** |
+
+#### Der eigentliche Defekt
+
+`train.py:571` zieht die Kollokationspunkte gleichverteilt:
+
+```python
+pp = torch.randint(0, n_pts, (args.batch_phys,), device=device)
+```
+
+**Ohne jede Ausnahme** — das Residuum wird also auch an Grenzflächenpunkten
+erzwungen, wo die starke Form der PDE gar nicht gilt: `T` ist dort `C⁰`, aber
+nicht `C¹`, die Normalableitung springt, `∇²T` existiert nicht.
+
+Dazu kommt ein zweiter, subtilerer Punkt. `jr1 = (region == 1)` ist ein
+**binärer** Static-Kanal, `α_z` springt an der Grenze mit — das Netz *kann* also
+einen Ortsknick darstellen, weil sein Eingang springt. Aber `_grad(T, xb)`
+leitet nur nach `xb` bei **eingefrorenen** Static-Features ab
+(`static[p_idx]` ist ebenfalls ein konstanter Lookup). Das berechnete `∇²T`
+sieht damit nur den glatten Anteil und verfehlt genau den Knickbeitrag:
+
+> **Der Physik-Term rechnet an Grenzflächenpunkten mit einem anderen Feld, als
+> der Datenterm anpasst.**
+
+Formal: das Netz ist `T(x, α(x), jr1(x), …)`, die totale Ortsableitung wäre
+`dT/dx = ∂T/∂x + ∂T/∂α · dα/dx + …`. Berechnet wird nur `∂T/∂x`. Innerhalb
+einer homogenen Region ist das konsistent und korrekt — der Code macht
+durchgehend die Näherung „λ lokal konstant". Nur wird ihr **Gültigkeitsbereich
+nirgends durchgesetzt**.
+
+#### Warum λ glätten die falsche Reparatur wäre
+
+An einem Materialsprung ist die richtige Physik **keine Termergänzung**, sondern
+eine Kopplungsbedingung:
+
+```
+T₁ = T₂        und        λ₁ ∂T/∂n|₁ = λ₂ ∂T/∂n|₂
+```
+
+Ein geglättetes `λ(x)` zu differenzieren liefert einen verschmierten Übergang,
+dessen Breite ein frei erfundener Parameter ist — und trotzdem nicht die
+richtige Sprungbedingung. `λ` fix zu lassen ist also nicht die bequeme, sondern
+die korrekte Wahl; das Ableiten wäre genau dort falsch, wo es zählen würde.
+
+#### Hypothese (ungeprüft)
+
+Ein Physik-Term, der `C²`-Felder belohnt, während die Lösung an Grenzflächen nur
+`C⁰` ist, ist ein systematischer Zug zur **Überglättung**. Das ist ein Kandidat
+für den `L_phys`-Kollaps aus dem Trainingsbericht vom 28.08.
+(`L_phys_bal = 2.69e-06`) und dafür, dass das Modell kaum etwas kann. **Nicht
+gemessen, nicht belegt** — hier nur notiert, damit die Spur nicht verlorengeht.
+
+#### Nebenbefund: Anisotropie ist kein Netzeingang
+
+`_static_features` (`data.py:258`) gibt `λ` nur als **isotropen Mittelwert**
+(Spur/3) über die Temperaturleitfähigkeit `α` weiter. Das Residuum nutzt
+dagegen den vollen Tensor inklusive der Off-Diagonalen `λxy` (JR1). Das Netz
+soll anisotropes Verhalten also aus dem JR1-Indikator allein erraten. Eigener
+Effekt, eigene Änderung — nicht mit der Grenzflächensache vermischen, sonst ist
+hinterher nicht trennbar, was gewirkt hat.
+
+#### Was zu messen ist, bevor irgendetwas geändert wird
+
+1. **Wie viele der 363 Punkte sind grenzflächennah?** `region` liegt bereits auf
+   Bundle und OP (`data.py:382`, `488`); ein Punkt ist Grenzpunkt, wenn unter
+   seinen `k` nächsten Nachbarn eine andere `region` vorkommt. Bei drei
+   Regionen à 121 Punkten kann das ein erheblicher Anteil sein — die Zahl
+   entscheidet, ob der Defekt Rand- oder Hauptsache ist.
+2. **Verhältnis `RMS(|∇λ|·|∇T|) / RMS(λ:∇²T)` innerhalb der Regionen.** Unter
+   ~1 % ist der fehlende Term im Inneren irrelevant und kann mit gutem Gewissen
+   wegbleiben.
+
+#### Optionen, wenn gemessen ist
+
+| | Ansatz | Bewertung |
+|---|---|---|
+| **A** | Grenzflächenpunkte aus dem `batch_phys`-Sampling ausschließen (Maske über `region`, plus `region` in die gepackten Felder `train.py:215`) | klein und in sich korrekt: die PDE gilt im Inneren exakt, die Grenzflächen trägt der Datenterm. Entfernt den falschen Druck, **fügt aber keine Grenzflächenphysik hinzu** |
+| **B** | Zusätzlich Flusskopplung `λ₁∂T/∂n|₁ = λ₂∂T/∂n|₂` als eigener Loss-Term an Grenzflächenpaaren | physikalisch die richtige Lösung. Deutlich größer: braucht Grenzflächennormalen und ein **neues Gewicht**, das selbst kalibriert werden muss — bei aktuell reißender Loss-Balance keine Kleinigkeit |
+| **C** | `(∇λ)·∇T` über geglättetes `λ(x)` nachrüsten | **nicht als Erstes.** Sinnvoll höchstens für die glatte Variation *innerhalb* einer Region, und nur falls Messung 2 zeigt, dass sie zählt |
+
+Der bestehende `boundary_condition_loss` ist eine **äußere** Neumann-Bedingung
+bei `x = 0` und hat mit den inneren Materialgrenzen nichts zu tun — die sind
+derzeit nirgends behandelt.
+
 ---
 
 ## 5. Die Normierung — Profile gegen Labels

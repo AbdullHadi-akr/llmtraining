@@ -346,6 +346,7 @@ mehr sweepen.
 | Verdikt-Fälle (innen / Rand / hilft nicht) | drei synthetische Fälle | — |
 | **Residual-Ausgang reduziert Drift** | **nicht geprüft** — 60-Schritt-Rollouts erzeugen keine Drift | **offen, Schritt A** |
 | **MAE fällt** | **nicht geprüft** | **offen, Schritt A** |
+| **Gilt die PDE dort, wo sie erzwungen wird?** | **nie gestellt.** Die Zeile „Residuum = `(dTdt − aniso − Qsrc)/phys_scale`" prüft, ob die *Assemblierung* der beabsichtigten Formel entspricht — nicht, ob die Formel an den Kollokationspunkten gilt. An Materialgrenzen gilt sie nicht | **offen**, siehe [`ARCHITECTURE.md` 4.1](ARCHITECTURE.md#41-materialkonstanten-divergenzform-und-materialgrenzen--offener-befund) |
 
 Die Prüfungen liefen gegen einen Modulus-Stub (Torch war verfügbar, Modulus und
 `data_cache/` nicht). Sie prüfen die Mathematik der geänderten Pfade, nicht das
