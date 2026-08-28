@@ -15,6 +15,10 @@
 # Keep the session handover notes tracked
 !UEBERGABE_*.txt
 
+# Keep training reports tracked
+!TRAININGS_BERICHT_*.md
+!**/TRAININGS_BERICHT_*.md
+
 # Keep the CI workflow tracked (the allowlist above is .py/.md only)
 !.github/workflows/*.yml
 
