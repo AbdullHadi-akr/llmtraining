@@ -6,6 +6,13 @@
 > Modell, Architektur, Training, Daten, Loss und Ergebnisse vollständig, dazu die
 > Ursache und den gemessenen Vergleich der `rate_lags` und von `hybrid` gegen
 > `raw`.
+>
+> **Nächster Schritt: der erste Lauf auf echten Daten.** Bis heute ist nichts
+> davon auf OP01–OP07 verifiziert — `data_cache/` und `material_properties/`
+> sind gitignored und liegen nur lokal, alle bisherigen MAE-Zahlen sind
+> synthetisch. [`README_LOKALER_LAUF.md`](README_LOKALER_LAUF.md) ist die
+> Anleitung dafür: wohin die Daten gehören, der Sekunden-Test vorweg
+> (`tools/data_probe.py`), der eigentliche Lauf und worauf dabei zu achten ist.
 
 Implementation of **method #2** from the Notion page *"Battery Model with NVIDIA
 MODULUS"*: use Modulus as much as practical, but bring our **own recurrence** in

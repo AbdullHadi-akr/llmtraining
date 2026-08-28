@@ -42,3 +42,13 @@ outputs/
 storeOps/
 
 
+
+# ---------------------------------------------------------------------------
+# The simulation data. These rules come LAST on purpose: a directory that is
+# itself ignored is never descended into, so the `!*.py` / `!README*` allowlist
+# above cannot accidentally pull a file back out of these folders. They stay on
+# your machine and on the GPU server (rsync), never in the repo.
+# See PINNmodulusTwo/README_LOKALER_LAUF.md for what belongs in them.
+# ---------------------------------------------------------------------------
+data_cache/
+material_properties/
