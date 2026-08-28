@@ -1,5 +1,26 @@
 # Trainingsbericht PINNmodulusTwo — 2026-08-28
 
+> ## ⚠️ Korrekturhinweis — siehe [TRAININGS_BERICHT_2026-08-28_REVIEW.md](TRAININGS_BERICHT_2026-08-28_REVIEW.md)
+>
+> Die Messungen unten sind unverändert, mehrere **Bewertungen** darin sind
+> jedoch nachweislich falsch. Die wichtigsten, bevor jemand daraus etwas
+> ableitet:
+>
+> * Das `FAIL` kam **nicht** von der MAE (§4). `smallBench.py` prüft
+>   `test_mae < 20.0` — beide Läufe haben das bestanden. Gescheitert ist die
+>   Loss-Balance-Prüfung.
+> * Der Baseline-Vergleich (§9) ist ungültig: 11.96 °C ist der
+>   Persistenz-Vorhersager, nicht „predict mean" (der liegt bei 6.60 °C),
+>   12.02 °C ist gegenüber 11.96 °C **schlechter** und nicht besser, und beide
+>   Baselines stammen aus einem **synthetischen** Bundle, das laut
+>   `README_ERSTER_TEST.md` Kapitel 6/9 nicht auf echte OPs übertragbar ist.
+> * `w_phys` zu erhöhen kann `L_phys_bal` nicht verändern (§6, §7):
+>   `L_phys_bal = L_phys / EMA(L_phys)` enthält `w_phys` nicht.
+> * Die „6358 Gitterpunkte" (§6, §7) existieren nicht — 363 ist die native
+>   Sensorzahl. Empfehlung „Full Grid" entfällt.
+> * Der empfohlene nächste Schritt ist `benchmark_balance.py --part 1`, nicht
+>   die Sweeps in §7.
+
 ## Zusammenfassung
 
 Erfolgreich neue NPZ-Daten aus CSV generiert und erstes vollständiges Training auf echten Daten durchgeführt. Das Modell konvergiert stabil, aber die Testgenauigkeit liegt noch über dem Zielwert.
