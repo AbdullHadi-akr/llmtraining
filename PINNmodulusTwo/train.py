@@ -397,13 +397,50 @@ def fit(args):
 
     # Create boundary condition mask (x ≈ 0 for cell center)
     bc_mask = torch.tensor(np.abs(bundle.xn[:, 0]) < 1e-6, dtype=torch.bool, device=device)
-    print(f"BC points (x=0): {bc_mask.sum().item()}/{len(bc_mask)}", flush=True)
+    n_bc = int(bc_mask.sum().item())
+    print(f"BC points (x=0): {n_bc}/{len(bc_mask)}", flush=True)
+    # The BC term is silent about its own failure modes, and both of them look
+    # like an ordinary run in the loss curve.
+    #
+    # ``boundary_condition_loss`` returns a bare 0.0 when the mask is empty, so
+    # L_bc is then identically zero, its EMA divisor collapses, and L_bc_bal is
+    # 0 for the whole run -- which fails the "balanced ~ O(1)" check every time
+    # without anything in the log saying the BC was never evaluated.
+    if n_bc == 0 and args.w_bc != 0.0:
+        print("  [WARN] the BC mask is EMPTY: no grid point satisfies "
+              "|xn[:, 0]| < 1e-6, so L_bc is identically 0 and w_bc buys "
+              "nothing. xn = (xyz - xyz_min) / L_ref puts the minimum x plane "
+              "at exactly 0, so an empty mask means the coordinates did not "
+              "come through that transform.", flush=True)
+    # And it samples min(n_bc, batch_bc) points, so a thin boundary plane
+    # silently shrinks the BC batch rather than sampling it repeatedly.
+    batch_bc = int(getattr(args, "batch_bc", 128))
+    if 0 < n_bc < batch_bc and args.w_bc != 0.0:
+        print(f"  [WARN] only {n_bc} boundary points against --batch-bc "
+              f"{batch_bc}: the BC term is estimated from {n_bc} samples per "
+              f"step, not {batch_bc}. Its gradient is correspondingly noisier "
+              f"than the weight suggests.", flush=True)
 
     # Keys mirror bench_common.EMPTY_HIST: a benchmark that aggregates a failed
     # run against a successful one needs both to carry the same series.
     history = {"epoch": [], "L_data": [], "L_phys": [], "L_bc": [], "delta": [],
                "L_phys_bal": [], "L_bc_bal": [],   # balanced losses, fair comparison
-               "ratio_phys": [], "ratio_bc": []}   # read by benchmark_balance.py
+               "ratio_phys": [], "ratio_bc": [],   # read by benchmark_balance.py
+               # The divisors those balanced losses were produced with. Without
+               # them a small L_phys_bal is unreadable: it means either the term
+               # genuinely fell or the EMA divisor is stale from an earlier
+               # regime, and those call for opposite responses. The EMA horizon
+               # is ~1/(1-ema_decay) EPOCHS, so a term that drops by orders of
+               # magnitude inside that horizon reports a ratio far below 1 while
+               # nothing is wrong with the balancing at all.
+               "div_data": [], "div_phys": [], "div_bc": [],
+               # Spread of the model's own rollout against the spread of the
+               # labels, in normalised units. The heat residual and the Neumann
+               # BC are both satisfied EXACTLY by a field that is constant in
+               # space and time, so "physics loss went to zero" is only good
+               # news while the field still varies. These two ratios are what
+               # separates a converged physics term from a collapsed one.
+               "spread_space": [], "spread_time": []}
     history["aborted"] = False
     best_train_loss = float("inf")
     epochs_without_improvement = 0
@@ -485,6 +522,7 @@ def fit(args):
         model.train()
         ep_data, ep_phys, ep_bc = 0.0, 0.0, 0.0
         ep_ratio_phys, ep_ratio_bc = 0.0, 0.0
+        ep_spread_space, ep_spread_time = 0.0, 0.0
         # Split the epoch's wall time into its two halves. Every runtime estimate
         # in README_GPU_SERVER chapters 7 and 8 is derived from one measured
         # seconds-per-epoch, and --inner-steps moves only the second half, so the
@@ -534,6 +572,21 @@ def fit(args):
                 n_sat = int((own_hist.abs() >= rollout_clamp).any(dim=1).sum())
                 if n_sat:
                     ep_saturated.append((op["op_id"], n_sat, own_hist.shape[0]))
+
+            # How much structure is left in the model's own trajectory, against
+            # how much the labels carry. Both residual terms vanish identically
+            # on a field that is constant in space (Laplacian 0, dT/dx 0) and in
+            # time (dT/dt 0), so a physics loss falling towards zero is only
+            # evidence of physics while these ratios stay near 1. Near 0 means
+            # the optimiser found the trivial solution instead, which no loss
+            # curve in this run would show.
+            with torch.no_grad():
+                s_pred = float(own_hist.std(dim=1).mean())
+                s_lab = float(Tn_seq.std(dim=1).mean())
+                t_pred = float(own_hist.std(dim=0).mean())
+                t_lab = float(Tn_seq.std(dim=0).mean())
+                ep_spread_space += s_pred / (s_lab + 1e-12)
+                ep_spread_time += t_pred / (t_lab + 1e-12)
             _t0 = time.time()
 
             op_data = op_phys = op_bc = 0.0
@@ -684,6 +737,30 @@ def fit(args):
         ep_data /= len(ops)
         ep_phys /= len(ops)
         ep_bc /= len(ops)
+        ep_spread_space /= len(ops)
+        ep_spread_time /= len(ops)
+
+        # The trivial solution: a field flat in space and time satisfies the
+        # heat residual and the Neumann BC exactly, so both physics losses can
+        # be driven to zero by giving up on the data. That failure is invisible
+        # in every curve this run plots -- L_phys falling looks like success --
+        # which is why it gets its own line the moment the rollout carries less
+        # than a fifth of the structure the labels do.
+        # Not on an aborted epoch: the sum then covers only the OPs that ran but
+        # is still divided by all of them, so the ratio is low for a reason that
+        # has nothing to do with a flat field.
+        if (want_phys or want_bc) and not aborted_epoch:
+            flat = [name for name, val in (("space", ep_spread_space),
+                                           ("time", ep_spread_time)) if val < 0.2]
+            if flat:
+                print(f"  [FLAT] epoch {epoch}: the rollout carries "
+                      f"{ep_spread_space:.2g}x the labels' spatial spread and "
+                      f"{ep_spread_time:.2g}x their temporal spread. A field "
+                      f"that is constant in {' and '.join(flat)} satisfies the "
+                      f"residual and the BC for free, so a falling L_phys/L_bc "
+                      f"here is the trivial solution, not physics. Lower "
+                      f"--w-phys/--w-bc, or check that the data term is "
+                      f"reaching the optimiser at all.", flush=True)
 
         # Early NaN/inf detection - abort before wasting epochs. A term that was
         # deliberately skipped is NaN on purpose and must not trigger this.
@@ -717,6 +794,15 @@ def fit(args):
             history["L_bc_bal"].append(float("nan"))
             history["ratio_phys"].append(float("nan"))
             history["ratio_bc"].append(float("nan"))
+            # Every series stays the same length as history["epoch"], or the
+            # plots and CSV writers downstream silently misalign an aborted run
+            # by one row. The divisors are real values and worth keeping; the
+            # spreads describe the epoch that just blew up, so they go in too.
+            history["div_data"].append(balance.last["data"])
+            history["div_phys"].append(balance.last["phys"] if want_phys else float("nan"))
+            history["div_bc"].append(balance.last["bc"] if want_bc else float("nan"))
+            history["spread_space"].append(ep_spread_space)
+            history["spread_time"].append(ep_spread_time)
             history["delta"].append(float(model.delta.detach()))
             history["aborted"] = True
             break
@@ -737,6 +823,11 @@ def fit(args):
         history["L_bc_bal"].append(ep_bc_bal)
         history["ratio_phys"].append(ep_ratio_phys if want_phys else float("nan"))
         history["ratio_bc"].append(ep_ratio_bc if want_bc else float("nan"))
+        history["div_data"].append(balance.last["data"])
+        history["div_phys"].append(balance.last["phys"] if want_phys else float("nan"))
+        history["div_bc"].append(balance.last["bc"] if want_bc else float("nan"))
+        history["spread_space"].append(ep_spread_space)
+        history["spread_time"].append(ep_spread_time)
         history["delta"].append(float(model.delta.detach()))
         if ep_data < best_train_loss:
             best_train_loss = ep_data
@@ -765,6 +856,7 @@ def fit(args):
                 f"  epoch {epoch:3d}  L_data={ep_data:.4e}  L_data_bal={ep_data_bal:.4e}  "
                 f"L_phys_bal={ep_phys_bal:.4e}  L_bc_bal={ep_bc_bal:.4e}  "
                 f"ratio phys/bc={ep_ratio_phys:.3g}/{ep_ratio_bc:.3g}  "
+                f"spread s/t={ep_spread_space:.3g}/{ep_spread_time:.3g}  "
                 f"delta={float(model.delta.detach()):.4g}  "
                 f"src_gain={sg:.3g}  diff_gain={dg:.3g}{lags_str}  betas={betas}  "
                 f"[{epoch_s:.1f}s/epoch = {t_roll_s:.1f}s rollout + "
