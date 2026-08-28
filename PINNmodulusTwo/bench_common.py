@@ -62,7 +62,11 @@ def make_train_args(cli, overrides: dict, seed: int) -> Namespace:
         batch_data=cli.batch_data, batch_phys=cli.batch_phys,
         batch_bc=cli.batch_bc,
         inner_steps=getattr(cli, "inner_steps", 100),
-        residual_output=getattr(cli, "residual_output", True),
+        # False, nicht True: level(t) + net(...) fuehrt das Niveau durch einen
+        # Integrator der Verstaerkung 1 ohne Leck und laesst jeden Rollout
+        # weglaufen. Mit dem alten Default hier waere JEDER Benchmark in
+        # Epoche 1 mit L_data=nan abgebrochen. ARCHITECTURE.md 3.1.
+        residual_output=getattr(cli, "residual_output", False),
         learn_gains=getattr(cli, "learn_gains", False),
         weight_decay=cli.weight_decay, grad_clip=cli.grad_clip,
         gain_lr_mult=cli.gain_lr_mult,
@@ -85,6 +89,11 @@ def make_train_args(cli, overrides: dict, seed: int) -> Namespace:
         subsample_mode=getattr(cli, "subsample_mode", "stride"),
         forcing_energy=getattr(cli, "forcing_energy", False),
         config_rates=getattr(cli, "config_rates", False),
+        # Stability knobs. Same defaults as train.py's argparse on purpose: a
+        # benchmark that never heard of them must still get the configuration
+        # that trains, not the one that aborts in epoch 1.
+        rollout_clamp=getattr(cli, "rollout_clamp", 50.0),
+        max_rate_amp=getattr(cli, "max_rate_amp", 0.0),
     )
     spec.update(overrides)
     return Namespace(**spec)

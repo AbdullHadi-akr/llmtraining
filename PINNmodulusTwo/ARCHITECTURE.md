@@ -14,6 +14,11 @@ ansetzt, um es zu erweitern.
 >   dadurch, dass es in einer Schleife auf seinen **eigenen Ausgaben** läuft.
 > - Kein Teacher Forcing, nirgends. Der Datenverlust wird auf genau der
 >   Trajektorie genommen, die auch zur Inferenzzeit entsteht.
+> - `residual_output` ist **aus**, und das ist nicht optional: mit `true` bricht
+>   jeder Lauf in Epoche 1 mit `L_data = nan` ab — siehe Abschnitt 3.1.
+> - `rate_lags` bleiben bei `[5, 20]`. Die Verstärkung `A ≈ 119` ist real, aber
+>   tragbar, sobald der Integrator weg ist — und gemessen besser als jede längere
+>   Variante.
 > - Die History-Anordnung (`δ`, `k_max`, `Δgrid`, `rate_lags`) ist **fest**.
 >   Gelernt werden nur MLP-Gewichte, das Swish-`β` je Schicht und zwei
 >   Physik-Gains.
@@ -121,6 +126,14 @@ Raten über **kumulative** Segmente:
    Kanal 3 :  [T(t−Δgrid−5) − T(t−Δgrid−25)] ÷ 20     (Rate 2)
 ```
 
+> **Die Verstärkung dieses Kanals.** Der Divisor ist `lag_n · rate_scale`, und
+> für ein glattes Signal ist das genau der RMS der Differenz über dieses Segment.
+> Der Kanal verstärkt damit alles Nicht-Glatte um `A = 1/(lag_n · rate_scale)` —
+> bei 5 s auf einer ~1474-s-Spanne ist das `A ≈ 119`. Das ist viel und wird beim
+> Start ausgegeben, aber es ist **nicht** der Grund, aus dem früher jeder Lauf
+> abbrach; das war `residual_output`. Längere Segmente senken `A` und schneiden
+> gemessen schlechter ab. Siehe Abschnitt 3.1.
+
 `Δgrid` verschiebt, **wo** das Fenster sitzt; es ist kein Teil einer Spanne. Die
 Endpunkte von Rate 1 liegen 5 s auseinander, egal wie weit der Anker zurückliegt.
 Deshalb sind `--delta-grid` und `--subsample` unabhängige Regler.
@@ -208,6 +221,262 @@ Drei Konsequenzen, die man kennen muss:
 3. **Truncated BPTT.** `buf[:ti].detach()` — jeder Schritt propagiert nur durch
    seine eigene Feldauswertung. Der Speicher bleibt beschränkt, aber es fließt
    kein Gradient entlang der Zeitachse.
+
+### 3.1 Warum der Rollout divergiert ist — und was daran schuld war
+
+Bis zu diesem Befund brach jeder Lauf in Epoche 1 mit `L_data = nan` ab. Der
+strukturelle Grund, warum das terminal ist: der Trainingsloop (Abschnitt 6)
+rechnet **einen** Rollout je OP und Epoche unter `no_grad` und macht dann
+`--inner-steps` Updates gegen diesen eingefrorenen Puffer. Der Puffer ist damit
+ein **Eingang** des ersten Gradientenschritts, kein Ergebnis davon. Steht dort
+`inf`, ist jede Vorhersage `nan`, und es gibt keinen ersten Gradientenschritt,
+aus dem heraus es besser werden könnte.
+
+Zwei Dinge haben ihn dorthin gebracht, und sie sind **nicht gleich wichtig**.
+
+#### Der Haupttreiber: `residual_output`
+
+`field()` lieferte `level(t) + net(...)`, wobei `level` das räumliche Mittel der
+Ankerscheibe ist. Die Begründung im Docstring lautete, das Mitführen des Niveaus
+halte den Rollout vom Driften ab. Es tut das Gegenteil:
+
+```
+level(t) ≈ level(t - Δgrid) + mean(net)
+```
+
+Das ist ein **Integrator mit Verstärkung exakt 1 und ohne Leck**. Jeder
+einseitige Anteil der Netzausgabe akkumuliert über die ~7000 Schritte
+unbeschränkt, und nichts zieht ihn zurück. Wie *klein* dieser Anteil ist, spielt
+keine Rolle — ein Integrator interessiert sich nur dafür, dass er ein Vorzeichen
+hat. Bei zufälliger Initialisierung hat er eines: Swish ist nicht
+mittelwertfrei, also mittelt sich `mean(net)` über eine Ziehung nicht weg.
+
+#### Die Verstärkung des Rate-Kanals — real, aber nicht die Ursache
+
+Der Rate-Kanal ist `(T_ende - T_start) / (lag_n · rate_scale)`. Für eine *echte*
+Rate ist das die richtige Normierung — `rate_scale` ist der RMS von `dTn/dtn`,
+der Kanal landet bei O(1). Was niemand geprüft hat, ist die
+**Rauschverstärkung** derselben Formel:
+
+```
+A = 1 / (lag_n · rate_scale)
+```
+
+Bei `[5, 20]` s ist `A ≈ 119`, weil 5 s nur 0.34 % der ~1474 s Referenzspanne
+sind. Jede Nicht-Glattheit — insbesondere das Schritt-zu-Schritt-Zittern eines
+untrainierten Netzes — kommt 119-fach verstärkt zurück in den Eingang. `A` wird
+bei jedem Start ausgegeben und ab ~100 gewarnt.
+
+> **Trotzdem bleiben die Lags bei `[5, 20]`.** `A ≈ 119` ist viel, aber es ist
+> nicht das, was die Läufe abbrechen liess — das war `residual_output`. Ist der
+> Integrator weg und `rollout_clamp` an, ist `A ≈ 119` tragbar, und das kurze
+> Segment trägt das bessere Signal. Die Messung dazu steht in
+> [„Die Segmentlänge — gemessen"](#die-segmentlänge--gemessen) weiter unten.
+> Diese Unterscheidung ist erst spät klar geworden: solange nur mit
+> `residual_output: true` gemessen wurde, divergierte **jede** Lag-Wahl, und das
+> sah nach zwei gleichrangigen Ursachen aus.
+
+#### Die Messung
+
+Synthetisches Bundle, 20 Epochen, 3 Seeds, **ohne jedes Hilfsmittel** (kein
+Clamp, nichts). Angegeben ist das free-running `L_data` der letzten Epochen:
+
+| `residual_output` | History | Seed 0 | Seed 1 | Seed 2 |
+|---|---|---|---|---|
+| **true** | hybrid `[5, 20]` | ABORT | ABORT | ABORT |
+| **true** | hybrid `[200, 600]` | ABORT | ABORT | ABORT |
+| **true** | raw | ABORT | ABORT | ABORT |
+| false | hybrid `[5, 20]` | 0.0148 | ABORT | 0.0061 |
+| false | raw | 0.0074 | 0.0073 | 0.0069 |
+| false | **hybrid `[200, 600]`** | **3.3e-4** | **9.8e-5** | **7.2e-5** |
+
+`residual_output: true` bricht **9/9 ab, in jeder History-Konfiguration** — auch
+bei `raw`, wo es überhaupt keine Rate-Kanäle gibt. Das ist der Beweis, dass der
+Integrator und nicht die Verstärkung der Haupttreiber ist. Bestätigt bei
+`n_t = 4000` (3.3× längere Trajektorie): alt 3/3 ABORT, neu 3/3 bei ~1e-4.
+
+Daraus der eine entscheidende Default in `config.yaml`:
+**`residual_output: false`**.
+
+> **Achtung, Falle in dieser Tabelle.** Sie legt nahe, `[200, 600]` sei die
+> bessere Lag-Wahl — zwei Größenordnungen besser im `L_data`. Das ist ein
+> Artefakt: `L_data` ist der Trainingsverlust auf dem Trainingsabschnitt, und
+> gemessen an der Lieferzahl MAE dreht sich die Reihenfolge um. Ausserdem lief
+> diese Tabelle auf einer verkürzten Trajektorie, deren `dTdt_scale` um Faktor
+> 6.6 danebenlag. Beides ist im Abschnitt
+> [„Die Segmentlänge — gemessen"](#die-segmentlänge--gemessen) korrigiert.
+
+#### Mit aktivem Physik-Term
+
+Die Tabelle oben lief mit `w_phys = 0`. Die Produktivkonfiguration hat
+`w_phys: 0.1`, und das verschiebt die Grenze spürbar — der Physik-Gradient
+treibt die Gewichte schneller aus dem stabilen Bereich. Gleiches Bundle,
+20 Epochen, 3 Seeds, `w_phys = 0.1`:
+
+| Konfiguration | ohne `rollout_clamp` | mit `rollout_clamp: 50` |
+|---|---|---|
+| `residual_output: true`, `[5,20]`, 64/3 | ABORT \| 2.9e6 \| ABORT | — |
+| `residual_output: false`, `[200,600]`, 64/3 | 0.0044 \| 0.0329 \| 0.0019 | — |
+| `residual_output: false`, `[200,600]`, **128/4** | **ABORT** \| 0.0023 \| 0.0076 | **0.0156 \| 5.9e-4 \| 0.0135** |
+| `residual_output: false`, **raw**, 64/3 | **ABORT \| ABORT** \| 0.0148 | **0.0134 \| 0.0095 \| 0.0148** |
+
+Zwei Dinge, die man ohne diesen Durchgang nicht gesehen hätte:
+
+1. **`residual_output: false` ist notwendig, aber nicht hinreichend.** Bei
+   Produktivbreite 128/4 bricht auch die gute Konfiguration auf einem von drei
+   Seeds ab, und `raw` — ohne Physik noch 3/3 sauber — bricht auf zweien ab.
+2. **`rollout_clamp` ist damit tragend, nicht bloß Diagnose.** Er verwandelt
+   beide Fälle in 3/3 konvergierende Läufe. Ohne Physik-Term wäre er nur ein
+   Logging-Hilfsmittel gewesen; das war die Fehleinschätzung, solange nur mit
+   `w_phys = 0` gemessen wurde.
+
+#### Ist das Ergebnis am Ende brauchbar? (MAE, nicht `L_data`)
+
+`L_data` ist ein z-normierter Trainingsverlust auf dem Trainingsabschnitt. Die
+Lieferzahl ist MAE in °C auf dem gehaltenen Teil. Die beiden ordnen die
+Konfigurationen **nicht gleich** — und das hat mich einmal in die falsche
+Richtung geführt, siehe unten.
+
+Als Untergrenze zwei triviale Vorhersager:
+
+| Vorhersager | MAE train | MAE test |
+|---|---|---|
+| „Temperatur ändert sich nie", `T(t) = T(0)` | 5.36 °C | **11.96 °C** |
+| „konstanter Mittelwert der Trainingslabels" | 2.69 °C | **6.60 °C** |
+| Modell | ~0.3–0.8 °C | ~0.8–2.5 °C |
+
+**Das Modell ist brauchbar** — es liegt um ein Mehrfaches unter dem besseren der
+beiden. Es lernt die Dynamik und gibt nicht bloß einen Mittelwert zurück.
+
+#### Die Segmentlänge — gemessen
+
+Die früheren Lag-Messungen liefen auf einer **verkürzten** Trajektorie
+(`n_t = 1200` bei einem `dtn` für 7000 Schritte). Dadurch überspannte sie nur
+1/6 der Referenzspanne, `dTdt_scale` kam auf 16.38 statt 2.5, und `[5, 20]`
+ergab dort `A = 18` statt der echten 119. Ein 5-s-Fenster waren dort ausserdem
+4 Gitterschritte statt 25. **Diese Messungen taugen für die Lag-Wahl nicht.**
+
+Bei voller Länge stimmt das Bundle mit den echten Daten überein:
+`dTdt_scale = 2.467` gegen echte `2.479`, also `A = 119.5 / 29.9` für `[5, 20]`
+wie in echt, und 5 s sind 25 Gitterschritte. Darauf gemessen — `n_t = 7000`,
+10 Epochen, 3 Seeds, 128/4, `w_phys = 0.1`, `residual_output: false`,
+`rollout_clamp: 50`, MAE in °C:
+
+| `rate_lags` | `A` | MAE train | MAE test | pro Seed (test) |
+|---|---|---|---|---|
+| **`[5, 20]`** | 119 / 30 | 0.784 | **1.207** | 1.695 · 0.781 · 1.144 |
+| `[50, 150]` | 12 / 4 | 0.594 | 2.102 | 2.846 · 1.579 · 1.880 |
+| `[200, 600]` | 3 / 1 | 0.724 | 2.507 | 3.010 · 1.464 · 3.046 |
+| `raw` | — | 0.824 | 2.601 | 2.677 · 1.790 · 3.336 |
+
+**`[5, 20]` gewinnt auf allen drei Seeds, und keiner der zwölf Läufe bricht ab.**
+Das ist kein knapper Vorsprung im Rauschen, sondern durchgängig Faktor ~2.
+
+Die Deutung: `A ≈ 119` erzeugt Sättigung, die der Clamp abfängt — sichtbar an
+den `[SATURATED]`-Zeilen. Der Preis ist aber kleiner als der Nutzen der kurzen
+Rate. Längere Segmente senken `A`, machen den Kanal aber zu einem
+**Fortschrittsindikator**: ein 600-s-Fenster auf 1474 s sagt dem Netz vor allem,
+*wo in der Trajektorie* es ist. In-sample hilft das (`[50,150]` hat mit 0.594
+die beste MAE train), jenseits von `split_t` schadet es.
+
+`--max-rate-amp` deckelt `A`, ohne die Segmentlänge anzufassen — es dämpft den
+Kanal, das Netz bekommt weniger Signal, und es wird schlechter statt besser:
+
+| | MAE test |
+|---|---|
+| `[5, 20]` ohne Deckel | **0.718** |
+| `[5, 20]`, `max_rate_amp = 3` | 1.082 |
+| `[5, 20]`, `max_rate_amp = 1` | 1.573 |
+
+Deshalb bleibt es bei `0.0` (aus).
+
+> **Was daran lehrreich ist.** Solange `residual_output: true` war, divergierte
+> **jede** Lag-Wahl, auch `raw`. Daraus sah es nach zwei gleichrangigen Ursachen
+> aus, und `A ≈ 119` wirkte zwingend behebbar. Erst nachdem der Integrator weg
+> war, liess sich `A` überhaupt isoliert messen — und dann ist es tragbar. Eine
+> Korrelation in einem kaputten System ist keine Ursache.
+
+#### Was sich auf echte Daten überträgt — und was nicht
+
+Übertragbar ist **`A`**, nicht die Segmentlänge in Sekunden: `A` hängt über
+`rate_scale = dTdt_scale` am Datensatz, dieselben Sekunden ergeben also bei
+einem anderen OP-Satz ein anderes `A`. Die Startzeile gibt es aus.
+
+Die Messung oben ist in der echten Geometrie gemacht (`A = 119/30`), sie
+überträgt sich also für OP01–05 direkt. Was **nicht** übertragbar ist:
+
+* Die absoluten MAE-Werte. Die Trajektorie ist synthetisch.
+* Die Zahlen für `PINNmodulusTwoExtProfiles`: das Pooling über OP01–OP16
+  vergrössert `T_sigma`, verkleinert `dTdt_scale` und **erhöht damit `A`** über
+  die 119 hinaus. Dort ist die Lag-Wahl ungetestet.
+
+#### Warum keine andere Normierung den Rate-Kanal rettet
+
+Für ein glattes Signal gilt `ΔT über lag ≈ (dT/dt)·lag`, also
+
+```
+lag_n · rate_scale  ≈  RMS(ΔT über lag)
+```
+
+Nachgerechnet auf einer glatten Rampe-plus-Welligkeit, auf drei Stellen genau:
+
+| lag [s] | `lag_n · rate_scale` | `RMS(ΔT über lag)` | A |
+|---|---|---|---|
+| 5 | 0.00768 | 0.00776 | 130 |
+| 20 | 0.03070 | 0.03068 | 33 |
+| 200 | 0.30704 | 0.30035 | 3.3 |
+| 600 | 0.92112 | 0.83285 | 1.1 |
+
+Der Divisor **ist** der RMS der Differenz selbst. Jede Normierung, die eine
+echte 5-Sekunden-Änderung auf O(1) hebt, muss durch ~0.008 teilen und verstärkt
+damit alles andere um denselben Faktor. Die Verstärkung ist also kein
+Formelfehler, den man umschreiben könnte, sondern **intrinsisch**: 5 s sind
+0.34 % der Trajektorie, und eine so kleine Differenz auf O(1) zu ziehen kostet
+zwei Größenordnungen Rauschverstärkung. `A` senken geht nur über ein längeres
+Segment — oder über `--max-rate-amp`, das den Kanal dämpft.
+
+**Beides kostet mehr, als es bringt.** Gemessen (siehe „Die Segmentlänge —
+gemessen"): längere Segmente machen den Kanal zum Fortschrittsindikator und
+verschlechtern die MAE auf jedem Seed; `--max-rate-amp` dämpft das Signal und
+verschlechtert sie ebenfalls. Die richtige Antwort auf `A ≈ 119` ist also
+**nicht, `A` zu senken**, sondern den Integrator abzuschalten und die Sättigung
+per `rollout_clamp` abzufangen. `benchmark_arch.py` sweept die Achse trotzdem —
+auf echten Daten kann das Optimum woanders liegen.
+
+#### Was ausdrücklich NICHT hilft
+
+* **Eine bessere Initialisierung.** Setzt man die Ausgabeschicht auf 0, ist der
+  Rollout bei Initialisierung perfekt stabil (0/5 Divergenz über 7000 Schritte,
+  `max|T| = 1.19`). Nach **20 Adam-Schritten** steht `|W_out|` bei 0.042, und
+  der nächste Rollout erreicht 4.7e4. Der stabile Bereich im Gewichtsraum ist zu
+  klein; gewöhnliches Training läuft in wenigen Schritten heraus. Das Problem
+  ist das Layout, nicht der Startpunkt.
+* **`--max-rate-amp`.** Hebt `rate_scale` und deckelt `A`, dämpft damit aber den
+  Kanal: das Netz bekommt weniger Signal. Gemessen wird die MAE monoton
+  schlechter, je härter gedeckelt wird (0.72 → 1.08 → 1.57). Bleibt aus.
+* **Längere `rate_lags`.** Senken `A`, verschlechtern die MAE auf jedem Seed —
+  siehe „Die Segmentlänge — gemessen". `[5, 20]` bleibt.
+* **`--rollout-clamp` allein.** Mit `residual_output: true` verhindert er den
+  Abbruch, stabilisiert aber nicht: über 3 Seeds lief einer am Ende wieder weg.
+  Er ersetzt die Layout-Korrektur nicht. *Zusätzlich* zu ihr ist er dagegen
+  tragend, sobald der Physik-Term an ist — siehe die Tabelle oben.
+
+> **Achtung bei eigenen Messungen.** Bis zu diesem Befund hat
+> `tests/conftest.py` Modulus mit einem nackten `nn.Linear` ersetzt. Dessen
+> Default-Init (`kaiming_uniform`, `a=√5`) ist pro Schicht um `√(1/3)` weniger
+> expansiv als das `xavier_uniform` des echten `FCLayer` — über einen
+> 4-Schicht-Stack rund 9×. Eine Stabilitätsmessung gegen den alten Stub meldete
+> Kombinationen als stabil, die es nicht sind. Der Stub kopiert die Init
+> inzwischen; wer daran etwas ändert, verschiebt diese Tabellen.
+
+> **Und ein Einzellauf entscheidet hier nichts.** Auf Seed 0 allein sieht die
+> Rangfolge mehrfach anders aus als über drei Seeds. Wer diese Tabellen
+> anfasst, misst bitte wieder über mehrere Seeds.
+
+> **Und die Geometrie muss stimmen.** Eine verkürzte Trajektorie verschiebt
+> `dTdt_scale` und damit `A` — bei `n_t = 1200` statt 7000 um Faktor 6.6. Wer
+> Lag-Wahl oder `A` misst, braucht die volle Länge; sonst misst er ein anderes
+> `A`, als der Lauf später hat.
 
 > **Hier geht die Zeit hin.** ~7000 sequentielle Schritte pro OP und Epoche, die
 > sich prinzipiell nicht parallelisieren lassen — jeder braucht den vorherigen.

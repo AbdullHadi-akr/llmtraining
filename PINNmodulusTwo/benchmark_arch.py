@@ -63,12 +63,39 @@ DEFAULT_DEPTHS = [2, 3, 4, 6]
 # Hybrid history: cumulative segment lengths in seconds. The first entry is the
 # current default, the rest probe shorter and longer memory.
 DEFAULT_DELTA_GRIDS = [0.2, 0.5, 1.0, 2.0]
+# Die Achse, die hier wirklich gesweept wird, ist die VERSTAERKUNG
+#
+#     A = 1 / (lag_n * rate_scale)
+#
+# und nicht die Segmentlaenge in Sekunden. A ist der Faktor, mit dem der
+# Rate-Kanal alles Nicht-Glatte in den naechsten Rollout-Schritt zurueckspielt;
+# er haengt ueber rate_scale = dTdt_scale am Datensatz, weshalb dieselben
+# Sekunden bei einem anderen OP-Satz ein anderes A ergeben. train.py gibt A beim
+# Start aus.
+#
+# Ein grosses A ist NICHT der Grund, aus dem frueher jeder Lauf abbrach -- das
+# war residual_output. Ist der Integrator weg und rollout_clamp an, ist A ~ 119
+# tragbar. Die Segmentlaenge hat aber zwei gegenlaeufige Effekte, und wo der
+# Kompromiss liegt, gehoert auf echten Daten gemessen:
+#
+#   kurz  -> A gross, mehr Saettigung, aber die Rate ist eine echte Rate
+#   lang  -> A klein, aber ein 600-s-Fenster auf 1474 s ist eher ein
+#            Fortschrittsindikator als eine Rate und generalisiert schlechter
+#
+# Auf einem synthetischen Bundle in der ECHTEN Geometrie (n_t = 7000,
+# dTdt_scale 2.467 gegen echte 2.479, A also 119/30 wie in echt) gewann [5,20]
+# die MAE auf dem gehaltenen Abschnitt auf allen drei Seeds -- vor [50,150],
+# [200,600] und raw, ohne einen einzigen Abbruch in zwoelf Laeufen. Deshalb ist
+# [5,20] die Baseline; die laengeren Segmente stehen als Gegenprobe daneben.
+#
+# A unten fuer OP01-05: rate_scale ~ 2.479, T_span_ref ~ 1474 s.
 DEFAULT_LAG_SETS = [
-    [5.0, 20.0],
-    [2.0, 10.0],
-    [10.0, 60.0],
-    [5.0, 20.0, 60.0],
-    [30.0],
+    [5.0, 20.0],             # A ~ 119 / 30     <- Default aus config.yaml
+    [2.0, 10.0],             # A ~ 297 / 59
+    [10.0, 60.0],            # A ~ 59 / 10
+    [50.0, 150.0],           # A ~ 11.9 / 4.0
+    [200.0, 600.0],          # A ~ 3.0 / 1.0    Fortschrittsindikator-Ende
+    [5.0, 20.0, 60.0],       # drei Segmente
 ]
 
 
@@ -112,7 +139,9 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--width", type=int, default=128, help="baseline MLP width")
     p.add_argument("--depth", type=int, default=4, help="baseline MLP depth")
     p.add_argument("--rate-lags", nargs="+", type=float, default=[5.0, 20.0],
-                   help="baseline hybrid rate segments in seconds")
+                   help="baseline hybrid rate segments in seconds. The number "
+                        "that matters is A = 1/(lag_n * rate_scale), printed at "
+                        "startup; see DEFAULT_LAG_SETS")
     p.add_argument("--delta-grid", type=float, default=0.2,
                    help="baseline anchor lag in seconds")
     p.add_argument("--w-phys", type=float, default=0.05,

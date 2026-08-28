@@ -29,7 +29,31 @@ layer_size: 128
 num_layers: 4
 k_max: 2                   # nur im raw-Modus wirksam
 history_mode: hybrid       # raw | hybrid
-rate_lags: [5.0, 20.0]     # seconds, hybrid history mode only
+# Segment lengths of the hybrid history, in SECONDS.
+#
+# The rate channel is (T_end - T_start) / (lag_n * rate_scale), so a short
+# segment divides a small difference by a small number and multiplies everything
+# -- signal and an untrained net's jitter alike -- by
+#
+#     A = 1 / (lag_n * rate_scale)      ~ 119 at 5 s, ~ 3 at 200 s
+#
+# printed at startup. A large A on its own is NOT what made every run abort:
+# that was residual_output (see below). With the integrator gone and
+# rollout_clamp on, A ~ 119 is tolerable, and the short segment carries the more
+# useful signal -- a rate over 600 s on a ~1474 s trajectory is closer to a
+# progress indicator than to a rate.
+#
+# Measured at the real geometry (n_t = 7000, dTdt_scale 2.467 against the real
+# 2.479, so A matches the real 119/30), 10 epochs, 3 seeds, MAE on the held-out
+# tail in degrees C:
+#
+#     [5, 20]      A = 119/30   MAE_test 1.207     <- best on ALL three seeds
+#     [50, 150]    A = 12/4     MAE_test 2.102
+#     [200, 600]   A = 3/1      MAE_test 2.507
+#     raw          --           MAE_test 2.601
+#
+# No aborts in any of the twelve runs. Longer segments were tried and are worse.
+rate_lags: [5.0, 20.0]  # seconds, hybrid history mode only
 # Anchor lag of the hybrid history in seconds: the block is
 # [T(t-delta_grid), rate_1, ...] and the rate segments cascade back from
 # there. Independent of subsample_time - do not confuse the two.
@@ -37,12 +61,45 @@ delta_grid: 0.2            # ONLY used when history_mode: hybrid
 time_deriv: bdf2           # bdf1 | bdf2 | autograd
 use_static: true
 use_forcing: true
-# Predict the deviation from the spatially averaged temperature level of the
-# anchor slice instead of the absolute value. The level is spatially constant,
-# so the physics Laplacian and the dT/dx boundary term are unchanged, but the
-# rollout carries the overall level instead of re-deriving it at every one of
-# the ~7000 steps -- which is the mode that drifts.
-residual_output: true
+
+# --- rollout stability -------------------------------------------------------
+# Saturate |Tn| in the rollout buffer; 0 disables. Load-bearing once w_phys > 0.
+#
+# With the physics term off it is only a diagnostic -- it keeps a runaway rollout
+# finite so the log reports HOW MUCH of the trajectory ran away ([SATURATED],
+# with a count) instead of a single nan line carrying no information.
+#
+# With w_phys: 0.1 it is what makes the configuration robust across seeds. The
+# physics gradient walks the weights out of the stable region faster, and
+# measured over 3 seeds (20 epochs, synthetic bundle):
+#
+#   residual_output false, [200,600], 128/4   without: ABORT | 0.0023 | 0.0076
+#                                             with:    0.0156 | 0.00059 | 0.0135
+#   residual_output false, raw,        64/3   without: ABORT | ABORT  | 0.0148
+#                                             with:    0.0134 | 0.0095 | 0.0148
+#
+# It is still not a licence to ignore a persistent [SATURATED] count: falling is
+# the model pulling itself together, flat or rising is not.
+rollout_clamp: 50.0
+max_rate_amp: 0.0          # 0 = rate_scale stays dTdt_scale. >0 caps A by
+                           # raising rate_scale, which CHANGES THE MODEL. Prefer
+                           # longer rate_lags above; record it if you use this.
+
+# Predict the absolute temperature, NOT the deviation from a carried level.
+#
+# residual_output: true made field() return level(t) + net(...), where level is
+# the spatial mean of the anchor slice. The stated intent was that carrying the
+# level stops the rollout drifting. It does the opposite: level(t) ~
+# level(t - delta_grid) + mean(net) is an integrator of gain exactly 1 with no
+# leak, so any one-signed component of the network output accumulates over the
+# ~7000 steps without bound, and nothing pulls it back.
+#
+# Measured on a synthetic bundle, 20 epochs, 3 seeds, no guards of any kind:
+# residual_output: true aborted 9/9 in EVERY history configuration -- hybrid
+# with short lags, hybrid with long lags, and raw, which has no rate channels at
+# all. With it false, every one of those ran; hybrid + [200, 600] reached
+# L_data ~ 1e-4. See ARCHITECTURE.md 3.1.
+residual_output: false
 
 # ---- optimisation -----------------------------------------------------------
 epochs: 60

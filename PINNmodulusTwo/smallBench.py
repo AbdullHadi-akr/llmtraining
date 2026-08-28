@@ -71,7 +71,13 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--depth", type=int, default=d.get("num_layers", 3))
     p.add_argument("--k-max", type=int, default=d.get("k_max", 2))
     p.add_argument("--history-mode", default=d.get("history_mode", "hybrid"))
-    p.add_argument("--rate-lags", nargs="+", type=float, default=d.get("rate_lags", [5.0, 20.0]))
+    p.add_argument("--rate-lags", nargs="+", type=float,
+                   default=d.get("rate_lags", [5.0, 20.0]),
+                   help="hybrid rate segments in SECONDS. What matters is "
+                        "A = 1/(lag_n * rate_scale), printed at startup: short "
+                        "segments divide a small difference by a small number "
+                        "and amplify everything non-smooth by A. 5 s gives "
+                        "A ~ 119 and the rollout diverges")
     p.add_argument("--delta-grid", type=float, default=d.get("delta_grid", 0.2),
                    help="anchor lag of the hybrid history in seconds")
     p.add_argument("--time-deriv", default=d.get("time_deriv", "bdf2"))
@@ -86,6 +92,13 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--inner-steps", type=int, default=d.get("inner_steps", 100),
                    help="optimiser steps per OP per epoch against that epoch's "
                         "frozen rollout")
+    p.add_argument("--rollout-clamp", type=float,
+                   default=d.get("rollout_clamp", 50.0),
+                   help="saturate the rollout buffer at +/-this many normalised "
+                        "temperature units; 0 disables")
+    p.add_argument("--max-rate-amp", type=float, default=d.get("max_rate_amp", 0.0),
+                   help="cap the hybrid history amplification A by raising "
+                        "rate_scale; 0 = leave it at dTdt_scale")
     p.add_argument("--residual-output", action=argparse.BooleanOptionalAction,
                    default=d.get("residual_output", True))
     p.add_argument("--learn-gains", action=argparse.BooleanOptionalAction,
@@ -144,6 +157,8 @@ def _make_args(cli, w_phys: float) -> Args:
     args.batch_phys = cli.batch_phys
     args.batch_bc = cli.batch_bc
     args.inner_steps = cli.inner_steps
+    args.rollout_clamp = cli.rollout_clamp
+    args.max_rate_amp = cli.max_rate_amp
     args.residual_output = cli.residual_output
     args.learn_gains = cli.learn_gains
     args.weight_decay = 0.0

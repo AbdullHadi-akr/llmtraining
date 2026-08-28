@@ -1,5 +1,14 @@
 # PINNmodulusTwoExtProfiles — the profile extension of PINNmodulusTwo
 
+> **Update 27.08.2026.** `residual_output` wurde hier nie an das Modell
+> übergeben, lief also still mit dem alten Default `true` — einem Integrator
+> ohne Leck, der den Rollout in Epoche 1 nach `inf` treibt. Er ist jetzt ein
+> Schalter und steht auf `false`, dazu kommt `rollout_clamp`. Die `rate_lags`
+> bleiben bei `[5, 20]`; die Verstärkung `A` ist hier durch das Pooling über
+> OP01–OP16 zwar *größer* als im Basisprojekt, aber sie ist nicht die Ursache.
+> [`README_UPDATE_2026-08-27.md`](README_UPDATE_2026-08-27.md) hat den Befund,
+> die Änderungen und die Messung dazu.
+
 `PINNmodulusTwo` trains on **OP01–OP05** and holds out OP06/OP07. All seven are
 *constant* operating points: one C-rate, one fluid inlet temperature and one
 volume flow, held for the whole charge.

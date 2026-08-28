@@ -1,5 +1,12 @@
 # PINNmodulusTwo — Approach 2 (Modulus-as-a-tool + own recurrence)
 
+> **Update 27.08.2026 — der erste durchlaufende Test.** Bis dahin brach
+> jeder Lauf in Epoche 1 mit `L_data = nan` ab; die Ursache war
+> `residual_output`. [`README_ERSTER_TEST.md`](README_ERSTER_TEST.md) beschreibt
+> Modell, Architektur, Training, Daten, Loss und Ergebnisse vollständig, dazu die
+> Ursache und den gemessenen Vergleich der `rate_lags` und von `hybrid` gegen
+> `raw`.
+
 Implementation of **method #2** from the Notion page *"Battery Model with NVIDIA
 MODULUS"*: use Modulus as much as practical, but bring our **own recurrence** in
 PyTorch. Roughly a 50:50 Modulus / PyTorch split. **Temperature only** — `bc_V`
@@ -28,8 +35,10 @@ takes part in any selection.
   `delta_grid`, `rate_lags` and the lag gates are all fixed hyperparameters —
   configurable, never trained. Learned are only the MLP weights and the per-layer
   swish `β`; `src_gain`/`diff_gain` are pinned at 1.0 unless `--learn-gains`.
-  With `residual_output` (default) the net predicts the deviation from the
-  anchor's spatially averaged temperature level rather than the absolute value.
+  `residual_output` is **off by default** — the net predicts the absolute
+  normalised temperature. Switching it on makes `field()` return
+  `level(t) + net(...)`, which carries the level through an integrator of gain
+  exactly 1 with no leak and makes every rollout run away; see below.
 - `physics.py` — nondimensional anisotropic heat residual; space via autograd,
   time via the finite-difference `(T(t) − T(t−δ))/δ` over the recurrence. The
   assembled residual is divided by **one** scale, not each term by its own.
@@ -80,8 +89,13 @@ feeds the network a more compact feature block:
   `Δgrid` shifts where the window sits but is not part of any span: the endpoints
   of rate 1 are 5 s apart however far back the anchor is. Dividing by the clamped
   *elapsed* span instead is a singularity: early in the rollout that span
-  collapses to one grid step and the rate explodes, which is what made every
-  sweep point diverge to NaN.
+  collapses to one grid step and the rate explodes.
+
+  Dividing by `lag_n * rate_scale` means the channel multiplies everything
+  non-smooth — including an untrained net's step-to-step jitter — by
+  `A = 1/(lag_n * rate_scale)`, which at `5 s` against a ~1474 s reference span
+  is `A ≈ 119`. `A` is printed at startup. It is tolerable here; longer segments
+  lower it and generalise worse — see the stability notes below.
 
 Set `history_mode: raw` if you want the original lag stack, or `history_mode:
 hybrid` (the default) for the anchor + rates layout.
@@ -186,6 +200,71 @@ Outputs land in `PINNmodulusTwo/artifacts/`: `metrics.txt`, `training_curves.png
 - Training is free-running: the data loss is taken on the model's own
   autoregressive rollout (seeded only by the measured initial condition), never
   on ground-truth history. There is NO teacher forcing anywhere in train/eval.
+- **`residual_output` is off, and that is not optional.** With it on every run
+  aborted in epoch 1 with `L_data = nan`, before a single optimiser step.
+
+  The training loop computes one rollout per OP per epoch under `no_grad` and
+  then takes `--inner-steps` updates against that frozen buffer, so the buffer is
+  an *input* to the first gradient step. Once it holds `inf` there is no gradient
+  left to recover from.
+
+  `residual_output` made `field()` return `level(t) + net(...)`, and
+  `level(t) ~ level(t - delta_grid) + mean(net)` is an integrator of gain exactly
+  1 with no leak -- any one-signed component of the output accumulates over
+  ~7000 steps and nothing pulls it back.
+
+  Measured end to end (synthetic bundle, 20 epochs, 3 seeds, no guards):
+  `residual_output: true` aborted **9/9 in every history configuration**, `raw`
+  included -- which is where there are no rate channels at all. That is what
+  identifies the integrator rather than the rate channel as the cause.
+  ARCHITECTURE.md 3.1 has the tables and the confirmation at `n_t = 4000`.
+
+  A better initialisation does NOT fix this: zeroing the output layer makes the
+  rollout perfectly stable at init (0/5 over 7000 steps), and twenty Adam steps
+  later the next rollout reaches 1e4. The stable region of weight space is small
+  and training walks out of it. It is a layout problem, not a starting point.
+- **`rate_lags` stays at `[5, 20]`.** The rate channel divides by
+  `lag_n * rate_scale`, so a 5 s segment amplifies anything non-smooth by
+  `A ~ 119` (printed at startup). That is real, but it is not what aborted the
+  runs -- `residual_output` was. With the integrator gone and `--rollout-clamp`
+  on, `A ~ 119` is tolerable, and the short segment carries the better signal: a
+  rate over 600 s on a ~1474 s trajectory is closer to a progress indicator than
+  to a rate, and it generalises worse.
+
+  Measured at the REAL geometry (`n_t = 7000`, synthetic `dTdt_scale` 2.467
+  against the real 2.479, so `A` matches the real 119/30), 10 epochs, 3 seeds,
+  MAE in degrees C on the held-out tail:
+
+  | `rate_lags` | `A` | MAE test |
+  |---|---|---|
+  | **`[5, 20]`** | 119 / 30 | **1.207** — best on all three seeds |
+  | `[50, 150]` | 12 / 4 | 2.102 |
+  | `[200, 600]` | 3 / 1 | 2.507 |
+  | `raw` | — | 2.601 |
+
+  No aborts in any of the twelve runs. `--max-rate-amp` caps `A` by rescaling the
+  channel and made things worse still (MAE test 0.72 -> 1.08 -> 1.57 as the cap
+  tightened), so it stays off.
+- **Is the result any good?** `L_data` is a z-scored training loss on the train
+  portion; the deliverable is MAE in degrees C on the held-out tail, and the two
+  do NOT rank configurations the same way -- `[200, 600]` wins on `L_data` and
+  loses on MAE. Against trivial baselines the model is worth several times over:
+  6.60 C for "predict the training mean", 11.96 C for "hold the initial
+  condition". Use `benchmark_arch.py` and MAE, never `L_data`, to choose
+  `rate_lags` or `history_mode`.
+- **What transfers between datasets is `A`, not the lag in seconds.** `A` depends
+  on `rate_scale = dTdt_scale`, which is a property of the data. The same
+  seconds give a different `A` on a different OP set -- check the startup line.
+- `--rollout-clamp` (default `50.0`) saturates the rollout buffer in normalised
+  temperature units. With `w_phys: 0` it is only a diagnostic -- it keeps a
+  runaway rollout finite so the log reports how much of the trajectory ran away
+  (`[SATURATED]`, with a count) instead of a single `nan` line carrying no
+  information. With the physics term on it is **load-bearing**: the physics
+  gradient walks the weights out of the stable region faster, and over 3 seeds
+  the clamp turned a 1-in-3 abort at width 128/depth 4 (and a 2-in-3 abort in
+  `raw`) into three converging runs. It still does not make a saturated
+  trajectory a prediction -- watch the count: falling is the model pulling
+  itself together, flat or rising is not.
 - `train.py` prints a simple CFL sanity check after loading the data. If the
   estimated `Δt_max` is below the current step, the log warns that the rollout
   may be unstable.

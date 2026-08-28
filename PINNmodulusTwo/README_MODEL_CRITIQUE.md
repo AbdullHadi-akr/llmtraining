@@ -50,8 +50,38 @@ relative Abweichung **1e-15**. Das ist so nah an „identisch", wie float64 komm
 Das Netz sagte den absoluten z-gescorten Wert vorher und musste die Identität
 `T(t) ≈ T(t−0.2 s)` in jedem der ~7000 Schritte neu erzeugen.
 
-**Fix:** Es sagt die Abweichung vom **räumlich gemittelten** Temperaturniveau der
-Ankerscheibe vorher (`residual_output`, Default an).
+**Damaliger „Fix":** Es sagt die Abweichung vom **räumlich gemittelten**
+Temperaturniveau der Ankerscheibe vorher (`residual_output`).
+
+> ## ⚠️ Zurückgenommen am 27.08.2026 — dieser Fix war die Ursache des Abbruchs
+>
+> `residual_output` ist jetzt **aus** (`config.yaml`), und zwar nicht als
+> Geschmacksfrage. Die Vermutung unten, die Drift sinke dadurch, war falsch —
+> sie war unter „nicht verifiziert" notiert, und die Verifikation fiel negativ
+> aus:
+>
+> ```
+> level(t) ≈ level(t − Δgrid) + mean(net)
+> ```
+>
+> Das ist ein **Integrator mit Verstärkung exakt 1 und ohne Leck**. Das Niveau
+> wird mitgeführt, also zieht es auch nichts zurück. Jeder einseitige Anteil der
+> Netzausgabe akkumuliert über die ~7000 Schritte unbeschränkt — und wie *klein*
+> er ist, spielt keine Rolle, denn ein Integrator kennt nur das Vorzeichen. Bei
+> zufälliger Initialisierung gibt es eines, weil Swish nicht mittelwertfrei ist.
+>
+> Gemessen (20 Epochen, 3 Seeds, ohne jedes Hilfsmittel): `residual_output: true`
+> bricht **9/9 ab, in jeder History-Konfiguration** — auch bei `raw`, wo es gar
+> keine Rate-Kanäle gibt.
+>
+> Die Beobachtung, die den Fix motiviert hat, bleibt richtig: das Netz muss die
+> Identität `T(t) ≈ T(t−0.2 s)` tatsächlich in jedem Schritt neu erzeugen. Nur
+> ist der Anker `T(t−Δgrid)` bereits ein Eingangskanal, das Netz *kann* die
+> Persistenz also lernen — im Unterschied zum mitgeführten Niveau kann es dabei
+> aber auch eine Kontraktion lernen, und genau die fehlt dem Integrator.
+>
+> Volle Herleitung: [`ARCHITECTURE.md`](ARCHITECTURE.md) Abschnitt 3.1 und
+> [`README_ERSTER_TEST.md`](README_ERSTER_TEST.md) Kapitel 7.
 
 **Warum der räumliche Mittelwert und nicht der Anker je Punkt:** Der per-Punkt-
 Anker kommt aus einem diskreten Buffer und ist für autograd unsichtbar. `∇²T`
@@ -61,9 +91,12 @@ Laplace-Operator exakt null und trägt genau den Anteil, der über einen langen
 Rollout wegdriftet: das Gesamtniveau.
 
 **Verifiziert:** Niveau ist über die Punkte konstant (Streuung 3e-17), `dT/dx`
-und `∇²T` sind unverändert (Abweichung exakt 0).
-**Nicht verifiziert:** dass die Drift dadurch tatsächlich sinkt. Siehe
-[Schritt A](#schritt-a-smallbench--der-lauf-der-die-diagnose-prüft).
+und `∇²T` sind unverändert (Abweichung exakt 0). Das Argument zum Laplace-Operator
+oben bleibt also gültig — es war nie das Problem.
+
+**Inzwischen verifiziert und WIDERLEGT:** dass die Drift dadurch sinkt. Sie
+steigt; siehe den Kasten oben. Der Laplace-Operator war korrekt, die Dynamik
+nicht.
 
 ### 1.3 Das Physik-Residuum
 

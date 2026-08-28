@@ -590,9 +590,6 @@ rate_lags are CUMULATIVE segment lengths (not absolute boundaries), and each
         dtype = times[0].dtype if times else tn_c.dtype
 
         plan: dict = {"n_off": len(times), "denoms": denoms}
-        if not times:
-            self._hist_plan_cache = (key, plan)
-            return plan
 
         # ``cap`` is float(n_t - 1) of the SLICE the general path would have seen,
         # i.e. ti - 1. Step 0 never queries; clamping keeps its row well-formed.
@@ -600,15 +597,52 @@ rate_lags are CUMULATIVE segment lengths (not absolute boundaries), and each
         cap_i = (steps - 1).clamp(min=0).unsqueeze(1)
         cap_f = cap_i.to(dtype)
 
-        tq = torch.stack(times, dim=1)                       # (n_t, n_off)
-        pos = torch.minimum(torch.clamp(tq / dtn, min=0.0), cap_f)
-        lo = torch.minimum(torch.floor(pos).long().clamp(min=0), cap_i)
-        hi = torch.minimum(lo + 1, cap_i)
-        plan["lo"], plan["hi"] = lo, hi
-        plan["frac"] = pos - lo.to(dtype)
+        if times:
+            tq = torch.stack(times, dim=1)                   # (n_t, n_off)
+            pos = torch.minimum(torch.clamp(tq / dtn, min=0.0), cap_f)
+            lo = torch.minimum(torch.floor(pos).long().clamp(min=0), cap_i)
+            hi = torch.minimum(lo + 1, cap_i)
+            plan["lo"], plan["hi"] = lo, hi
+            plan["frac"] = pos - lo.to(dtype)
+
+        # The residual level reads the anchor T(t - delta_grid) too, but it is
+        # NOT history channel 0: raw mode's first channel sits at ``delta``, a
+        # different lag. So the level gets its own row of the same table rather
+        # than borrowing one that only coincides in hybrid mode.
+        t_lvl = torch.clamp(
+            self._causal(tn_c, tn_c - self._delta_grid.to(tn_c.dtype), dtn), min=0.0
+        )
+        pos_l = torch.minimum(torch.clamp(t_lvl / dtn, min=0.0), cap_f.squeeze(1))
+        lo_l = torch.minimum(torch.floor(pos_l).long().clamp(min=0), cap_i.squeeze(1))
+        plan["lvl_lo"] = lo_l
+        plan["lvl_hi"] = torch.minimum(lo_l + 1, cap_i.squeeze(1))
+        plan["lvl_frac"] = pos_l - lo_l.to(dtype)
 
         self._hist_plan_cache = (key, plan)
         return plan
+
+    def level_rollout(self, buf: torch.Tensor, ti: int, plan: dict) -> torch.Tensor | None:
+        """Residual level at rollout step ``ti``, using a :meth:`rollout_plan`.
+
+        Equivalent to ``self.level(buf[:ti], dtn, tn[ti].expand(P))`` but reads
+        the two bracketing ROWS directly instead of reducing the whole prefix.
+
+        Only the two bracketing rows are ever read, so reducing the whole prefix
+        was O(ti * P) at every step -- O(n_t^2 * P) over a rollout, ~9e9
+        element-ops at n_t = 7000 and P = 363, which dominated the epoch while
+        7000 - 2 of those row means went straight into the bin.
+
+        The spatial mean is taken BEFORE the interpolation, not after. Both
+        orders are algebraically the same number, but only this one performs the
+        float additions in the same order ``level`` does, which is what keeps
+        ``tests/test_history_fastpath.py``'s ``torch.equal`` claim true.
+        """
+        if not self.residual_output:
+            return None
+        f = plan["lvl_frac"][ti]
+        lo = buf[plan["lvl_lo"][ti]].mean()
+        hi = buf[plan["lvl_hi"][ti]].mean()
+        return (lo * (1.0 - f) + hi * f).expand(buf.shape[1])
 
     def history_rollout(self, buf: torch.Tensor, ti: int, plan: dict) -> torch.Tensor:
         """History block at rollout step ``ti``, using a :meth:`rollout_plan`.
@@ -686,24 +720,53 @@ def rollout(
     Tn_ic: torch.Tensor,     # (P,) normalised initial condition (seed)
     tn: torch.Tensor,        # (n_t,) normalised time grid
     dtn: float,
+    clamp: float = 0.0,                    # saturate |Tn| at this, 0 = off
 ) -> torch.Tensor:
-    """Free-running autoregressive rollout (no teacher forcing).
+    """Free-running autoregressive rollout.
 
     The buffer is **seeded with the measured initial condition** and never
     predicts ``t=0``; from then on the model's own predictions are fed back as the
     temperature history. Because the history at step ``ti`` is read only from
     strictly earlier, already-computed times (``hi`` clamped to ``ti-1``), the IC
-    is always satisfied exactly -- it is imposed, not learned.
+    is always satisfied exactly -- it is imposed, not learned. The history is
+    never a ground-truth signal, here or anywhere else in train/eval.
+
+    Saturation (``clamp > 0``)
+    --------------------------
+    Whatever is written into the buffer is clamped to ``[-clamp, +clamp]``. The
+    buffer is z-scored temperature, so a plausible trajectory lives inside a few
+    units and a clamp in the tens never binds on a model that is working.
+
+    An unclamped rollout that runs away reaches inf, and from inf every
+    downstream loss is nan, so the run aborts with one line and no information.
+    A clamped one stays finite, the loss stays a real number, and the
+    ``[SATURATED]`` count in the log says how much of the trajectory ran away and
+    whether it is getting better or worse.
+
+    With the physics term switched off that is all it is -- a diagnostic. With
+    ``w_phys > 0`` it is load-bearing: the physics gradient walks the weights out
+    of the stable region faster, and over 3 seeds the clamp turned a 1-in-3
+    (and, in raw mode, a 2-in-3) abort into three converging runs. It still does
+    not make a saturated trajectory a prediction; see ``ARCHITECTURE.md`` 3.1 for
+    what causes the runaway in the first place.
     """
     n_t, P = tn.shape[0], xn.shape[0]
     buf = torch.zeros(n_t, P, dtype=xn.dtype, device=xn.device)
     buf[0] = Tn_ic
     plan = model.rollout_plan(tn, dtn)
+    # ``level`` is the spatial mean of the interpolated anchor slice. The anchor
+    # lookup is linear in the buffer and the spatial mean is linear too, so the
+    # mean of the anchor channel IS that level -- and the hybrid history has
+    # already computed that channel for this step. Calling ``model.level`` here
+    # instead re-reduced the whole prefix ``buf[:ti]`` every step, which is
+    # O(n_t^2 * P): ~9e9 element-ops per rollout at n_t = 7000, P = 363, and it
+    # dominated the epoch. The two differ only in the order the float additions
+    # are performed.
     for ti in range(1, n_t):
-        tq = tn[ti].expand(P)
         hist = model.history_rollout(buf, ti, plan)
         cfg = cfg_seq[ti].expand(P, -1)
         forcing = forcing_seq[ti].expand(P, -1)
-        buf[ti] = model.field(xn, static, cfg, forcing, hist,
-                              model.level(buf[:ti], dtn, tq))
+        pred = model.field(xn, static, cfg, forcing, hist,
+                           model.level_rollout(buf, ti, plan))
+        buf[ti] = pred.clamp(-clamp, clamp) if clamp > 0.0 else pred
     return buf
