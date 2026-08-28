@@ -634,6 +634,13 @@ hinterher nicht trennbar, was gewirkt hat.
 
 #### Was zu messen ist, bevor irgendetwas geändert wird
 
+```bash
+python3 PINNmodulusTwo/tools/interface_probe.py
+```
+
+Braucht weder Modulus noch torch. Messung 1 kommt mit `data_cache/OP*.npz` aus,
+Messung 2 zusätzlich mit `material_properties/` und wird sonst übersprungen.
+
 1. **Wie viele der 363 Punkte sind grenzflächennah?** `region` liegt bereits auf
    Bundle und OP (`data.py:382`, `488`); ein Punkt ist Grenzpunkt, wenn unter
    seinen `k` nächsten Nachbarn eine andere `region` vorkommt. Bei drei
