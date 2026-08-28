@@ -4,8 +4,15 @@
 Runs a short training (few epochs, 2 w_phys values) to verify:
 1. CFL stability (no inf/NaN losses)
 2. Loss convergence (L_data decreasing)
-3. Balanced losses are ~O(1)
+3. Balanced losses are ~O(1) -- reported per term, L_phys_bal AND L_bc_bal
 4. Test MAE is reasonable (< 20°C)
+
+All four are smoke tests: they ask whether the RUN is usable, not whether the
+MODEL is good. Check 4 in particular is a 20 °C bound and passing it means very
+little. The line that answers "is this worth more than doing nothing" is the
+trivial-predictor comparison printed underneath it, computed on the same
+held-out OP -- see ``_trivial_baselines``. A run can pass all four checks and
+still lose to predicting a constant.
 
 This is also "step A" of PINNmodulusTwo/README_MODEL_CRITIQUE.md: run it once as
 it stands and once as
@@ -203,6 +210,29 @@ def _rollout_mae(model, op, bundle, device) -> float:
     return float(np.abs(T_pred - op.T_lab).mean())
 
 
+def _trivial_baselines(op, bundle) -> tuple[float, float]:
+    """MAE of the two trivial predictors on ``op``, in physical °C.
+
+    Without these a Test MAE is a number with no scale. The pair is the one
+    README_ERSTER_TEST.md chapter 6 uses, and the model has to beat the BETTER
+    of the two to have learned anything:
+
+    * persistence -- ``T(t) = T(0)``, i.e. the field never changes;
+    * mean -- the constant mean of the training labels. That constant is
+      ``bundle.T_mu`` by construction (``data.py`` pools it over the training
+      portion of the training OPs), so this is not a second definition of the
+      same thing, it IS the same thing.
+
+    The numbers in README_ERSTER_TEST.md (11.96 °C and 6.60 °C) come from a
+    SYNTHETIC bundle and its chapter 9.1 says the magnitudes do not carry over
+    to the real OPs -- so they must not be used as the yardstick here. These are
+    computed on whatever ``op`` actually is, which is the point.
+    """
+    persistence = float(np.abs(op.T_lab - op.T_lab[0][None, :]).mean())
+    mean = float(np.abs(op.T_lab - bundle.T_mu).mean())
+    return persistence, mean
+
+
 def main():
     cli = parse_args()
     device = resolve_device(cli.device)
@@ -260,13 +290,26 @@ def main():
         # Check 3: Balanced losses are ~O(1) -- only where a term is switched on
         L_phys_bal = hist.get("L_phys_bal", [1.0])[-1]
         L_bc_bal = hist.get("L_bc_bal", [1.0])[-1]
-        balanced = ((not phys_on or 0.01 < L_phys_bal < 100)
-                    and (not bc_on or 0.01 < L_bc_bal < 100))
+        # Kept apart on purpose: a single `balanced` flag cannot say WHICH term
+        # broke it, and a run reading only L_phys_bal then blames the physics
+        # weight for a bc failure -- or, at w_phys=0 where the physics term is
+        # skipped entirely, has nothing left to blame and reaches for the MAE.
+        phys_balanced = (not phys_on) or 0.01 < L_phys_bal < 100
+        bc_balanced = (not bc_on) or 0.01 < L_bc_bal < 100
+        balanced = phys_balanced and bc_balanced
 
         # Check 4: Test MAE is reasonable
         held = build_op(cli.test_op, bundle, subsample_time=cli.subsample)
         test_mae = _rollout_mae(model, held, bundle, device)
         mae_ok = test_mae < 20.0
+
+        # The two trivial predictors on the SAME held-out OP. `mae_ok` only asks
+        # whether the rollout stayed finite-ish (< 20 °C); it is a smoke-test
+        # bound, not a quality bar, and passing it says nothing about whether
+        # the model beats doing nothing. `beats_trivial` is that question.
+        mae_persist, mae_mean = _trivial_baselines(held, bundle)
+        mae_trivial = min(mae_persist, mae_mean)
+        beats_trivial = test_mae < mae_trivial
 
         # In-time MAE for training OPs
         train_maes = [_rollout_mae(model, op, bundle, device) 
@@ -282,8 +325,14 @@ def main():
             "L_bc_bal": L_bc_bal,
             "train_mae": train_mae,
             "test_mae": test_mae,
+            "mae_persist": mae_persist,
+            "mae_mean": mae_mean,
+            "mae_trivial": mae_trivial,
+            "beats_trivial": beats_trivial,
             "stable": stable,
             "converged": converged,
+            "phys_balanced": phys_balanced,
+            "bc_balanced": bc_balanced,
             "balanced": balanced,
             "mae_ok": mae_ok,
             "passed": passed,
@@ -296,26 +345,77 @@ def main():
         print(f"\n  Results for w_phys={w_phys}:")
         print(f"    L_data(final):  {L_data_final:.4e}  {'✓' if stable else '✗ (inf/NaN)'}")
         phys_note = ("(w_phys=0: term not computed)" if not phys_on
-                     else "✓" if balanced else "✗ (not ~O(1))")
+                     else "✓" if phys_balanced else "✗ (not ~O(1))")
+        bc_note = ("(w_bc=0: term not computed)" if not bc_on
+                   else "✓" if bc_balanced else "✗ (not ~O(1))")
         print(f"    L_phys_bal:     {L_phys_bal:.4e}  {phys_note}")
-        print(f"    L_bc_bal:       {L_bc_bal:.4e}")
+        print(f"    L_bc_bal:       {L_bc_bal:.4e}  {bc_note}")
         print(f"    Train MAE:      {train_mae:.2f}°C")
         print(f"    Test MAE:       {test_mae:.2f}°C  {'✓' if mae_ok else '✗ (>20°C)'}")
+        print(f"      vs. persistence T(t)=T(0):     {mae_persist:.2f}°C")
+        print(f"      vs. constant mean of train:    {mae_mean:.2f}°C")
+        beat_note = ("✓" if beats_trivial
+                     else f"✗ -- {test_mae:.2f}°C >= {mae_trivial:.2f}°C")
+        print(f"      beats the better of the two:   {beat_note}")
         print(f"    Converged:      {'✓' if converged else '✗'}")
         print(f"    Overall:        {'✓ PASS' if passed else '✗ FAIL'}")
+        if not passed:
+            # Which check actually failed. Without this the four booleans have to
+            # be reconstructed from four separate lines above, and the guess that
+            # comes out is usually "MAE too high" -- the one bound that is hardest
+            # to fail, because it is 20 °C.
+            why = []
+            if not stable:
+                why.append("L_data/L_phys not finite")
+            if not converged:
+                why.append("L_data did not decrease over the run")
+            if not phys_balanced:
+                why.append(f"L_phys_bal={L_phys_bal:.4e} outside [0.01, 100]")
+            if not bc_balanced:
+                why.append(f"L_bc_bal={L_bc_bal:.4e} outside [0.01, 100]")
+            if not mae_ok:
+                why.append(f"Test MAE {test_mae:.2f}°C >= 20°C")
+            print(f"    FAIL reason:    {'; '.join(why)}")
+        if passed and not beats_trivial:
+            print("    NOTE:           all four checks pass, but the model does "
+                  "not beat the trivial predictor -- PASS here means 'the run is "
+                  "usable', not 'the model is good'.")
 
     # Summary
     print("\n")
     print("=" * 70)
     print("SUMMARY")
     print("=" * 70)
-    print(f"{'w_phys':>8} | {'L_data':>10} | {'L_phys_bal':>10} | {'Train MAE':>10} | {'Test MAE':>10} | {'Status':>8}")
-    print("-" * 70)
+    # L_bc_bal belongs in this table: it is one of the two terms Check 3 tests,
+    # so a FAIL with a healthy L_phys_bal is otherwise unreadable from here.
+    print(f"{'w_phys':>8} | {'L_data':>10} | {'L_phys_bal':>10} | {'L_bc_bal':>10} | "
+          f"{'Train MAE':>10} | {'Test MAE':>10} | {'Status':>8}")
+    print("-" * 88)
     for r in results:
         status = "PASS" if r["passed"] else "FAIL"
         print(f"{r['w_phys']:>8.3f} | {r['L_data_final']:>10.4e} | {r['L_phys_bal']:>10.4e} | "
-              f"{r['train_mae']:>9.2f}C | {r['test_mae']:>9.2f}C | {status:>8}")
-    print("-" * 70)
+              f"{r['L_bc_bal']:>10.4e} | {r['train_mae']:>9.2f}C | {r['test_mae']:>9.2f}C | "
+              f"{status:>8}")
+    print("-" * 88)
+
+    # The yardstick, once, on the real held-out OP. Identical across rows (it
+    # does not depend on the model), which is exactly why it belongs here and
+    # not in a per-row column.
+    if results:
+        r0 = results[0]
+        best = min(results, key=lambda r: r["test_mae"])
+        print(f"\nTrivial predictors on {cli.test_op} (no training involved):")
+        print(f"  persistence T(t)=T(0):        {r0['mae_persist']:>8.2f}C")
+        print(f"  constant mean of train labels:{r0['mae_mean']:>8.2f}C")
+        print(f"  -> the bar to beat:           {r0['mae_trivial']:>8.2f}C")
+        if best["beats_trivial"]:
+            print(f"  best run (w_phys={best['w_phys']:g}) at {best['test_mae']:.2f}C "
+                  f"beats it by {r0['mae_trivial'] - best['test_mae']:.2f}C. The model "
+                  f"has learned something.")
+        else:
+            print(f"  best run (w_phys={best['w_phys']:g}) at {best['test_mae']:.2f}C does "
+                  f"NOT beat it. Whatever else passed, the model is not yet worth "
+                  f"more than doing nothing.")
 
     if all_passed:
         print("\n✓ ALL CHECKS PASSED - Ready for full benchmark!")
@@ -375,7 +475,18 @@ def main():
         f.write(f"Architecture: width={cli.width}, depth={cli.depth}\n\n")
         for r in results:
             f.write(f"w_phys={r['w_phys']}: L_data={r['L_data_final']:.4e}, "
-                    f"test_mae={r['test_mae']:.2f}C, {'PASS' if r['passed'] else 'FAIL'}\n")
+                    f"L_phys_bal={r['L_phys_bal']:.4e}, L_bc_bal={r['L_bc_bal']:.4e}, "
+                    f"train_mae={r['train_mae']:.2f}C, test_mae={r['test_mae']:.2f}C, "
+                    f"{'PASS' if r['passed'] else 'FAIL'}\n")
+        # README_MODEL_CRITIQUE.md step A compares this file between two runs, so
+        # the yardstick has to travel with it -- otherwise the comparison is
+        # between two numbers whose scale is only known in the terminal.
+        if results:
+            r0 = results[0]
+            f.write(f"\nTrivial predictors on {cli.test_op} (no training):\n")
+            f.write(f"  persistence T(t)=T(0):         {r0['mae_persist']:.2f}C\n")
+            f.write(f"  constant mean of train labels: {r0['mae_mean']:.2f}C\n")
+            f.write(f"  bar to beat:                   {r0['mae_trivial']:.2f}C\n")
     print(f"  Saved results to {out_file}")
 
     return 0 if all_passed else 1

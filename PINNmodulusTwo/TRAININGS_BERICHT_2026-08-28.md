@@ -1,29 +1,25 @@
 # Trainingsbericht PINNmodulusTwo — 2026-08-28
 
-> ## ⚠️ Korrekturhinweis — siehe [TRAININGS_BERICHT_2026-08-28_REVIEW.md](TRAININGS_BERICHT_2026-08-28_REVIEW.md)
->
-> Die Messungen unten sind unverändert, mehrere **Bewertungen** darin sind
-> jedoch nachweislich falsch. Die wichtigsten, bevor jemand daraus etwas
-> ableitet:
->
-> * Das `FAIL` kam **nicht** von der MAE (§4). `smallBench.py` prüft
->   `test_mae < 20.0` — beide Läufe haben das bestanden. Gescheitert ist die
->   Loss-Balance-Prüfung.
-> * Der Baseline-Vergleich (§9) ist ungültig: 11.96 °C ist der
->   Persistenz-Vorhersager, nicht „predict mean" (der liegt bei 6.60 °C),
->   12.02 °C ist gegenüber 11.96 °C **schlechter** und nicht besser, und beide
->   Baselines stammen aus einem **synthetischen** Bundle, das laut
->   `README_ERSTER_TEST.md` Kapitel 6/9 nicht auf echte OPs übertragbar ist.
-> * `w_phys` zu erhöhen kann `L_phys_bal` nicht verändern (§6, §7):
->   `L_phys_bal = L_phys / EMA(L_phys)` enthält `w_phys` nicht.
-> * Die „6358 Gitterpunkte" (§6, §7) existieren nicht — 363 ist die native
->   Sensorzahl. Empfehlung „Full Grid" entfällt.
-> * Der empfohlene nächste Schritt ist `benchmark_balance.py --part 1`, nicht
->   die Sweeps in §7.
+> **Korrekturstand 2026-08-28 (readme update 28.8).** Die Messwerte dieses
+> Berichts sind unverändert. Mehrere Bewertungen darin waren falsch und sind
+> korrigiert — betroffen waren der genannte `FAIL`-Grund (§4), der
+> Baseline-Vergleich (§9), die `w_phys`/`L_phys_bal`-Diagnose (§6), die
+> Overfitting-Aussage (§6) und die Nächsten Schritte (§7). Korrekturen sind als
+> **[K]** markiert. `smallBench.py` wurde im selben Zug so erweitert, dass die
+> Fehldeutungen bei künftigen Läufen nicht mehr möglich sind.
 
 ## Zusammenfassung
 
-Erfolgreich neue NPZ-Daten aus CSV generiert und erstes vollständiges Training auf echten Daten durchgeführt. Das Modell konvergiert stabil, aber die Testgenauigkeit liegt noch über dem Zielwert.
+Erfolgreich neue NPZ-Daten aus CSV generiert und erstes vollständiges Training
+auf echten Daten durchgeführt. Der Loss fällt über die Epochen, der Rollout
+bleibt endlich.
+
+**[K]** Beide Läufe sind mit `FAIL` beendet worden, und zwar an der
+**Loss-Balance**, nicht an der Genauigkeit. Ob das Modell auf echten Daten
+überhaupt besser ist als ein trivialer Vorhersager, ist mit diesem Lauf
+**nicht beantwortet** — die dafür nötige Vergleichszahl wurde nie auf den echten
+Daten gerechnet (§9). Das Modell ist damit weder als „knapp besser als Baseline"
+noch als „schlechter" einzuordnen; es fehlt schlicht der Maßstab.
 
 ---
 
@@ -83,12 +79,13 @@ t_fast points: 14450           # Zeitschritte (dt=0.1s)
 ### Datensätze:
 - **Training**: OP01, OP02, OP03, OP04, OP05
 - **Test (held-out)**: OP07
-- **Validation**: OP06 (gehalten, aber nicht in diesem Lauf genutzt)
+- **Validation**: keine — **[K]** `smallBench.py` kennt keinen Validierungssplit.
+  Einen `--val-op` (Default OP06) gibt es nur in `benchmark_arch.py:119`.
 
 ### Hyperparameter:
 ```yaml
 epochs:          10
-batch_size:      2048
+batch_data:      2048      # [K] dazu batch_phys: 256, batch_bc: 128
 optimizer:       Adam
 grad_clip:       1.0
 learning_rate:   (adaptiv via loss balancing)
@@ -117,12 +114,22 @@ total_steps:     5000
 - Train MAE: **8.87°C**
 - Test MAE: **13.48°C**
 - Konvergenz: ✅ Ja
-- Status: ❌ FAIL (MAE zu hoch)
+- Status: ❌ FAIL — **[K]** *nicht* wegen der MAE. `smallBench.py` prüft
+  `test_mae < 20.0`; 13.48 °C besteht das. Der Physik-Term ist bei `w_phys=0`
+  übersprungen (daher `nan`), also kann nur **`L_bc_bal`** die Balance-Prüfung
+  gerissen haben. Diese Zahl wurde im Lauf nicht protokolliert und ist aus
+  `artifacts/metrics.txt` nachzutragen.
 
 **Beobachtungen:**
 - Epoche 1: Starke Saturation (Rollout-Guard greift), aber Loss bleibt endlich
-- Ab Epoche 2: Saturation-Count **fällt** → Modell erholt sich ✅
-- Epoche 10: Nur noch 342/7279 Steps saturiert bei OP03
+- Ab Epoche 2: Saturation-Count **fällt** → das ist das richtige Vorzeichen
+  (`README_LOKALER_LAUF.md:171`)
+- Epoche 10: noch 342/7279 Steps saturiert bei OP03. **[K]** Das ist **kein** ✅.
+  `train.py:674` schreibt zu genau diesem Zähler: *„the trajectory ran away and
+  was held back — it is not a prediction, and a run that only survives because
+  of this is not trained."* Nichtnull in der letzten Epoche heißt: der Rollout
+  läuft auf einem **Trainings**-OP weiterhin weg und wird nur vom Guard
+  gehalten.
 
 ---
 
@@ -137,12 +144,16 @@ total_steps:     5000
 - Train MAE: **7.65°C** (besser als w_phys=0.0!)
 - Test MAE: **12.02°C** (besser als w_phys=0.0!)
 - Konvergenz: ✅ Ja
-- L_phys_bal: ⚠️ 2.69e-06 (sollte ~O(1) sein für echte Physik-Erfüllung)
-- Status: ❌ FAIL (MAE zu hoch, Physik-Term nicht balanciert)
+- L_phys_bal: ⚠️ 2.69e-06 (Prüfbereich ist `0.01 < L_phys_bal < 100`)
+- Status: ❌ FAIL — **[K]** allein wegen der Loss-Balance. Die MAE-Prüfung
+  (`< 20 °C`) ist mit 12.02 °C **bestanden**.
 
 **Beobachtungen:**
 - Physik-Term **hilft**: -1.22°C Train MAE, -1.46°C Test MAE
-- Aber: L_phys_bal viel zu klein → Physik wird kaum durchgesetzt
+- **[K]** `L_phys_bal` ist eine **Zeitreihe**, keine Konstante: 3.23e-02 →
+  3.52e-08 (Epoche 5) → 2.69e-06 (Epoche 10). Zwischen Epoche 5 und 10 steigt
+  sie um zwei Größenordnungen. Der Einbruch passiert früh und wird teilweise
+  zurückgenommen — das ist Information, die in einer Einzelzahl verlorengeht.
 
 ---
 
@@ -155,8 +166,14 @@ total_steps:     5000
    0.100 | 8.5549e-01 | 2.6899e-06 |      7.65°C |     12.02°C |     FAIL
 ```
 
+**[K]** Der Tabelle fehlt die Spalte **`L_bc_bal`** — genau die Größe, die den
+`w_phys=0.0`-Lauf hat scheitern lassen. `smallBench.py` gibt sie inzwischen mit
+aus; für diesen Lauf ist sie aus `artifacts/metrics.txt` nachzutragen.
+
 **Beste Konfiguration**: w_phys=0.1
-- **Verbesserung**: 10.8% Test MAE vs. rein datengetrieben
+- **Verbesserung**: 10.8% Test MAE gegenüber `w_phys=0.0`
+- **[K]** Das ist ein Vergleich der beiden Läufe untereinander und sagt nichts
+  darüber, ob einer von beiden brauchbar ist. Beide sind `FAIL`.
 
 ---
 
@@ -185,24 +202,77 @@ Für Checkpoints müsste `train.py` mit `--save-checkpoint` laufen.
 
 ### ✅ Was funktioniert:
 1. **Datenpipeline**: CSV → NPZ → Training klappt
-2. **Stabilität**: Keine NaN-Abstürze in Epoche 1 (wie früher)
+2. **Datenvalidierung**: `A = 118.9 / 29.7` und `dTdt_scale = 2.479` decken sich
+   exakt mit `UEBERGABE_2026-08-27.txt` (Z. 29, 121–122). Das ist Punkt 1 von
+   Schritt 2 aus `README_LOKALER_LAUF.md` und ist bestanden.
 3. **Konvergenz**: Loss fällt über Epochen
-4. **Saturation**: Count fällt (Modell lernt sich selbst zu regularisieren)
+4. **Kein Abbruch mehr**: Epoche 1 läuft ohne NaN durch
+
+**[K] Nicht in dieser Liste** (stand vorher hier):
+- *„Stabilität: keine NaN-Abstürze"* — das ist wörtlich der Fall, vor dem
+  `model.py:738` warnt: „a clamp in the tens never binds on a model that is
+  working." Endlich zu bleiben ist Verdienst des Guards, nicht des Modells.
+- *„Saturation: Count fällt (Modell lernt sich selbst zu regularisieren)"* — der
+  fallende Count ist ein gutes Zeichen, aber der Guard regularisiert nicht, er
+  hält einen weglaufenden Rollout fest. Solange der Count > 0 ist, ist die
+  Trajektorie laut `train.py:674` keine Vorhersage.
 
 ### ⚠️ Was noch problematisch ist:
-1. **Test MAE zu hoch**: 12-13°C vs. Baseline 11.96°C (Vorhersager der nichts tut)
-   - Das Modell ist kaum besser als "predict mean temperature"
-2. **Physik-Term zu schwach**: L_phys_bal = 2.69e-06 statt ~O(1)
-   - w_phys=0.1 ist zu klein, oder Balancing-Mechanismus greift falsch
-3. **Generalisierung**: Test MAE > Train MAE (+4.37°C Gap bei w_phys=0.1)
-   - Overfitting? Oder OP07 ist "too different" von Training-OPs?
+
+1. **Die Loss-Balance reißt** — das ist der einzige Grund für beide `FAIL`.
+   Prüfbereich `0.01 < L_*_bal < 100`; erreicht wurden 2.69e-06 (`L_phys_bal`,
+   `w_phys=0.1`) und ein nicht protokollierter `L_bc_bal` (`w_phys=0.0`).
+
+2. **[K] Der Physik-Term kollabiert — er ist nicht „zu schwach gewichtet".**
+   Die frühere Deutung („`w_phys=0.1` ist zu klein") kann nicht stimmen.
+   `train.py:600`:
+
+   ```python
+   L_phys_bal = L_phys / balance.divisor("phys", float(L_phys.detach()))
+   ```
+
+   Der Divisor ist die laufende EMA von `L_phys` selbst
+   (`_LossBalancer.divisor`, `train.py:276-285`). `L_phys_bal` ist also
+   `L_phys / EMA(L_phys)` — ein **selbstnormierter Quotient, in dem `w_phys`
+   nicht vorkommt**. `w_phys` skaliert erst danach den Gradientenbeitrag
+   (`train.py:613`). Ein höheres `w_phys` kann `L_phys_bal` deshalb
+   **prinzipiell nicht** Richtung O(1) bewegen.
+
+   Was 2.69e-06 heißt: `L_phys` ist gegenüber seinem eigenen laufenden Mittel um
+   rund sechs Größenordnungen eingebrochen — ein Physik-Term, der **trivial
+   erfüllt** wird. `README_MODEL_CRITIQUE.md:194-196` führt genau diesen
+   degenerierten Fall als bekanntes Risiko. Mehr `w_phys` verstärkt den Druck,
+   der dorthin führt.
+
+3. **[K] Der Train-Test-Gap ist Unteranpassung, nicht Overfitting.**
+   Der Gap stimmt (12.02 − 7.65 = 4.37 °C), die Deutung nicht: **Train MAE
+   = 7.65 °C ist selbst schlecht.** Ein Modell, das die eigenen Trainingsdaten
+   nicht besser als auf 7,65 °C trifft, ist unterangepasst. Overfitting setzt
+   voraus, dass die Trainingsleistung *gut* ist. Die Unterscheidung ist nicht
+   akademisch — sie führt zu entgegengesetzten Maßnahmen (mehr Regularisierung
+   vs. mehr Kapazität und Budget).
+
+4. **Der Rollout läuft weiterhin weg** — 342 saturierte Schritte auf OP03 in
+   der letzten Epoche, auf einem *Trainings*-OP.
+
+5. **[K] Es gibt keinen gültigen Maßstab für die MAE.** Siehe §9.
 
 ### 🔍 Mögliche Ursachen:
-- **Nur 10 Epochen**: Zu kurz für volle Konvergenz?
-- **w_phys=0.1 zu klein**: Physik-Loss wird wegbalanciert
+- **Nur 10 Epochen**: Zu kurz für volle Konvergenz? Bei Train-MAE 7.65 °C ist
+  Unteranpassung ein realistischer Kandidat.
 - **A=118.9 zu hoch**: Amplifikation macht initiale Fehler riesig
-- **Nur 363 Gitterpunkte**: Reduziertes Grid (Original hatte 6358)
-  - Wahrscheinlich um CPU-Training zu beschleunigen
+- **Residuums-Skalierung**: wenn der Physik-Term kollabiert, ist der Hebel die
+  Normierung des Residuums, nicht sein Gewicht (Punkt 2)
+
+**[K] Gestrichen:**
+- *„`w_phys=0.1` zu klein: Physik-Loss wird wegbalanciert"* — siehe Punkt 2,
+  mechanisch ausgeschlossen.
+- *„Nur 363 Gitterpunkte: reduziertes Grid (Original hatte 6358), wahrscheinlich
+  um CPU-Training zu beschleunigen"* — **die Zahl 6358 kommt im gesamten
+  Repository nur in diesem Bericht vor.** 363 ist die native Sensorzahl,
+  durchgehend so bezeichnet: `README_GPU_SERVER.md` Z. 406 („363 Sensoren"),
+  Z. 724 („einen Absolutfehler pro Sensor, also 363 Werte"), Z. 869. Es gibt
+  kein reduziertes Gitter und nichts zum Hochskalieren.
 
 ---
 
@@ -212,20 +282,71 @@ Für Checkpoints müsste `train.py` mit `--save-checkpoint` laufen.
 - [x] Schritt 0: Daten platziert und verifiziert
 - [x] Schritt 1: Datensonde (data_probe.py) — A-Wert bestätigt
 - [x] Schritt 1: Vortests (selftest, pytest, rollout_divergence)
-- [x] Schritt 2: Erster echter Lauf (smallBench.py)
+- [x] Schritt 2: **ein** `smallBench.py`-Lauf (als `w_phys`-Sweep)
 
-### 📋 TODO (aus README):
-- [ ] **Schritt 2 (Fortsetzung)**: MAE-Zahlen in `README_ERSTER_TEST.md` eintragen
-- [ ] **Schritt 3**: Sweeps ausführen (nur wenn Schritt 2 sauber läuft)
-  - `benchmark_arch.py`: Lag-Sweep (verschiedene A-Werte testen)
-  - `benchmark_wphys_wbc.py`: Physik-Term-Sweep (bringt es was?)
+### 📋 Offen
 
-### 🚀 Empfohlene Next Actions:
-1. **Längeres Training**: 50-100 Epochen statt 10
-2. **Höheres w_phys**: 1.0 oder 10.0 testen, damit Physik durchkommt
-3. **GPU nutzen**: Aktuell auf CPU → sehr langsam (42-98s/Epoche)
-4. **Full Grid**: 6358 statt 363 Punkte (braucht aber definitiv GPU)
-5. **Hyperparameter-Sweep**: Lernrate, Batch-Size, Architecture tunen
+**[K] Schritt 2 ist nicht abgeschlossen.** `README_MODEL_CRITIQUE.md:159-186`
+definiert `smallBench.py` als **A/B mit zwei Läufen** — „**der wichtigste Lauf
+im ganzen Dokument**":
+
+```bash
+python3 PINNmodulusTwo/smallBench.py                       # neu
+python3 PINNmodulusTwo/smallBench.py \                     # alter Stand
+    --inner-steps 1 --no-residual-output --learn-gains --loss-balance legacy
+```
+
+Verglichen wird die Test-MAE beider. Gelaufen ist stattdessen ein
+`w_phys`-Sweep `[0.0, 0.1]` — ein anderer Vergleich, der die Frage von Schritt A
+nicht beantwortet: ob die Umbauten (Trainingsbudget, Residual-Output,
+Physik-Residuum) überhaupt etwas gebracht haben. Solange das offen ist, ist die
+Entscheidungstabelle in `README_MODEL_CRITIQUE.md:180-186` nicht anwendbar.
+
+- [ ] Triviale Vorhersager auf dem **echten** OP07 rechnen (§9) — `smallBench.py`
+      gibt sie inzwischen automatisch mit aus
+- [ ] `L_bc_bal` aus `artifacts/metrics.txt` nachtragen (§4)
+- [ ] Schritt A wirklich fahren: Baseline-Lauf gegen Default
+- [ ] Drift-Test auf `artifacts/pred_OP07.npz`
+      (`README_MODEL_CRITIQUE.md:206-223`)
+- [ ] MAE-Zahlen in `README_ERSTER_TEST.md` Kapitel 6 eintragen und die dortigen
+      synthetischen Zahlen ersetzen
+- [ ] **Schritt 3 (Sweeps)** — gesperrt. `README_LOKALER_LAUF.md:193`: „Erst
+      wenn Schritt 2 sauber durchläuft." Schritt 2 endete zweimal mit `FAIL`.
+
+### 🚀 Empfohlene Next Actions
+
+**[K] In dieser Reihenfolge.** Punkt 1 ist billig und macht alle anderen Zahlen
+erst lesbar.
+
+1. **Triviale Vorhersager auf dem echten OP07** — Persistenz `T(t) = T(0)` und
+   konstanter Mittelwert der Trainingslabels. Kein Training, Minuten. Ohne das
+   bedeutet „12.02 °C" nichts (§9).
+2. **`L_bc_bal` nachtragen** — die wahrscheinliche Fehlerursache des
+   `w_phys=0.0`-Laufs.
+3. **Schritt A fahren** (Baseline-Lauf, siehe oben).
+4. **Drift-Test** auf `pred_OP07.npz`. Der entscheidet, ob ein Sweep überhaupt
+   etwas misst — `README_MODEL_CRITIQUE.md:225`: „Ein Gewichte-Sweep bei starker
+   Drift misst hauptsächlich, welches Gewicht die Drift zufällig am wenigsten
+   verstärkt — das ist die teure Art, nichts zu lernen."
+5. **Dann `benchmark_balance.py --part 1`.** `smallBench.py` gibt genau das
+   selbst als nächsten Schritt aus, mit Begründung im Code:
+
+   > `# NOT the 10x10 grid: that is 100 trainings (~6-8 days) and it would`
+   > `# sweep weights before anything has established what a weight means`
+   > `# here. The balancing benchmark is ~4 h and settles that first.`
+
+   Das gescheiterte Kriterium **ist** die Balance — das ist das Benchmark dafür.
+6. **Längeres Training + GPU** (50–100 Epochen; CPU macht 42–98 s/Epoche). Bei
+   Train-MAE 7.65 °C ist Unteranpassung plausibel.
+
+**[K] Gestrichen:**
+- *„Höheres `w_phys`: 1.0 oder 10.0, damit Physik durchkommt"* — kann
+  `L_phys_bal` prinzipiell nicht bewegen (§6 Punkt 2) und verstärkt die
+  Degeneration.
+- *„`benchmark_arch.py` / `benchmark_wphys_wbc.py` als nächster Schritt"* —
+  genau das, wovon der Code oben abrät, und durch das Gate in
+  `README_LOKALER_LAUF.md:193` gesperrt.
+- *„Full Grid: 6358 statt 363 Punkte"* — die 6358 existieren nicht (§6).
 
 ---
 
@@ -268,16 +389,68 @@ Nutzt Default-Werte:
 
 ## 9. Vergleich mit Baseline
 
-### Baseline (aus README_ERSTER_TEST.md):
-- **Naiver Predictor** (predict mean): MAE = 11.96°C
-- **Grund**: T_sigma = 8.66°C, aber thermische Range ist breiter
+> **[K] Dieser Abschnitt war in seiner ursprünglichen Form vollständig ungültig.**
+> Drei voneinander unabhängige Fehler, jeder für sich ausreichend.
 
-### Unser Modell:
-- **w_phys=0.0**: Test MAE = 13.48°C → **schlechter als Baseline!** ❌
-- **w_phys=0.1**: Test MAE = 12.02°C → **leicht besser als Baseline** ✅ (+0.5%)
+### Was ursprünglich hier stand
 
-**Interpretation**: 
-Das Modell hat minimal gelernt, aber noch weit von guter Generalisierung entfernt. Es nutzt die Physik kaum (L_phys_bal viel zu klein) und ist stark overfitted auf die Trainingsdaten.
+- „Naiver Predictor (predict mean): MAE = 11.96 °C"
+- „`w_phys=0.1`: 12.02 °C → **leicht besser als Baseline** ✅ (+0.5 %)"
+- „stark overfitted auf die Trainingsdaten"
+
+### Fehler 1 — falsches Etikett
+
+`README_ERSTER_TEST.md:387-389` führt **zwei** triviale Vorhersager:
+
+| Vorhersager | MAE test |
+|---|---|
+| „Temperatur ändert sich nie", `T(t) = T(0)` | **11.96 °C** |
+| „konstanter Mittelwert der Trainingslabels" | **6.60 °C** |
+
+11.96 ist die **Persistenz**, nicht der Mittelwert. Der Mittelwert-Vorhersager
+liegt bei 6.60 °C. Die Doku verlangt ausdrücklich den Vergleich gegen „das
+bessere der beiden trivialen Vorhersager" — also gegen 6.60, nicht 11.96.
+
+(Auch `T_sigma = 8.66 °C` ist unbelegt: die Zahl kommt sonst nirgends im Repo
+vor, `README_ERSTER_TEST.md:699` rechnet mit `T_sigma = 5 K`.)
+
+### Fehler 2 — Vorzeichen
+
+Selbst gegen die falsch gewählten 11.96 °C gilt **12.02 > 11.96**. Das ist
+0,5 % **schlechter**, nicht besser. Das ✅ war eine Verwechslung der
+Vergleichsrichtung.
+
+### Fehler 3 — der Vergleich ist überhaupt nicht zulässig
+
+`README_ERSTER_TEST.md` setzt über Kapitel 6 einen Kasten:
+
+> **Alle Zahlen in diesem Kapitel stammen von einem synthetischen Bundle** […]
+> Sie sind **keine** Vorhersage der MAE auf den echten OPs.
+
+Kapitel 9.1 wiederholt es: „Die *Richtung* ist robust […]; die *Beträge* sind es
+nicht." **Die Baselines 11.96 und 6.60 sind selbst synthetisch.** Eine auf
+echten Daten gemessene MAE gegen sie zu halten, ist genau die Übertragung, die
+die Doku verbietet.
+
+`README_LOKALER_LAUF.md:183-188` warnt zusätzlich vor der naheliegenden
+Fehllesung: „Die 11.96 °C aus den alten Dokumenten sind eine **Baseline** […],
+keine frühere Messung. Es gibt keine Verbesserung ‚von 11 auf 0.5'."
+
+### Was tatsächlich gilt
+
+**Es gibt für diesen Lauf keinen gültigen Maßstab.** Ob das Modell auf echten
+Daten einen trivialen Vorhersager schlägt, ist unbekannt — weil die trivialen
+Vorhersager auf den echten OPs nie gerechnet wurden. Weder das ✅ noch das ❌
+oben hatte eine Grundlage.
+
+Das ist ab jetzt behoben: `smallBench.py` rechnet beide trivialen Vorhersager
+auf demselben Test-OP mit (`_trivial_baselines`) und gibt sie unter der Test-MAE
+sowie in `artifacts/smallBench_results.txt` aus. Ein Lauf liefert die
+Vergleichszahl damit gratis mit — dieselben Daten, dieselbe Metrik, kein
+Transfer aus einem synthetischen Bundle.
+
+Für die Läufe dieses Berichts ist die Zahl nachzureichen (Nachrechnen genügt,
+kein Training nötig).
 
 ---
 
@@ -303,15 +476,27 @@ Das Modell hat minimal gelernt, aber noch weit von guter Generalisierung entfern
 
 ## Fazit
 
-**Status**: Erste vollständige Trainingsläufe auf echten Daten erfolgreich ✅
+**Status**: Die Datenpipeline steht und ist verifiziert — `A = 118.9 / 29.7`
+gegen die Übergabe bestätigt. Zwei Trainingsläufe auf echten Daten sind
+durchgelaufen, ohne Abbruch. Das ist der Fortschritt des Tages.
 
-**Aber**: Modell noch nicht produktionsreif — MAE kaum besser als Baseline, Physik-Term wird nicht durchgesetzt, starkes Overfitting.
+**[K] Aber**: Beide Läufe sind `FAIL`, und zwar an der **Loss-Balance** — nicht
+an der Genauigkeit. Der Physik-Term **kollabiert** (er ist nicht zu schwach
+gewichtet), der Train-Test-Gap ist **Unteranpassung** (nicht Overfitting), und
+der Rollout läuft auf einem Trainings-OP weiterhin weg. Ob das Modell überhaupt
+besser ist als „nichts tun", ist **unbekannt** — der Maßstab fehlt (§9).
 
-**Nächster Schritt**: Entweder längeres Training + höheres w_phys auf GPU, oder README_ERSTER_TEST.md aktualisieren und zu Schritt 3 (Sweeps) übergehen.
+**Nächster Schritt**: die trivialen Vorhersager auf dem echten OP07 rechnen
+(Minuten, kein Training), dann Schritt A als echtes A/B fahren, dann
+`benchmark_balance.py --part 1`. **Nicht** die Sweeps und **nicht** `w_phys`
+hochdrehen — Begründung in §6 und §7.
 
 ---
 
 **Erstellt**: 2026-08-28  
+**Korrigiert**: 2026-08-28 (readme update 28.8) — Messwerte unverändert,
+Bewertungen korrigiert, siehe **[K]**-Markierungen  
 **Training Device**: CPU (WSL2)  
 **Datensatz**: 17 OPs aus CSV, 5 Training + 1 Test  
-**Bester Run**: w_phys=0.1, Test MAE=12.02°C
+**Bester Run**: w_phys=0.1, Test MAE = 12.02 °C — beide Läufe `FAIL`
+(Loss-Balance); ohne Maßstab aus §9 ist die Zahl nicht einzuordnen
