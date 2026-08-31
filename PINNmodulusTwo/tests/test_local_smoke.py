@@ -468,3 +468,42 @@ def test_env_check_imports_nothing_third_party():
                 assert a.name in stdlib_only, f"env_check imports {a.name}"
         elif isinstance(node, ast.ImportFrom):
             assert node.module in stdlib_only, f"env_check imports {node.module}"
+
+
+def test_history_csv_is_written_every_epoch(synthetic_cache, monkeypatch, tmp_path):
+    """Hours of training must not depend on the process reaching the end.
+
+    Before this, metrics.txt and the checkpoint were both written after the
+    training loop returned, so a 60-epoch run killed at epoch 55 -- a closed
+    terminal, a full disk, a stopped session -- left nothing behind at all.
+    """
+    monkeypatch.setattr(train_mod, "ART_DIR", tmp_path)
+
+    args = _tiny_args(synthetic_cache)
+    args.epochs = 3
+    train_mod.fit(args)
+
+    csv = tmp_path / "history.csv"
+    assert csv.exists(), "history.csv was not written during training"
+    rows = csv.read_text().strip().split("\n")
+    assert rows[0].split(",") == list(train_mod.HISTORY_KEYS)
+    assert len(rows) == 1 + 3, "one header plus one row per epoch"
+
+
+def test_a_checkpoint_says_whether_the_run_finished(synthetic_cache, tmp_path):
+    """A mid-run checkpoint must not be mistaken for a completed one."""
+    import torch
+
+    args = _tiny_args(synthetic_cache)
+    args.epochs = 1
+    model, bundle, _packed, dtn, hist = train_mod.fit(args)
+
+    path = tmp_path / "model.pt"
+    train_mod.save_checkpoint(model, bundle, args, dtn, hist, path)
+    assert torch.load(path, weights_only=False)["run"]["complete"] is True
+
+    # a run that stopped early carries the same key, saying so
+    hist_short = dict(hist)
+    hist_short["epoch"] = []
+    train_mod.save_checkpoint(model, bundle, args, dtn, hist_short, path)
+    assert torch.load(path, weights_only=False)["run"]["complete"] is False

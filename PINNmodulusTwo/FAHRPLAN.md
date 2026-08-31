@@ -22,6 +22,22 @@ eine Datei liest, dann diese.
 
 ---
 
+# Offene Punkte für die nächste Session
+
+Zuerst lesen. Was hier steht, ist das, was beim Abbruch der letzten Sitzung
+offen war — nicht neu abzuleiten.
+
+| # | offen | wer |
+|---|---|---|
+| **O1** | **Es liegen Schritt-6-Ergebnisse bis Epoche 30 vor, die noch niemand ausgewertet hat.** `artifacts/metrics.txt` und (neu) `artifacts/history.csv` einschicken → Stand-Tabelle füllen | du schickst, ich werte |
+| **O2** | Schritt 5b ist nie gelaufen. Falls O1 zeigt, dass `[SATURATED]` bis Epoche 30 verschwunden ist, ist 5b **hinfällig** — dann direkt Schritt 6 auswerten | ich entscheide aus O1 |
+| **O3** | §9a.1 OP15: `cell_current` fehlt im Bündel. `python3 data.py` erneut laufen lassen — der Bericht sagt seit 31.08., welche der zwei Ursachen es ist | du, 2 min |
+| **O4** | §9a.2 OP12 (**Training**): Profil endet bei 1440 s, Trajektorie bis 1604 s | Rückfrage an die Simulationsseite |
+| **O5** | **Tote Eingangskanäle.** `soc_start` ist über alle OPs konstant 10 % (`DEAD -> forced to 0`), und die Rate-Kanäle von `c_rate` und `fluid_mass_flow` sind im Training tot — werden aber auf OP15/OP16/OP19 lebendig. Das Modell soll dort einen Kanal deuten, den es nie gesehen hat | zu entscheiden, siehe §10 |
+| **O6** | Nichts an **Gewichten** ist auf Basis der Messungen geändert worden — bewusst, siehe §10 | offen bis 5b/6 |
+
+---
+
 # JETZT: was du als Nächstes machst
 
 Sechs Schritte, chronologisch. Schritt 1–5 brauchen **kein GPU** und dauern
@@ -757,6 +773,112 @@ auffällig schlechter ist als die anderen Trainings-OPs, steht hier, warum.
 
 ---
 
+## 10. „Wird daraus am Ende ein Benchmark, oder füttere ich dich nur?"
+
+Berechtigte Frage. Ehrliche Antwort: **im Moment ist es das Zweite, und das ist
+nur für die ersten Schritte richtig.**
+
+### Warum es gerade so läuft
+
+Die ersten fünf Schritte beantworten Fragen, die **einmalig** sind und für die
+sich keine Maschinerie lohnt: läuft der Code, stimmen die Bündel, wie groß ist
+`A`, läuft der Rollout weg. Jede davon wird genau einmal gestellt. Ein
+Sweep-Framework dafür zu bauen wäre wieder der Fehler, für den die acht
+Benchmark-Skripte gelöscht wurden.
+
+### Woran es kippt — und das ist ein hartes Kriterium
+
+**Sobald zwei Konfigurationen verglichen werden sollen**, hört Hand-Auswerten
+auf zu funktionieren, und zwar aus einem Grund, der nichts mit Bequemlichkeit zu
+tun hat: eine MAE-Differenz zwischen zwei Läufen ist **nicht lesbar**, solange
+die Streuung über Seeds daneben fehlt. Zwei Läufe mit 8.7 und 8.1 sind kein
+Ergebnis, wenn derselbe Lauf mit einem anderen Seed zwischen 7.9 und 9.2
+schwankt.
+
+Das ist der Moment, an dem gebaut wird — nicht früher, nicht später.
+
+### Was gebaut wird, konkret
+
+Drei Dateien, in dieser Reihenfolge, jede einzeln nutzbar:
+
+**1. `sweep.py` — die Seed-Schleife.** ~80 Zeilen.
+
+```
+python3 sweep.py --seeds 0 1 2 --epochs 20
+  -> artifacts/sweep.csv: eine Zeile je (Konfiguration, Seed)
+  -> stdout: Mittelwert und Std je Konfiguration über die val-OPs
+```
+
+Ruft `train.fit()` in einer Schleife, sonst nichts. Kein Plot, kein Resume, kein
+Checkpoint-Merge. **Das allein hätte allen bisherigen Ergebnissen dieses Projekts
+gefehlt.**
+
+**2. Eine Achse.** Eine Liste von `fit()`-Overrides, eine CSV-Zeile je Punkt.
+Erste Achse ist die Loss-Balance, nicht die Gewichte — solange der Physik-Term
+kollabiert oder explodiert, misst ein Gewichts-Sweep das und nicht die Physik.
+
+**3. Plots und Resume.** Zuletzt, und nur für die Achse, die wirklich Stunden
+läuft.
+
+### Die Bewertungsregeln stehen schon fest
+
+Die müssen nicht erst gefunden werden — sie stammen aus dem gelöschten Code und
+sind das Einzige daraus, was übernommen wird:
+
+* Auswahl auf dem **Mittel über `--val-ops`**, nie über einen OP. Konstant-genau
+  bleiben und einem bewegten Treiber folgen laufen gegeneinander; ein OP misst
+  nur eines davon. Jede Einzel-MAE mitschleppen.
+* **Nach Tier getrennt berichten.** Eine gemittelte Test-MAE über OP13/OP15/OP16
+  mischt C-Raten-Extrapolation, ungesehenen Profiltyp und dreifachen Volumenstrom.
+* **Kriterium ist MAE, nie `L_data`.** Die beiden ranken nachweislich verschieden.
+* **Seed-Rausch-Urteil.** Spanne zwischen Konfigurationen < Spanne zwischen Seeds
+  → keine Rangfolge.
+
+### Was du dafür noch liefern musst: **einmal Schritt 5b oder 6 auswerten.**
+
+Danach ist die Reihenfolge festgelegt und der Sweep wird gebaut. Das Füttern
+endet an dieser Stelle, nicht irgendwann.
+
+---
+
+## 10a. Was aus den Messungen NICHT im Code gelandet ist — und warum
+
+Ehrliche Bilanz zum 31.08. **An Gewichten, Vorverarbeitungs-Konstanten oder der
+Loss-Balance ist nichts auf Basis der Messungen geändert worden.**
+
+Geändert wurde nur, was unabhängig von den Zahlen falsch war: der
+`residual_output`-Default, vier tote `config.yaml`-Schlüssel, `bc_scale` und
+`phys_scale` (beim Merge regressiert), der `tier_of`-Absturz, dazu Diagnostik
+(`env_check`, die `A`-Zeile, die MISMATCH-Aufschlüsselung) und Persistenz
+(`history.csv`, periodischer Checkpoint).
+
+**Warum nicht mehr:** die einzige Messung, die es gibt, kommt aus einem Lauf mit
+CFL-Verletzung um Faktor 16.6, degeneriertem Anker, zu 99 % saturiertem Rollout
+und einer Loss-Balance, die bei 2 Epochen und 10-Epochen-Horizont nie gearbeitet
+hat (§9.3). Ein Gewicht auf dieser Grundlage zu setzen wäre geraten und würde
+danach wie gemessen aussehen — genau die Sorte Zahl, wegen der die alten
+Benchmarks gelöscht wurden.
+
+**Drei Dinge, die die Daten aber schon nahelegen**, festgehalten damit sie nicht
+verlorengehen:
+
+1. **`Qsrc_scale` ist ein einziger gepoolter Divisor über OPs, deren Qsrc-RMS um
+   Faktor 2.3 auseinanderliegt** (OP05 0.0158 … OP11 0.0370). `w_phys` bedeutet
+   damit auf OP05 etwas anderes als auf OP11. Ein per-OP-Divisor wäre denkbar —
+   ändert aber die Gleichung pro OP und muss gemessen, nicht angenommen werden.
+2. **Tote Kanäle (O5).** `soc_start` ist über alle sechzehn OPs konstant 10 %,
+   trägt also null Information und kostet eine Eingangsdimension. Schlimmer: die
+   Rate-Kanäle von `c_rate` und `fluid_mass_flow` sind im Training tot und auf
+   OP15/OP16/OP19 lebendig — das Modell soll dort einen Kanal deuten, für den es
+   nie ein Beispiel gesehen hat. Das ist **kein Hyperparameter, sondern eine
+   Grenze des Trainings-Envelopes**, und der Coverage-Report sagt es bei jedem
+   Lauf.
+3. **`--batch-bc 128` gegen 121 BC-Punkte.** Es gibt nur 121 Punkte auf `x=0`,
+   der BC-Gradient ist also rauschiger als das Gewicht suggeriert. Kleine Sache,
+   aber sie gehört in den ersten Balance-Sweep.
+
+---
+
 ## 7. Abbruchkriterien
 
 Ehrlichkeitsklausel — wann der Plan selbst falsch ist:
@@ -773,7 +895,11 @@ Ehrlichkeitsklausel — wann der Plan selbst falsch ist:
 
 ---
 
-**Zuletzt fortgeschrieben:** 2026-08-31, nach Schritt 5. Schritt 1–4 gruen,
+**Zuletzt fortgeschrieben:** 2026-08-31, Sitzungsende. Offene Punkte stehen ganz
+oben; §10 beantwortet, wann aus diesem Fahrplan ein Benchmark wird, und §10a,
+was aus den Messungen bewusst NICHT in den Code gewandert ist.
+
+**Stand nach Schritt 5.** Schritt 1–4 gruen,
 Schritt 5 gelaufen aber **nicht aussagekraeftig** — und das hat den Plan
 geaendert: es gibt jetzt einen **Schritt 5b** vor Schritt 6.
 

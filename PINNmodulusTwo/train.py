@@ -301,6 +301,12 @@ def parse_args() -> argparse.Namespace:
                         "empty string disables. The file carries everything "
                         "RecurrentField and the de-normalisation need, so a run "
                         "is reloadable without config.yaml")
+    p.add_argument("--checkpoint-every", type=int,
+                   default=d.get("checkpoint_every", 10),
+                   help="write the checkpoint every N epochs DURING training, "
+                        "not only at the end. A long run that dies at epoch 55 "
+                        "otherwise leaves nothing behind; 0 disables the "
+                        "periodic write (the final one still happens)")
     p.add_argument("--val-ops", nargs="*",
                    default=d.get("val_ops", list(DEFAULT_VAL_OPS)),
                    help="held-out OPs to rank configurations on (not trained on)")
@@ -590,6 +596,12 @@ def fit(args):
     # that cannot be parallelised); a minibatch step is cheap, so this is where the
     # update count comes from.
     inner_steps = max(1, int(getattr(args, "inner_steps", 100)))
+
+    ckpt_name = str(getattr(args, "save_checkpoint", "") or "")
+    ckpt_every = int(getattr(args, "checkpoint_every", 10)) if ckpt_name else 0
+    if ckpt_every > 0:
+        print(f"writing artifacts/history.csv every epoch and {ckpt_name} "
+              f"every {ckpt_every} epochs", flush=True)
 
     rollout_clamp = float(getattr(args, "rollout_clamp", 50.0) or 0.0)
     if rollout_clamp > 0.0:
@@ -996,6 +1008,14 @@ def fit(args):
         # would misalign the CSV and the plots by a row without any error.
         assert all(len(history[k]) == epoch for k in HISTORY_KEYS), \
             "a HISTORY_KEYS series was not appended this epoch"
+
+        # Persist NOW, not when the loop finishes. Hours of training must not
+        # depend on the process surviving to the end.
+        write_history_csv(history, ART_DIR / "history.csv")
+        if ckpt_every > 0 and (epoch % ckpt_every == 0 or epoch == args.epochs):
+            save_checkpoint(model, bundle, args, dtn, history,
+                            ART_DIR / ckpt_name)
+
         if ep_data < best_train_loss:
             best_train_loss = ep_data
             epochs_without_improvement = 0
@@ -1052,6 +1072,25 @@ def fit(args):
             break
 
     return model, bundle, ops, dtn, history
+
+
+def write_history_csv(history: dict, path: Path) -> None:
+    """Dump the per-epoch history to CSV, overwriting.
+
+    Called after EVERY epoch, not at the end. A 60-epoch run is hours; before
+    this, one killed at epoch 55 -- a full laptop, a closed terminal, a stopped
+    session -- left nothing at all behind, because both metrics.txt and the
+    checkpoint are written after the loop returns. The file is at most a few
+    dozen rows, so rewriting it whole every epoch costs nothing and needs no
+    append bookkeeping to stay consistent after a crash.
+    """
+    cols = [k for k in HISTORY_KEYS]
+    rows = [",".join(cols)]
+    n = len(history["epoch"])
+    for i in range(n):
+        rows.append(",".join(f"{history[c][i]!r}" if not isinstance(history[c][i], float)
+                             else f"{history[c][i]:.10g}" for c in cols))
+    path.write_text("\n".join(rows) + "\n")
 
 
 def save_checkpoint(model, bundle, args, dtn, history, path: Path) -> None:
@@ -1119,6 +1158,8 @@ def save_checkpoint(model, bundle, args, dtn, history, path: Path) -> None:
                 "holdout_tail": bool(getattr(args, "holdout_tail", False)),
                 "epochs": int(args.epochs),
                 "epochs_run": len(history["epoch"]),
+                "complete": len(history["epoch"]) >= int(args.epochs)
+                            and not history.get("aborted", False),
                 "aborted": bool(history.get("aborted", False)),
                 "subsample": int(args.subsample),
                 "seed": int(args.seed),

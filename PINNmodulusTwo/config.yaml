@@ -182,6 +182,10 @@ learn_gains: false
 gain_lr_mult: 25.0         # only applies when learn_gains: true
 grad_clip: 1.0             # 0 disables clipping
 early_stopping_patience: 0 # 0 disables early stopping
+# Write the checkpoint every N epochs DURING training, not only at the end. A
+# 60-epoch run is hours; before this a run killed at epoch 55 left nothing
+# behind at all. artifacts/history.csv is written every epoch regardless.
+checkpoint_every: 10
 seed: 0
 # Reshuffle the OP order every epoch. With a dozen heterogeneous OPs and one
 # frozen rollout per OP, a fixed order lets the same OP always take the last
