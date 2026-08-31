@@ -44,14 +44,22 @@ ops:      [OP01, OP02, OP03, OP04, OP05, OP07, OP08, OP10, OP11, OP12, OP14]
 val_ops:  [OP06, OP09]        # what a tuning decision may look at
 test_ops: [OP13, OP15, OP16]  # report only, read once, never selected on
 
-# OP17-OP19 are the mini-module MEASUREMENT comparison, not a held-out
-# simulation: measured data, partly discharge where OP01-OP16 are all charge,
-# drivers read from test data rather than the plan sheet, and OP19 is a
-# synthetic drive cycle. Of the three only OP19 exists in this pipeline
-# (legacy/.../op_matrix.yaml has no OP17/OP18 at all). Empty by default because
-# the bundle is optional; set to [OP19] once OP19.npz is on the machine, and
-# read the result as "does a model trained on StarCCM+ agree with a real
-# cell?", never as a held-out simulation number.
+# The mini-module MEASUREMENT comparison ("Abgleich mit Minimodul-Test" on the
+# plan sheet). Rolled out and reported, never trained on, never selected on.
+#
+#   OP17  DCH, CC 2C          -- a DISCHARGE. OP01-OP16 are all charge.
+#   OP18  Fast Charge Lotus   -- charge, V_max 4.3 V
+#   OP19  Fahrzyklus TDD.3    -- WLTP (synthetic), mixed
+#
+# **OP19 exists** and has a row in op_matrix.yaml, so generate_cache.py can
+# build it; OP17 and OP18 have neither, so they cannot be built today. Set this
+# to [OP19] once OP19.npz is on the machine.
+#
+# Read the number as "does a model fitted to StarCCM+ agree with a real cell?",
+# never as a held-out simulation result: it mixes model error, measurement error
+# and the sim-to-test gap with nothing separating them. And expect OP19 to lose
+# to the trivial predictors at first -- it is a drive cycle, a regime the model
+# has never seen.
 measurement_ops: []
 
 subsample_time: 2          # dt = 0.1s * subsample -> 0.2s (CFL limit ~0.241s)

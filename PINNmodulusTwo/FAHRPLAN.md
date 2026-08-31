@@ -5,6 +5,177 @@ eine Datei liest, dann diese.
 
 ---
 
+# JETZT: was du als Nächstes machst
+
+Sechs Schritte, chronologisch. Schritt 1–5 brauchen **kein GPU** und dauern
+zusammen unter einer Stunde. Erst Schritt 6 kostet etwas.
+
+**Nach jedem Schritt steht, was dich stoppen muss.** Wenn ein Stopp-Kriterium
+zutrifft: nicht weitermachen, sondern die genannte Datei schicken.
+
+Alles läuft aus dem Repo-Wurzelverzeichnis:
+
+```bash
+cd /mnt/c/Users/M0245635/batterysurrogatemodell
+source modulus_env/bin/activate
+```
+
+---
+
+### Schritt 1 — Code holen (1 min)
+
+```bash
+git fetch origin
+git checkout claude/remove-benchmarks-optimize-7d1q7k
+git pull
+```
+
+> Der Branch von PR #20. `PINNmodulusTwoExtProfiles/` verschwindet dabei — das
+> ist gewollt, der Ordner ist in `PINNmodulusTwo/` aufgegangen. Falls dort noch
+> ein `data_cache/` liegt: **stehen lassen**, `data.py` sucht ihn weiterhin.
+
+**Stopp wenn:** `git status` nach dem Pull nicht sauber ist.
+
+---
+
+### Schritt 2 — Läuft der Code überhaupt? (2 min, keine Daten nötig)
+
+```bash
+python3 PINNmodulusTwo/selftest.py
+python3 -m pytest PINNmodulusTwo/tests -q
+python3 PINNmodulusTwo/op_registry.py
+```
+
+**Erwartung:** `all checks passed`, `110 passed`, und eine Tabelle mit
+11 train / 2 val / 3 test OPs ohne Warnung darunter.
+
+**Stopp wenn:** irgendetwas davon rot ist. → Ausgabe schicken.
+
+---
+
+### Schritt 3 — Cache bauen, alle sechzehn (10–30 min)
+
+Der Cache muss neu, weil bisher nur OP01–OP07 gebraucht wurden:
+
+```bash
+python3 PINNmodulusTwo/generate_cache.py OP01 OP02 OP03 OP04 OP05 OP06 OP07 \
+        OP08 OP09 OP10 OP11 OP12 OP13 OP14 OP15 OP16 2>&1 | tee 03_cache.txt
+```
+
+Wenn `OP19` als Rohexport vorliegt, gleich mit — er wird später gebraucht,
+gehört aber **nicht** ins Training:
+
+```bash
+python3 PINNmodulusTwo/generate_cache.py OP19 2>&1 | tee -a 03_cache.txt
+```
+
+**Stopp wenn:** ein OP nicht baut. → `03_cache.txt` schicken.
+
+---
+
+### Schritt 4 — Stimmen die Daten? (2 min) ← **das erste echte Tor**
+
+```bash
+python3 PINNmodulusTwo/data.py 2>&1 | tee 04_daten.txt
+```
+
+Drei Zeilen zählen, und zwar in dieser Reihenfolge:
+
+| worauf schauen | gut | schlecht |
+|---|---|---|
+| `profile_report` | keine Zeile mit `MISMATCH` | jede `MISMATCH`-Zeile. Das Plansheet ist eine Abschrift — **glaub den Bündeln, nicht der Tabelle** |
+| `bc_scale=… (from N x-neighbour pairs)` | `N > 0` | `[FALLBACK 1/L_ref]`. Dann ist `w_bc` bedeutungslos |
+| `A = 1/(lag_n * rate_scale) per lag: …` | **notieren, egal welcher Wert** | — |
+
+Zu `A`: das alte Projekt maß 119/30 auf OP01–OP05. Über OP01–OP16 gepoolt wird
+`T_sigma` breiter, `dTdt_scale` kleiner und `A` damit **größer**. Wie viel
+größer, weiß niemand — das ist die Zahl, die ich als Nächstes brauche.
+
+**Stopp wenn:** `MISMATCH` oder `FALLBACK`. → `04_daten.txt` schicken.
+
+---
+
+### Schritt 5 — Die Latte (5–10 min, CPU reicht) ← **das entscheidende Tor**
+
+```bash
+python3 PINNmodulusTwo/train.py --epochs 2 --subsample 40 --device cpu \
+        2>&1 | tee 05_latte.txt
+```
+
+Die MAE des Modells ist hier **egal** — zwei Epochen lernen nichts. Es geht um
+die Zeile unter jedem OP:
+
+```
+  OP06 [T1-interp  ] MAE=?? C  ...
+     baseline: beats|LOSES TO the trivial predictors
+               (persistence=?? C, train-mean=?? C)
+```
+
+`persistence` = „das Feld ändert sich nie". `train-mean` = konstanter
+Mittelwert. **Das ist die Zahl, auf die dieses Projekt seit Monaten wartet:**
+schlägt das Modell „nichts tun"?
+
+Nach zwei Epochen darf da noch `LOSES TO` stehen. Wichtig ist, dass die Zahlen
+überhaupt da sind und der Lauf durchläuft.
+
+**Stopp wenn:** `[ABORT]` — dann ist `A` zu groß, und Schritt 6 wäre
+verschwendete Zeit. → `05_latte.txt` schicken, ich sage dir den Wert für
+`--max-rate-amp`.
+
+---
+
+### Schritt 6 — Der erste ernsthafte Lauf (Stunden, jetzt GPU)
+
+Erst wenn 4 und 5 grün sind.
+
+```bash
+python3 PINNmodulusTwo/train.py --epochs 60 2>&1 | tee 06_lauf.txt
+```
+
+`--device` fragt jetzt nach und listet auf, was die Maschine hat:
+
+```
+Which device should this run use?
+  [1] cpu      CPU  (32 threads visible)
+  [2] cuda:0   NVIDIA …  24.0 GiB   <- default
+Choice [1-2, Enter = cuda:0]:
+```
+
+Über `nohup` oder ohne Terminal fragt er nicht, sondern nimmt `auto` und sagt
+das. Dauerhaft festlegen: `device: cuda` in `config.yaml`.
+
+Vier Signale im Log, in dieser Rangfolge:
+
+| Signal | heißt | Reaktion |
+|---|---|---|
+| `[ABORT]` | Loss nicht-endlich | zurück zu Schritt 5 |
+| `[SATURATED]` in der **letzten** Epoche | Rollout weggelaufen und festgehalten — **keine Vorhersage** | mehr Epochen → `lr` runter → längere `--rate-lags` |
+| `[FLAT]` | Feld konstant; ein fallendes `L_phys` ist dann die triviale Lösung, nicht Physik | `--w-phys` / `--w-bc` senken |
+| `LOSES TO` auf OP06/OP09 | schlechter als „nichts tun" | **das** ist das Problem, nicht die Gewichte |
+
+---
+
+## Was du mir danach schickst
+
+Vier Dateien, alle klein:
+
+```
+03_cache.txt      (nur falls Schritt 3 gehakt hat)
+04_daten.txt      <- am wichtigsten: MISMATCH, bc_scale, A
+05_latte.txt      <- die baseline-Zeilen
+06_lauf.txt       + PINNmodulusTwo/artifacts/metrics.txt
+```
+
+Wenn du früher stoppen musst: die Datei des Schrittes, an dem es hakt, reicht.
+Sag dazu, **bei welchem Schritt** du bist — dann weiß ich, wo wir stehen, ohne
+zu raten.
+
+Danach entscheidet sich, was zuerst gebaut wird: die Seed-Schleife (§3 Phase 4),
+eine Achse, oder — falls `LOSES TO` bleibt — etwas ganz anderes als ein
+Benchmark.
+
+---
+
 ## 0. Was sich am 31.08. geändert hat
 
 Zwei Dinge, beide Vereinfachungen.
@@ -51,22 +222,40 @@ steht in `op_registry.py` und ist dort begründet:
 | `--val-ops` | OP06, OP09 | konstant + Profil, je einer. Darauf darf getunt werden |
 | `--test-ops` | OP13, OP15, OP16 | Extrapolations-Tier. Einmal lesen, nie darauf auswählen |
 
-**OP17–OP19 sind kein Teil davon und können es nicht sein.** Sie sind der
-Minimodul-**Messvergleich**: gemessene Daten statt Simulation, teils Entladung
-wo OP01–OP16 durchweg Ladung sind, Treiber aus Testdaten statt aus dem
-Plansheet, und OP19 ist ein synthetischer Fahrzyklus. Dazu kommt:
+**OP17–OP19 sind kein Teil davon.** Sie stehen im Plansheet unter einer eigenen
+Überschrift — „Abgleich mit Minimodul-Test" — und vergleichen gegen **gemessene**
+Minimodul-Daten statt gegen die Batemo/StarCCM+-Simulation. Jede Treiberspalte
+liest dort `Test Data`, es gibt also keine Plansheet-Zeile zum Abschreiben wie
+bei OP01–OP16. Was das Blatt nennt, ist die Art des Versuchs:
 
-> **OP17 und OP18 existieren in dieser Pipeline überhaupt nicht.**
-> `legacy/battery_surrogate_agenticWorkflow/op_matrix.yaml` kennt OP01–OP16 und
-> OP19 — sonst nichts. „OP01 bis OP19" heißt in der Praxis also **siebzehn**
-> Betriebspunkte, nicht neunzehn.
+| | Art | Lade-/Entladerichtung | Besonderheit |
+|---|---|---|---|
+| **OP17** | `DCH, CC` | **Entladung**, 2C | die einzige Entladung überhaupt — OP01–OP16 sind alle CH |
+| **OP18** | `Fast Charge Lotus` | Ladung | `V_max` 4.3 V statt 4.35 V |
+| **OP19** | `Fahrzyklus TDD.3` | WLTP (synth.), gemischt | `V_max` 4.3 V |
 
-OP19 ist trotzdem wertvoll, nur als andere Frage: *stimmt ein auf StarCCM+
-trainiertes Modell mit einer echten Zelle überein?* Dafür gibt es
-`--measurement-ops`. Diese OPs werden ausgerollt und berichtet, aber **nie**
-trainiert und **nie** ausgewählt. In `config.yaml` steht `measurement_ops: []`,
-weil das Bündel optional ist; auf `[OP19]` setzen, sobald `OP19.npz` auf der
-Maschine liegt.
+> **OP19 existiert** und hat eine Zeile in
+> `legacy/battery_surrogate_agenticWorkflow/op_matrix.yaml`, lässt sich also mit
+> `generate_cache.py` bauen. **OP17 und OP18 haben dort keine Zeile und keinen
+> Rohexport** — sie sind heute nicht baubar. „OP01 bis OP19" heißt in der Praxis
+> also **siebzehn** verfügbare Betriebspunkte, nicht neunzehn.
+
+Sie werden über `--measurement-ops` ausgerollt und berichtet, aber **nie**
+trainiert und **nie** ausgewählt. In `config.yaml` steht `measurement_ops: []`;
+auf `[OP19]` setzen, sobald `OP19.npz` auf der Maschine liegt.
+
+Die Zahl ist anders zu lesen als jede andere in diesem Projekt: sie mischt
+Modellfehler, Messfehler und die Lücke zwischen Simulation und Prüfstand, und
+nichts trennt die drei. Und OP17 wie OP19 sind härter als jeder Test-OP, aus
+einem Grund, den kein Coverage-Report formuliert: **das Modell hat Entladung nie
+gesehen**, und einen Fahrzyklus auch nicht. Dass sie zunächst gegen die trivialen
+Vorhersager verlieren, ist eine Aussage über den Trainings-Envelope — kein
+Fehler.
+
+Der Datenpfad ist davon unabhängig: `build_op` liest jedes Bündel, das da ist,
+und misst am Bündel selbst, welche Kanäle Profile sind. Sobald ein `OP17.npz`
+auftaucht, braucht es **keine Codeänderung** — nur einen Eintrag in
+`op_registry.MEASUREMENT_OPS_AVAILABLE`.
 
 ---
 
@@ -284,7 +473,8 @@ Nach dem Aufräumen: **10 Python-Dateien, 4 Dokumente.**
 | Nicht | Warum |
 |---|---|
 | Die Benchmarks aus der Historie zurückholen | Sie zu haben war nie das Problem — sie ohne Maßstab zu fahren war es. Erst G2 |
-| OP17/OP18 suchen | Existieren in dieser Pipeline nicht. OP19 nur über `--measurement-ops`, nie im Training |
+| OP17/OP18 bauen wollen | Kein `op_matrix.yaml`-Eintrag, kein Rohexport. OP19 geht, aber nur über `--measurement-ops`, nie im Training |
+| OP19 als Test-OP zählen | Fahrzyklus, gemischt geladen/entladen, gemessen statt simuliert. Verliert anfangs zu Recht |
 | `w_phys` auf 1.0 / 10.0 erhöhen | `L_phys_bal = L_phys/EMA(L_phys)` ist selbstnormiert, `w_phys` kommt darin nicht vor |
 | Zahlen aus dem alten OP01–OP05-Projekt übernehmen | Andere Normierung, anderes `A`, andere `phys_scale`. Nichts überträgt sich als Betrag |
 | Am Physik-Term schrauben, bevor G3 grün ist | Sonst zweite Variable im Vergleich |

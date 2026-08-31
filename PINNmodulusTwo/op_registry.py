@@ -134,13 +134,39 @@ OPS: Dict[str, OPSpec] = {
 
 ALL_OPS: tuple = tuple(OPS)
 
-# OP17-OP19 of the sheet ("Abgleich mit Minimodul-Test") compare against measured
-# mini-module data instead of the Batemo/StarCCM+ simulations: their C-rate,
-# temperatures and flow all read "Test Data", and OP19 is a synthetic WLTP drive
-# cycle. They are a different validation exercise -- measurement vs. simulation,
-# partly discharge, partly a drive cycle -- and are deliberately out of scope
-# here. Nothing in this extension reads them.
+# ---- OP17-OP19: "Abgleich mit Minimodul-Test" -------------------------------
+# A different exercise from everything above: these compare against MEASURED
+# mini-module data instead of the Batemo/StarCCM+ simulations. Every driver
+# column in the sheet reads "Test Data" -- C-rate, both temperatures, the flow
+# and the SOC window -- so there is no plan-sheet row to transcribe the way
+# OP01-OP16 have one. What the sheet does name is the kind of test:
+#
+#   OP17  "DCH, CC"            DISCHARGE, 2C. The only discharge anywhere; every
+#                              one of OP01-OP16 is a charge (CH).
+#   OP18  "Fast Charge Lotus"  charge, V_max 4.3 V (the training block is 4.35).
+#   OP19  "Fahrzyklus TDD.3"   WLTP (synthetic), mixed charge/discharge,
+#                              V_max 4.3 V.
+#
+# They are never trained on and never selected on -- pass them to train.py as
+# --measurement-ops. Read the result as "does a model fitted to StarCCM+ agree
+# with a real cell?", never as a held-out simulation number: it mixes model
+# error with measurement error and with the sim-to-test gap, and nothing
+# separates the three.
+#
+# Two of them are also harder than any test OP, for a reason no coverage report
+# will phrase for you: OP17 is a discharge and OP19 is a drive cycle, and the
+# model has seen neither regime. Expect them to lose to the trivial predictors
+# until the training envelope covers discharge at all. That is information, not
+# a bug.
 MEASUREMENT_OPS = ("OP17", "OP18", "OP19")
+
+# Which of them this pipeline can actually build a bundle for. OP17 and OP18
+# have no row in legacy/battery_surrogate_agenticWorkflow/op_matrix.yaml and no
+# raw export, so generate_cache.py cannot produce them today; OP19 has both.
+# This is a statement about the DATA on disk, not about the model: data.build_op
+# reads any bundle that exists and detects profiles from it, so the day an
+# OP17.npz appears it needs no code change here -- only a line in this comment.
+MEASUREMENT_OPS_AVAILABLE = ("OP19",)
 
 
 # ---- the split --------------------------------------------------------------
