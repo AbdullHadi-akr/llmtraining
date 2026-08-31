@@ -62,7 +62,11 @@ test_ops: [OP13, OP15, OP16]  # report only, read once, never selected on
 # and the sim-to-test gap with nothing separating them. And expect OP19 to lose
 # to the trivial predictors at first -- it is a drive cycle, a regime the model
 # has never seen.
-measurement_ops: []
+#
+# Naming an OP here can never break a run: a measurement OP with no cached
+# bundle is skipped with a [SKIP] line, unlike ops/val_ops/test_ops, which fail
+# fast. So OP19 stays listed even on a machine where it has not been built yet.
+measurement_ops: [OP19]
 
 subsample_time: 2          # dt = 0.1s * subsample -> 0.2s (CFL limit ~0.241s)
 train_frac: 0.8            # timeline fraction used for the pooled statistics

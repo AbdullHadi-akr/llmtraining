@@ -1,4 +1,4 @@
-# Fahrplan — ein Projekt, OP01–OP16
+# Fahrplan — ein Projekt: OP01–OP16 trainiert, OP19 als Messvergleich
 
 **Diese Datei ist der Einstieg.** Alles andere ist Nachschlagewerk. Wenn du nur
 eine Datei liest, dann diese.
@@ -54,6 +54,7 @@ Wird beim Abhaken ausgefüllt. Leer = noch nicht gemessen.
 | 6 | `[SATURATED]` letzte Epoche | | |
 | 6 | MAE OP06 / OP09 | | |
 | 6 | MAE OP13 / OP15 / OP16 | | |
+| 6 | MAE OP19 (Messvergleich) | | |
 
 Alles läuft aus dem Repo-Wurzelverzeichnis:
 
@@ -66,15 +67,16 @@ source modulus_env/bin/activate
 
 ### - [ ] Schritt 1 — Code holen (1 min)
 
+PR #20 ist gemergt, es reicht also `main`:
+
 ```bash
-git fetch origin
-git checkout claude/remove-benchmarks-optimize-7d1q7k
+git checkout main
 git pull
 ```
 
-> Der Branch von PR #20. `PINNmodulusTwoExtProfiles/` verschwindet dabei — das
-> ist gewollt, der Ordner ist in `PINNmodulusTwo/` aufgegangen. Falls dort noch
-> ein `data_cache/` liegt: **stehen lassen**, `data.py` sucht ihn weiterhin.
+> `PINNmodulusTwoExtProfiles/` verschwindet dabei — das ist gewollt, der Ordner
+> ist in `PINNmodulusTwo/` aufgegangen. Falls dort noch ein `data_cache/` liegt:
+> **stehen lassen**, `data.py` sucht ihn weiterhin.
 
 **Stopp wenn:** `git status` nach dem Pull nicht sauber ist.
 
@@ -104,12 +106,16 @@ python3 PINNmodulusTwo/generate_cache.py OP01 OP02 OP03 OP04 OP05 OP06 OP07 \
         OP08 OP09 OP10 OP11 OP12 OP13 OP14 OP15 OP16 2>&1 | tee 03_cache.txt
 ```
 
-Wenn `OP19` als Rohexport vorliegt, gleich mit — er wird später gebraucht,
-gehört aber **nicht** ins Training:
+Und `OP19` — den gibt es, er ist der Messvergleich. Er gehört **nicht** ins
+Training und wird separat gebaut:
 
 ```bash
 python3 PINNmodulusTwo/generate_cache.py OP19 2>&1 | tee -a 03_cache.txt
 ```
+
+`config.yaml` hat `measurement_ops: [OP19]`, er läuft ab dann in jedem
+`train.py`-Lauf als Bericht mit. Fehlt das Bündel, gibt es eine `[SKIP]`-Zeile
+und sonst nichts — ein Messvergleich darf einen Trainingslauf nie blockieren.
 
 **Stopp wenn:** ein OP nicht baut. → `03_cache.txt` schicken.
 
@@ -255,7 +261,9 @@ Was `train.py` dadurch selbst kann, ohne dass ein Benchmark existieren muss:
 ## 1. Der Datensatz — und was OP17–OP19 wirklich sind
 
 **Trainings-/Validierungs-/Testuniversum ist OP01–OP16.** Alle sechzehn sind
-Ladevorgänge (CH), alle aus derselben Batemo+StarCCM+-Simulation. Der Split
+Ladevorgänge (CH), alle aus derselben Batemo+StarCCM+-Simulation. **OP19 kommt
+als Messvergleich dazu** — nicht als siebzehnter Trainings-OP, sondern als
+eigene Frage (siehe unten). Der Split
 steht in `op_registry.py` und ist dort begründet:
 
 | Rolle | OPs | Regel |
@@ -288,8 +296,11 @@ bei OP01–OP16. Was das Blatt nennt, ist die Art des Versuchs:
 > „OP01 bis OP19" heißt heute also **siebzehn** verfügbare Betriebspunkte.
 
 Sie werden über `--measurement-ops` ausgerollt und berichtet, aber **nie**
-trainiert und **nie** ausgewählt. In `config.yaml` steht `measurement_ops: []`;
-auf `[OP19]` setzen, sobald `OP19.npz` auf der Maschine liegt.
+trainiert und **nie** ausgewählt. In `config.yaml` steht bereits
+`measurement_ops: [OP19]`, er läuft also in jedem Lauf mit, sobald `OP19.npz`
+gebaut ist. Fehlt das Bündel, gibt es eine `[SKIP]`-Zeile und der Lauf geht
+normal weiter — anders als bei `ops`/`val_ops`/`test_ops`, die hart
+fehlschlagen. Ein Bericht darf ein Training nicht blockieren.
 
 Die Zahl ist anders zu lesen als jede andere in diesem Projekt: sie mischt
 Modellfehler, Messfehler und die Lücke zwischen Simulation und Prüfstand, und
@@ -546,7 +557,7 @@ Ehrlichkeitsklausel — wann der Plan selbst falsch ist:
 ---
 
 **Zuletzt fortgeschrieben:** 2026-08-31 — Ersteinrichtung, noch kein Schritt
-abgehakt.
+abgehakt. PR #20 ist gemergt, alles hier steht auf `main`.
 
 **Ausgeführt:** Testsuite (110 grün) und Ende-zu-Ende-`train.py`-Läufe gegen ein
 synthetisches Bündel — Banner, Training, val/test, `op_metrics`, Coverage-Report,
