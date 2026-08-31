@@ -1,5 +1,14 @@
 # Modellkritik — was gefixt ist, was offen ist, und woran man es sieht
 
+> **Update 31.08.2026 — die Benchmark-Skripte in diesem Dokument gibt es nicht
+> mehr.** `smallBench.py`, `bench_common.py`, `benchmark_balance.py`,
+> `benchmark_arch.py`, `benchmark_wphys_wbc.py` und in der Profil-Erweiterung
+> `smokeBench.py`, `profileBench.py`, `bench_profiles.py` sind gelöscht; sie
+> werden Schritt für Schritt neu aufgebaut. Jeder Befehl unten, der eines dieser
+> Skripte aufruft, läuft ins Leere. Die Messungen und Befunde bleiben gültig —
+> nur die Aufrufe nicht. Aktueller Einstieg:
+> [`FAHRPLAN.md`](FAHRPLAN.md).
+
 Diese Datei beantwortet zwei Fragen:
 
 1. **Was war am Modell kaputt, was davon ist repariert, und wie sicher ist das?**
@@ -145,7 +154,7 @@ bleiben auf der vollen Trajektorie — sie brauchen keine Labels.
 | O2 | **Kein LR-Schedule** | Bei 300 Schritten egal, bei 30 000 nicht mehr. Cosine-Decay lohnt sich erst jetzt | klein |
 | O3 | **Auswahl nach Trainings-Loss** | `early_stopping_patience` beobachtet die *Trainings*-Loss, und berichtet wird der Endzustand, nicht der beste. Bei 30 000 Schritten ist Overfitting erstmals möglich | klein |
 | O4 | **Fünf Trainings-OPs** | Harte Grenze für Cross-OP-Generalisierung. Kein Hyperparameter repariert einen Config-Raum, den fünf Trajektorien nicht aufspannen | **nicht durch Code lösbar** |
-| O5 | **Keine dokumentierte Zielgenauigkeit** | Ohne die Anforderung des Alterungsmodells kann kein Benchmark sagen, ob ein Ergebnis gut ist. 8 °C besteht den `smallBench`-Check und ist als Alterungs-Eingang vermutlich trotzdem zu grob | eine Zahl von der Fachseite |
+| O5 | **Keine dokumentierte Zielgenauigkeit** | Ohne die Anforderung des Alterungsmodells kann keine Messung sagen, ob ein Ergebnis gut ist. Die trivialen Vorhersager geben eine *untere* Schranke („besser als nichts tun"), keine Zielgröße | eine Zahl von der Fachseite |
 
 O4 und O5 sind die wichtigsten — und beide keine Code-Fragen.
 
@@ -156,33 +165,42 @@ O4 und O5 sind die wichtigsten — und beide keine Code-Fragen.
 Reihenfolge einhalten. Jeder Schritt entscheidet, ob der nächste überhaupt
 sinnvoll ist.
 
-### Schritt A: smallBench — der Lauf, der die Diagnose prüft
+### Schritt A: das A/B — der Lauf, der die Diagnose prüft
 
-**Das ist der wichtigste Lauf im ganzen Dokument.** Zwei Läufe, ~5 min je:
+**Das ist der wichtigste Lauf im ganzen Dokument.** Zwei Läufe:
 
 ```bash
 # neu
-python3 PINNmodulusTwo/smallBench.py
+python3 PINNmodulusTwo/train.py --epochs 10 --subsample 40 \
+    --val-ops OP06 --test-ops OP07                     | tee A_neu.txt
 
 # alter Stand als Baseline -- die Konfiguration vor dem Umbau
-python3 PINNmodulusTwo/smallBench.py \
-    --inner-steps 1 --no-residual-output --learn-gains --loss-balance legacy
+python3 PINNmodulusTwo/train.py --epochs 10 --subsample 40 \
+    --val-ops OP06 --test-ops OP07 \
+    --inner-steps 1 --learn-gains --loss-balance legacy | tee A_alt.txt
 ```
+
+> Früher stand hier `smallBench.py`. Das Skript ist gelöscht (siehe Banner oben);
+> `train.py` druckt dieselben Zahlen und dazu die trivialen Vorhersager neben
+> jeder Held-out-MAE, was `smallBench` als „the bar to beat" tat.
+> `--no-residual-output` ist entfallen, weil `false` inzwischen der Default ist.
 
 `--loss-balance legacy` gehoert dazu: im Default `ema` wird auch `L_data` durch
 seine eigene laufende Groesse geteilt, vorher blieb es roh. Ohne das Flag misst
 der Baseline-Lauf eine Mischung aus altem und neuem Stand, und der Vergleich
 beantwortet nicht mehr die Frage, fuer die er da ist.
 
-Beide schreiben nach `artifacts/smallBench_results.txt`. Verglichen wird
-`Test MAE`.
+Beide schreiben nach `artifacts/metrics.txt` — der zweite überschreibt den
+ersten, deshalb das `tee` oben. Verglichen wird die `[test] OP07`-Zeile, also
+die MAE auf dem ausgehaltenen OP, **nicht** `L_data`.
 
 | Was du siehst | Was es heißt | Nächster Schritt |
 |---|---|---|
 | Neu **deutlich** besser als Baseline | Die Diagnose stimmte, Unterversorgung war der Engpass | Schritt B |
 | Neu ≈ Baseline | **Meine Hauptdiagnose war falsch.** Das Modell war nicht unterversorgt — dann liegt es an der Kapazität, an der History-Struktur oder an O4 | Erst 8.2 (Architektur), Gewichte-Sweep später |
 | Neu **schlechter** | Vermutlich Overfitting durch 100× mehr Updates (O3), oder der Residual-Ausgang schadet auf diesen Daten | `--no-residual-output` einzeln testen, um die beiden Ursachen zu trennen |
-| `✗ SOME CHECKS FAILED`, Loss NaN | CFL oder History-Rückkopplung | [Kapitel 10](README_GPU_SERVER.md#10-troubleshooting), nicht weitermachen |
+| `[ABORT]`, Loss NaN | CFL oder History-Rückkopplung | [Kapitel 10](README_GPU_SERVER.md#10-troubleshooting), nicht weitermachen |
+| `LOSES TO the trivial baselines` in beiden | Das Modell ist bisher nichts wert — das ist Tor G2 aus dem Fahrplan | Erst das lösen, keine Sweeps |
 | Test-MAE > 20 °C in **beiden** | Das Modell lernt grundsätzlich nicht | Daten prüfen, nicht Hyperparameter |
 
 **Zwei Zahlen im Baseline-Lauf** — `src_gain(final)` und `diff_gain(final)` in
@@ -258,7 +276,7 @@ Neun Trainings, aufgeteilt in Blöcke ≤ 5 h. Die Aufteilung und das Budget ste
 in [Kapitel 7](README_GPU_SERVER.md#7-range-probe-der-loss-gewichte--in-drei-schritten).
 
 Die entscheidende Ausgabe ist das Verdikt in
-`artifacts/benchmark_wphys_wbc_best.txt`:
+den `[val ]`/`[test]`-Zeilen aus `artifacts/metrics.txt` beider Läufe:
 
 ```
 w_phys (at w_bc=0.1):

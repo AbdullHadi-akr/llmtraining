@@ -1,16 +1,19 @@
 # Defaults for PINNmodulusTwo/train.py (every key is overridable on the CLI).
+# train.py reads this file in _load_yaml_defaults().
 #
-# These match what the benchmarks run. They used to differ (subsample 40 vs 2,
-# raw vs hybrid history, k_max 4 vs 2, no grad clipping), so `train.py` without
-# flags trained a DIFFERENT model than every benchmark in this folder -- and
-# the smoke test that gates the long runs exercised the raw history path, not
-# the hybrid one the benchmarks use.
+# This file is now the ONLY place a default lives. The benchmark scripts that
+# used to carry a second copy of these settings are deleted, so there is no
+# longer a configuration that a sweep runs and a bare `train.py` does not.
 #
-# Note: subsample_time 2 makes a plain `train.py` run much slower than the old
-# default 40 (~20x more rollout steps). That is the honest cost of matching the
-# configuration the results are actually produced with.
-# train.py reads this file in _load_yaml_defaults(); smallBench.py and the two
-# benchmark scripts read the keys they share (device, seed, ...).
+# Note: subsample_time 2 makes a run much slower than the old default 40
+# (~20x more rollout steps). Use `--subsample 40 --epochs 5` for a
+# does-it-start check.
+#
+# One caveat when changing a default here: _load_yaml_defaults() swallows every
+# error, a missing pyyaml included, and falls back to the literals in
+# train.py's argparse. Keep the two in step for anything load-bearing --
+# residual_output is the one where the difference is a run that aborts in
+# epoch 1 versus one that trains.
 
 # ---- hardware ---------------------------------------------------------------
 # auto | cpu | cuda | cuda:N   ("auto" = CUDA when available, otherwise CPU)
@@ -21,7 +24,16 @@ tf32: false
 
 # ---- data -------------------------------------------------------------------
 ops: [OP01, OP02, OP03, OP04, OP05]
-test_op: OP07
+# Held-out OPs, rolled out after training with the TRAINING bundle's
+# normalisation (data.build_op re-fits nothing). Neither is trained on; the
+# difference between the two is one of intent and only train.py enforces it:
+#   val_ops   what you may look at while tuning. Anything you choose by
+#             comparing runs is chosen on these, so their MAE is optimistic by
+#             exactly as much as you tuned against it.
+#   test_ops  the report number. Read it once, at the end. Select on it and it
+#             becomes a second validation set, and nothing held out is left.
+val_ops:  [OP06]           # 25 C, mass flow 0
+test_ops: [OP07]           # 10 C, mass flow 0 -- report only
 subsample_time: 2          # dt = 0.1s * subsample -> 0.2s (CFL-Grenze ~0.241s)
 
 # ---- model ------------------------------------------------------------------
@@ -157,7 +169,7 @@ residual_norm: rms
 # A loss term with weight 0 still costs a forward pass and an autograd Hessian.
 zero_weight_terms: skip    # skip | compute
 
-# ---- optional input features (OFF: measure them with benchmark_balance.py) ---
+# ---- optional input features (OFF until measured; see README.md) ------------
 subsample_mode: stride     # stride | mean (mean = crude anti-alias, changes data)
 forcing_energy: false      # cumulative injected heat as a 2nd forcing channel
 config_rates: false        # d(config)/dt for config channels that are profiles

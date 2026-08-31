@@ -23,7 +23,7 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from data import effective_rate_scale, load_ops
+from data import build_op, cache_is_synthetic, effective_rate_scale, load_ops, require_ops
 from device_utils import enable_tf32, resolve_device, seed_everything
 from model import RecurrentField, rollout
 from physics import heat_residual, boundary_condition_loss
@@ -31,6 +31,31 @@ from physics import heat_residual, boundary_condition_loss
 THIS_DIR = Path(__file__).resolve().parent
 ART_DIR = THIS_DIR / "artifacts"
 ART_DIR.mkdir(parents=True, exist_ok=True)
+
+# Every per-epoch series ``fit`` records. One tuple rather than a dict literal
+# buried in ``fit``, because the abort path appends to each series by hand: a
+# series added in one place and forgotten in the other misaligns the CSV and the
+# plots by a row, silently. ``fit`` builds the dict from this and asserts the
+# lengths match, and tests/test_local_smoke.py asserts the set.
+#
+#   L_*_bal        balanced losses -- what the optimiser actually saw
+#   ratio_*        w * L_term / (w_data * L_data), i.e. the mix the weights set
+#   div_*          the divisors those balanced losses were produced with. Without
+#                  them a small L_phys_bal is unreadable: either the term fell or
+#                  the EMA divisor is stale from an earlier regime, and those call
+#                  for opposite responses.
+#   spread_*       the model's own rollout spread against the labels', in space
+#                  and in time. The heat residual and the Neumann BC are both
+#                  satisfied EXACTLY by a field constant in space and time, so
+#                  "L_phys went to zero" is only good news while these stay near
+#                  1. They are what separates a converged physics term from a
+#                  collapsed one.
+HISTORY_KEYS = (
+    "epoch", "L_data", "L_phys", "L_bc",
+    "L_phys_bal", "L_bc_bal", "ratio_phys", "ratio_bc",
+    "div_data", "div_phys", "div_bc",
+    "spread_space", "spread_time", "delta",
+)
 
 
 def _check_cfl_stability(bundle, delta_s, device):
@@ -155,8 +180,13 @@ def parse_args() -> argparse.Namespace:
                         "CHANGES THE MODEL. Prefer longer --rate-lags, which lower "
                         "A by making the segment a real span rather than by "
                         "rescaling a channel; record it when you use this")
+    # Default FALSE, and it has to be stated here as well as in config.yaml.
+    # _load_yaml_defaults() swallows every error (a missing pyyaml included) and
+    # returns {}, so this literal is what a machine without pyyaml trains with --
+    # and with True there every run aborts in epoch 1 with L_data=nan. See the
+    # --residual-output note in README.md and ARCHITECTURE.md 3.1.
     p.add_argument("--residual-output", action=argparse.BooleanOptionalAction,
-                   default=d.get("residual_output", True),
+                   default=d.get("residual_output", False),
                    help="predict the deviation from the spatially averaged "
                         "temperature level of the anchor slice instead of the "
                         "absolute value, so the level is carried through the "
@@ -178,7 +208,25 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--tf32", action="store_true", default=d.get("tf32", False),
                    help="allow TF32 matmuls on Ampere+ GPUs; off by default because "
                         "the physics residual needs precise second derivatives")
-    p.add_argument("--test-op", default=d.get("test_op", "OP16"))
+    # Held-out OPs, evaluated after training with the TRAINING bundle's
+    # normalisation constants (data.build_op re-fits nothing). Neither takes
+    # part in training; the split between them is one of intent, and only this
+    # file enforces it:
+    #   --val-ops   what you are allowed to look at while tuning. Every
+    #               hyperparameter you pick by comparing runs is chosen on these,
+    #               so their MAE is optimistic by exactly as much as you tuned.
+    #   --test-ops  the report number. Look at it once, at the end. Choosing
+    #               anything on it turns it into a second validation set and
+    #               there is no held-out estimate left.
+    p.add_argument("--save-checkpoint", default=d.get("save_checkpoint", "model.pt"),
+                   help="filename under artifacts/ for the trained weights; "
+                        "empty string disables. The file carries everything "
+                        "RecurrentField and the de-normalisation need, so a run "
+                        "is reloadable without config.yaml")
+    p.add_argument("--val-ops", nargs="*", default=d.get("val_ops", []),
+                   help="held-out OPs to rank configurations on (not trained on)")
+    p.add_argument("--test-ops", nargs="*", default=d.get("test_ops", []),
+                   help="held-out OPs reported once and never selected on")
     return p.parse_args()
 
 
@@ -363,7 +411,7 @@ def fit(args):
         delta_seconds=1.0, dtn=dtn, t_span_ref=bundle.T_span_ref,
         rate_scale=rate_scale, delta_grid=delta_grid_n,
         use_autograd_time=(args.time_deriv == "autograd"),
-        residual_output=bool(getattr(args, "residual_output", True)),
+        residual_output=bool(getattr(args, "residual_output", False)),
         learn_gains=bool(getattr(args, "learn_gains", False)),
     ).to(device)
     # src_gain / diff_gain used to carry a ~100x scale gap that ``physics.py``
@@ -421,26 +469,11 @@ def fit(args):
               f"step, not {batch_bc}. Its gradient is correspondingly noisier "
               f"than the weight suggests.", flush=True)
 
-    # Keys mirror bench_common.EMPTY_HIST: a benchmark that aggregates a failed
-    # run against a successful one needs both to carry the same series.
-    history = {"epoch": [], "L_data": [], "L_phys": [], "L_bc": [], "delta": [],
-               "L_phys_bal": [], "L_bc_bal": [],   # balanced losses, fair comparison
-               "ratio_phys": [], "ratio_bc": [],   # read by benchmark_balance.py
-               # The divisors those balanced losses were produced with. Without
-               # them a small L_phys_bal is unreadable: it means either the term
-               # genuinely fell or the EMA divisor is stale from an earlier
-               # regime, and those call for opposite responses. The EMA horizon
-               # is ~1/(1-ema_decay) EPOCHS, so a term that drops by orders of
-               # magnitude inside that horizon reports a ratio far below 1 while
-               # nothing is wrong with the balancing at all.
-               "div_data": [], "div_phys": [], "div_bc": [],
-               # Spread of the model's own rollout against the spread of the
-               # labels, in normalised units. The heat residual and the Neumann
-               # BC are both satisfied EXACTLY by a field that is constant in
-               # space and time, so "physics loss went to zero" is only good
-               # news while the field still varies. These two ratios are what
-               # separates a converged physics term from a collapsed one.
-               "spread_space": [], "spread_time": []}
+    # One series per HISTORY_KEYS entry; see that constant for what each is and
+    # why the list lives at module scope. The EMA horizon behind div_* is
+    # ~1/(1-ema_decay) EPOCHS, so a term that drops by orders of magnitude inside
+    # that horizon reports a ratio far below 1 with nothing wrong at all.
+    history: dict = {key: [] for key in HISTORY_KEYS}
     history["aborted"] = False
     best_train_loss = float("inf")
     epochs_without_improvement = 0
@@ -772,7 +805,7 @@ def fit(args):
                 print("  This is epoch 1, so it happened BEFORE any optimiser step: the")
                 print("  untrained network's own output is what the history channels fed")
                 print("  back, and training cannot learn its way out of a NaN it starts in.")
-            if bool(getattr(args, "residual_output", True)):
+            if bool(getattr(args, "residual_output", False)):
                 print("  --residual-output is ON, and that is the first thing to turn off.")
                 print("  T(t) = level(t) + net(...) carries the level through an integrator")
                 print("  of gain exactly 1 with no leak, so any one-signed component of the")
@@ -829,6 +862,11 @@ def fit(args):
         history["spread_space"].append(ep_spread_space)
         history["spread_time"].append(ep_spread_time)
         history["delta"].append(float(model.delta.detach()))
+        # The two append blocks above and in the abort path are written out by
+        # hand, so a series added to HISTORY_KEYS and forgotten in one of them
+        # would misalign the CSV and the plots by a row without any error.
+        assert all(len(history[k]) == epoch for k in HISTORY_KEYS), \
+            "a HISTORY_KEYS series was not appended this epoch"
         if ep_data < best_train_loss:
             best_train_loss = ep_data
             epochs_without_improvement = 0
@@ -887,15 +925,156 @@ def fit(args):
     return model, bundle, ops, dtn, history
 
 
-def train(args) -> None:
-    model, bundle, ops, dtn, history = fit(args)
-    device = next(model.parameters()).device
-    evaluate(model, bundle, ops, dtn, device, history)
+def save_checkpoint(model, bundle, args, dtn, history, path: Path) -> None:
+    """Write the trained weights plus everything needed to use them again.
+
+    Until 31.08.2026 the ONLY ``torch.save`` in this project lived in
+    ``bench_common.py``, so a plain ``train.py`` run left the finished model in
+    RAM and nothing else -- a multi-hour run whose result evaporated. Deleting
+    the benchmarks took that with it, hence this.
+
+    A bare ``state_dict`` is not enough to reload: ``RecurrentField`` needs its
+    layout (widths, ``k_max``, history mode, the lags in NORMALISED time) and
+    turning a prediction back into degrees C needs ``T_mu``/``T_sigma``. Both
+    travel in the file, so the checkpoint does not depend on ``config.yaml``
+    still saying what it said at training time.
+    """
+    torch.save(
+        {
+            "model_state_dict": model.state_dict(),
+            # Exactly the RecurrentField constructor arguments, so reloading is
+            # RecurrentField(**ckpt["model_config"]) followed by load_state_dict.
+            "model_config": {
+                "n_config": bundle.n_config,
+                "n_static": model.n_static,
+                "n_forcing": model.n_forcing,
+                "k_max": int(args.k_max),
+                "history_mode": args.history_mode,
+                "rate_lags": [float(v) / bundle.T_span_ref
+                              for v in getattr(args, "rate_lags", [])],
+                "layer_size": int(args.width),
+                "num_layers": int(args.depth),
+                "delta_seconds": 1.0,
+                "dtn": float(dtn),
+                "t_span_ref": float(bundle.T_span_ref),
+                "rate_scale": float(model.rate_scale),
+                "delta_grid": float(model.delta_grid),
+                "use_autograd_time": (args.time_deriv == "autograd"),
+                "residual_output": bool(model.residual_output),
+                "learn_gains": bool(model.learn_gains),
+            },
+            # T_pred_C = Tn * T_sigma + T_mu. Without these the weights predict
+            # a z-score against a normalisation nothing recorded.
+            "bundle_stats": {
+                "T_mu": float(bundle.T_mu),
+                "T_sigma": float(bundle.T_sigma),
+                "T_span_ref": float(bundle.T_span_ref),
+                "L_ref": float(bundle.L_ref),
+                "phys_scale": float(bundle.phys_scale),
+                "dTdt_scale": float(bundle.dTdt_scale),
+            },
+            "run": {
+                "ops": list(args.ops),
+                "val_ops": list(getattr(args, "val_ops", []) or []),
+                "test_ops": list(getattr(args, "test_ops", []) or []),
+                "epochs": int(args.epochs),
+                "epochs_run": len(history["epoch"]),
+                "aborted": bool(history.get("aborted", False)),
+                "subsample": int(args.subsample),
+                "seed": int(args.seed),
+                "synthetic_cache": cache_is_synthetic(),
+            },
+        },
+        path,
+    )
+
+
+def trivial_baselines(op, bundle) -> tuple[float, float]:
+    """MAE of the two trivial predictors on ``op``, in physical degrees C.
+
+    Without these a MAE is a number with no scale. The model has to beat the
+    BETTER of the two to have learned anything at all:
+
+    * persistence -- ``T(t) = T(0)``: the field never changes.
+    * mean -- the constant mean of the training labels. That constant IS
+      ``bundle.T_mu`` by construction (``data.py`` pools it over the training
+      portion of the training OPs), so this is not a second definition of the
+      same quantity.
+
+    Computed on whatever ``op`` is actually in hand, never quoted from an
+    earlier run: the magnitudes do not transfer between OP sets, and a flat
+    held-out OP has a persistence baseline of 0 C, which is unbeatable rather
+    than merely hard.
+    """
+    persistence = float(np.abs(op.T_lab - op.T_lab[0][None, :]).mean())
+    mean = float(np.abs(op.T_lab - bundle.T_mu).mean())
+    return persistence, mean
 
 
 @torch.no_grad()
-def evaluate(model, bundle, ops, dtn, device, history) -> None:
-    """Free-running rollout (NO teacher forcing); report MAE per OP (physical C)."""
+def rollout_physical(model, op, bundle, device) -> np.ndarray:
+    """Free-running rollout of one ``OPData`` -> physical temperature (n_t, P).
+
+    Takes the numpy ``OPData`` that ``data.build_op`` returns, so a held-out OP
+    needs no entry in the packed training structures. ``static``/``forcing`` are
+    truncated to the widths the model was built with: ``fit`` zeroes them when
+    ``--use-static``/``--use-forcing`` are off, and a held-out OP arrives with
+    the full block.
+    """
+    t = lambda a: torch.as_tensor(a, dtype=torch.float32, device=device)  # noqa: E731
+    buf = rollout(
+        model, t(op.xn), t(op.static_feat)[:, :model.n_static], t(op.config_feat),
+        t(op.forcing_feat)[:, :model.n_forcing], t(op.Tn_ic), t(op.tn), op.dtn,
+    )
+    return buf.cpu().numpy() * bundle.T_sigma + bundle.T_mu
+
+
+def train(args) -> None:
+    # Resolve the held-out OPs BEFORE training, not after: a typo in --val-ops
+    # would otherwise cost the whole run before it surfaces.
+    require_ops(*args.ops, *getattr(args, "val_ops", []),
+                *getattr(args, "test_ops", []))
+    if cache_is_synthetic():
+        print("=" * 72, flush=True)
+        print("  *** SYNTHETIC DATA CACHE (tools/make_synthetic_cache.py) ***",
+              flush=True)
+        print("  Every MAE below is measured on a fixture, not on the simulation.",
+              flush=True)
+        print("  The numbers are usable for comparing two runs against each other",
+              flush=True)
+        print("  and for nothing else. Do not quote them as a result.", flush=True)
+        print("=" * 72, flush=True)
+    model, bundle, ops, dtn, history = fit(args)
+    device = next(model.parameters()).device
+    # Before evaluate(), not after: evaluation rolls out every OP and a
+    # non-finite trajectory there must not cost the weights that produced it.
+    name = str(getattr(args, "save_checkpoint", "") or "")
+    if name:
+        path = ART_DIR / name
+        save_checkpoint(model, bundle, args, dtn, history, path)
+        print(f"  wrote {path}", flush=True)
+    evaluate(model, bundle, ops, dtn, device, history, args)
+
+
+@torch.no_grad()
+def evaluate(model, bundle, ops, dtn, device, history, args=None) -> None:
+    """Free-running rollout (NO teacher forcing); report MAE per OP (physical C).
+
+    Three groups, and the difference between them is the whole point:
+
+    * the TRAINING OPs -- ``MAE train`` is in-sample, ``MAE test`` is the tail
+      past ``split_t``, which the data term never fitted (held out in time, on
+      an OP the model has otherwise seen).
+    * ``--val-ops`` -- whole OPs the model never saw. This is what a
+      hyperparameter choice is allowed to look at, and it is optimistic by
+      exactly as much as you tuned against it.
+    * ``--test-ops`` -- whole OPs that nothing selected on. Read once.
+
+    Every MAE is printed next to the two trivial baselines on the SAME OP
+    (:func:`trivial_baselines`), because a MAE on its own has no scale: losing
+    to "the field never changes" means the run learned nothing, and that is
+    invisible in a loss curve.
+    """
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
@@ -924,6 +1103,19 @@ def evaluate(model, bundle, ops, dtn, device, history) -> None:
             op["Tn_ic"], op["tn"], dtn,
         )
         T_pred = (buf.cpu().numpy() * T_sigma + T_mu).astype(np.float64)
+        # The eval rollout is deliberately UNCLAMPED (unlike training's
+        # --rollout-clamp): a saturated trajectory is not a prediction, and
+        # reporting the clamped MAE would dress a diverged model up as a merely
+        # bad one. The cost is that a diverged run reports nan, so it is named.
+        if not np.isfinite(T_pred).all():
+            n_bad = int((~np.isfinite(T_pred)).any(axis=1).sum())
+            msg = (f"  [DIVERGED] {op['op_id']}: the eval rollout is non-finite "
+                   f"from step {int(np.argmax(~np.isfinite(T_pred).all(axis=1)))} "
+                   f"on ({n_bad}/{T_pred.shape[0]} steps). Every MAE for this OP "
+                   f"is nan. The eval rollout is unclamped on purpose -- if "
+                   f"training reported [SATURATED] it was already running away.")
+            print(msg, flush=True)
+            lines.append(msg.strip() + "\n")
         err = np.abs(T_pred - T_lab)
         mae_tr = float(err[1:split_t].mean())
         mae_te = float(err[split_t:].mean())
@@ -937,6 +1129,42 @@ def evaluate(model, bundle, ops, dtn, device, history) -> None:
             ART_DIR / f"pred_{op['op_id']}.npz",
             t=op["t"], T_true=T_lab, T_pred=T_pred, split_t=split_t,
         )
+
+    # ---- held-out OPs -------------------------------------------------------
+    # Whole OPs the model never saw, fed through data.build_op, which re-fits
+    # NOTHING: T_mu/T_sigma, L_ref, T_span_ref, the Fourier tensor and every
+    # config statistic come from the training bundle, so this stays a genuine
+    # out-of-sample number rather than a second, easier normalisation.
+    subsample = int(getattr(args, "subsample", 40)) if args is not None else 40
+    groups = [] if args is None else [
+        ("val ", list(getattr(args, "val_ops", []) or [])),
+        ("test", list(getattr(args, "test_ops", []) or [])),
+    ]
+    for label, op_ids in groups:
+        for op_id in op_ids:
+            held = build_op(op_id, bundle, subsample_time=subsample)
+            pred = rollout_physical(model, held, bundle, device)
+            m = float(np.abs(pred - held.T_lab).mean())
+            persistence, mean_base = trivial_baselines(held, bundle)
+            best = min(persistence, mean_base)
+            verdict = "beats" if m < best else "LOSES TO"
+            line = (f"[{label}] {op_id}: MAE={m:.3f} C  ({verdict} the trivial "
+                    f"baselines: persistence={persistence:.3f} C, "
+                    f"train-mean={mean_base:.3f} C)")
+            print(f"  {line}", flush=True)
+            lines.append(line + "\n")
+            np.savez_compressed(
+                ART_DIR / f"pred_{op_id}.npz",
+                t=np.asarray(held.t), T_true=held.T_lab, T_pred=pred,
+                split_t=held.split_t,
+            )
+    if not any(op_ids for _, op_ids in groups):
+        note = ("no held-out OPs evaluated: pass --val-ops / --test-ops (or set "
+                "val_ops / test_ops in config.yaml). Every number above is "
+                "either in-sample or the in-time tail of an OP the model trained "
+                "on, which is not a generalisation estimate.")
+        print(f"  [NOTE] {note}", flush=True)
+        lines.append(f"NOTE: {note}\n")
 
     # loss curves (left: raw losses, right: balanced losses on same scale)
     fig, ax = plt.subplots(1, 2, figsize=(11, 4))

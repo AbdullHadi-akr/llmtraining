@@ -640,11 +640,36 @@ def available_ops() -> List[str]:
     return sorted(p.stem for p in DATA_CACHE.glob("*.npz"))
 
 
+def cache_is_synthetic() -> bool:
+    """True when the loaded OP bundles were written by make_synthetic_cache.py.
+
+    An absolute MAE measured off that fixture says nothing about the real OPs,
+    so a run on it must never be quoted as a result. Cheap to check and easy to
+    forget, which is why ``train.py`` prints a banner rather than leaving it to
+    a line in a README.
+
+    ``DATA_CACHE`` is re-read on every call, so a test that repoints it is seen.
+    Any synthetic bundle in the cache is enough to disqualify the run: a folder
+    holding both kinds is not a dataset, and the banner has to fire on the
+    mixture too, not only when the file that happens to sort first is the
+    synthetic one.
+    """
+    try:
+        for path in sorted(Path(DATA_CACHE).glob("OP*.npz")):
+            with np.load(path, allow_pickle=True) as npz:
+                if "synthetic" in npz.files:
+                    return True
+    except Exception:
+        pass
+    return False
+
+
 def require_ops(*op_ids: str) -> None:
     """Fail fast if a requested OP has no cached bundle.
 
-    A benchmark resolves its held-out OPs only after training the first grid
-    point, so without this a typo costs a full training run before it surfaces.
+    ``train.py`` resolves its held-out OPs only after training has finished, so
+    without this a typo in --val-ops costs a full training run before it
+    surfaces.
     """
     have = set(available_ops())
     missing = [op for op in dict.fromkeys(op_ids) if op and op not in have]

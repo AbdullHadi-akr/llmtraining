@@ -1,5 +1,14 @@
 # PINNmodulusTwoExtProfiles — the profile extension of PINNmodulusTwo
 
+> **Update 31.08.2026 — die Benchmarks sind gelöscht.** `profileBench.py`,
+> `bench_profiles.py` und `smokeBench.py` gibt es nicht mehr, ebenso wenig die
+> vier im Basisprojekt. Sie werden Schritt für Schritt neu aufgebaut, sobald
+> feststeht, was gemessen werden soll —
+> [`../PINNmodulusTwo/FAHRPLAN.md`](../PINNmodulusTwo/FAHRPLAN.md) §0 und §4.
+> `train.py` bleibt vollständig lauffähig und wertet Train-, Val- und Test-OPs
+> weiterhin über `op_metrics.py` aus; was fehlt, ist der Vergleich über Seeds.
+> Siehe [Measuring this extension](#measuring-this-extension--the-benchmark-is-gone-deliberately).
+
 > **Update 27.08.2026.** `residual_output` wurde hier nie an das Modell
 > übergeben, lief also still mit dem alten Default `true` — einem Integrator
 > ohne Leck, der den Rollout in Epoche 1 nach `inf` treibt. Er ist jetzt ein
@@ -23,7 +32,7 @@ OP08 on the drivers become **profiles** — they vary in time:
 | `fluid_mass_flow` | OP15 only | *Volumenstromprofil* |
 
 Same model, same physics, same recurrence. What changes is the **preprocessing,
-the normalisation, and the benchmark** — because a mean over a driver that moves
+the normalisation, and what has to be measured** — because a mean over a driver that moves
 is not the same quantity as a sample of a driver that does not, and because
 every pooled statistic is refitted on a much more heterogeneous set.
 
@@ -106,9 +115,10 @@ own future.
 **Temperature stays point-sampled.** It is a state, and the rollout has to match
 it at the sample instants, not average over them.
 
-`resample: point` restores the base behaviour exactly, and `profileBench` sweeps
-the two against each other so the cost of aliasing is measured rather than
-assumed.
+`resample: point` restores the base behaviour exactly. Which of the two is
+better is an open question and one of the first axes the rebuilt benchmark
+should measure -- so far the choice of `mean` is an argument, not a
+measurement.
 
 ### 2. The drivers get their own history channels
 
@@ -149,8 +159,8 @@ by the high-C-rate OPs. `phys_scale`, `dTdt_scale`, `aniso_scale` and
 
 > **`w_phys` / `w_bc` tuned in `PINNmodulusTwo` do not carry over.** The same
 > number is a different mixing ratio here. `config.yaml` ships placeholders,
-> not inherited values, and `profileBench` re-sweeps them. This is the main
-> reason the extension needs its own benchmark rather than inheriting numbers.
+> not inherited values, and they have to be re-measured here. This is the main
+> reason the extension needs its own measurement rather than inheriting numbers.
 
 `data.normalisation_report()` prints the constants next to the per-OP spread of
 `Qsrc` RMS at the top of every run, so the shift is visible instead of assumed.
@@ -223,184 +233,70 @@ regime the extension exists to learn. The honest held-out signal here is the
 genuine test, and also what makes an out-of-range driver silently z-score to
 something the network never saw. `data.coverage_report()` says which channel of
 which OP leaves the trained range and by how many training sigmas, and it runs
-in `smokeBench`, in `train.py` and in the benchmark.
+in `train.py`, and it is worth keeping in whatever replaces the benchmark.
 
 ---
 
-## The benchmark: `profileBench` — the **Profile Tier Benchmark**
+## Measuring this extension — the benchmark is gone, deliberately
+
+`profileBench.py`, `bench_profiles.py` and `smokeBench.py` were deleted on
+31.08.2026, together with the four benchmark scripts in the base project. They
+are being rebuilt step by step; see
+[`../PINNmodulusTwo/FAHRPLAN.md`](../PINNmodulusTwo/FAHRPLAN.md) §0 and §4 for
+why and in what order.
+
+The reason bites hardest here: **not one number in this folder was ever
+measured.** The extension needs all sixteen bundles, they are not in git, and
+the benchmark that was supposed to produce the first result never ran. A tiered
+sweep with seed aggregation, checkpoints and per-tier boxplots is a lot of
+machinery to carry for zero measurements — and the base project it inherits its
+loss weights from has not settled them either.
+
+**What still works, without any of it:**
 
 ```bash
-python3 PINNmodulusTwoExtProfiles/smokeBench.py     # ALWAYS first, minutes
-python3 PINNmodulusTwoExtProfiles/profileBench.py --device cuda --seeds 0 1 2
+python3 PINNmodulusTwoExtProfiles/op_registry.py     # the split (no data needed)
+python3 PINNmodulusTwoExtProfiles/data.py            # constants + coverage + profile report
+python3 PINNmodulusTwoExtProfiles/train.py --epochs 60
 ```
 
-**What it ranks on.** The mean rollout MAE over the **selection set**
-`--val-ops` (OP06 + OP09 by default) — not one OP. With profiles there are two
-different things a configuration must get right and they trade off: staying
-accurate on the constant OPs, and following a driver that moves. One OP can
-only measure one of them. The mean is unweighted on purpose (weighting it would
-smuggle a second tuning knob into the metric), and every per-OP number travels
-with it — `split_verdict` warns explicitly when the winner bought its mean from
-one half of the selection set.
+`train.py` here already does what the base project's `train.py` only learned on
+31.08.: it trains on `--ops`, then rolls out `--val-ops` and `--test-ops` with
+the training bundle's normalisation and reports every OP through
+`op_metrics.py` — `mae`, the transient/quiescent split, `peak_err`, `late_mae`
+and the tier each held-out OP belongs to. That is a complete per-OP evaluation.
+What it is not is a *comparison* between configurations over several seeds, and
+that is the one thing the rebuilt benchmark has to add first.
 
-**What it reports.** Per **tier**, never as one averaged "test MAE". Averaging
-OP13, OP15 and OP16 mixes a C-rate extrapolation, an unseen profile type and a
-3× flow: the average of three different questions answers none of them.
-`profileBench_perop.csv` has every OP separately for exactly that reason.
+**The checks that lived in `smokeBench` and are worth having again**, in the
+order they should come back:
 
-**Axes** (walked one at a time against a common baseline — the point is to find
-which knob moves the error at all, not to optimise jointly):
+1. **Are the profiles actually in the bundles?** `op_registry` is a
+   transcription of the plan sheet and can be wrong; `data.profile_report()`
+   prints what the `.npz` files really contain next to what the sheet claims.
+   That comparison still exists — it just no longer has a script wrapped
+   around it.
+2. **Does any held-out driver leave the training range?**
+   `data.coverage_report()`, which `train.py` already runs.
+3. **Does a short run finish at all** before a long one is started.
 
-| axis | question |
-|---|---|
-| `resample` | does driver aliasing cost anything? (`mean` vs `point`) |
-| `drivhist` | do the driver rate channels earn their input width? |
-| `drlags` | how far back does driver memory have to reach? |
-| `wphys`, `wbc` | the loss weights, **re-tuned against the new normalisation** |
-| `ratelags` | the temperature history segments |
-| `width`, `depth` | architecture, re-asked now that profiles are present |
+**What the rebuilt benchmark must keep from the deleted one** — the scoring
+rules, not the infrastructure:
 
-Default `--axes` is the five the profiles make new or invalidate.
+* **Selection over a SET of validation OPs, not one.** Two things trade off
+  here — staying accurate on constant OPs, and following a driver that moves —
+  and one OP can only measure one of them. Rank on the mean over `--val-ops`
+  (OP06 constant, OP09 profile), unweighted, and carry every per-OP number
+  alongside so a configuration that wins the mean by wrecking one of the two is
+  visible rather than hidden.
+* **Results grouped by tier.** A single averaged test MAE over OP13, OP15 and
+  OP16 mixes a C-rate extrapolation, an unseen profile type and a 3x flow. The
+  average of three different questions answers none of them. `op_registry`
+  still holds the tiers.
+* **A seed-noise verdict.** A ranking whose spread between configurations is
+  smaller than the spread between seeds of one configuration is not a ranking.
+* **The mean over seeds, with failed seeds dropped rather than averaged in.**
 
-**Per-OP metrics.** Whole-trajectory `mae`/`rmse` (kept comparable with the base
-project), plus the ones a mean hides on a profile OP:
-
-* `mae_transient` / `mae_quiescent` — the same error split by whether a driver
-  was moving faster than its own pooled training RMS rate. A CC‑CV OP spends
-  most of its samples in the flat CC phase, so a whole-trajectory mean is
-  dominated by the easy part and a model that gets the CV turnover completely
-  wrong can still post a respectable MAE. On a constant OP the transient set is
-  nearly empty and the split reports `n/a` — which is the correct answer.
-* `peak_err` — error in the **peak temperature** the cell reaches. This is the
-  number the downstream aging model consumes; being right on average while
-  missing the hot spot by several degrees is the failure mode that matters.
-* `max_abs_err`, `late_mae` (labelled in-sample or held out).
-
-**Outputs** (in `artifacts/`): `profileBench.csv`, `profileBench_perop.csv`,
-`profileBench.png` (one panel per axis, tiers as separate series),
-`profileBench_box.png` (per-sensor error spread), `profileBench_best.txt`.
-
-**Runtime.** One training per configuration per seed. At `subsample 2` and 60
-epochs one training is hours and the default grid is ~30 configurations, so a
-full default sweep is **days per seed**. Read the seconds-per-epoch the training
-log prints before planning a long run; `--epochs 20` and `--axes resample
-drivhist drlags` is the sensible first pass.
-
-**Seed noise.** With one seed the reported std is 0 by construction — that is a
-single sample, not stability. `noise_verdict` says outright when the gap to the
-runner-up is smaller than the seed spread, i.e. when the ranking cannot be
-defended. Use `--seeds 0 1 2`.
-
-### Recommended order — and how to read each result
-
-The axes are **not** independent, so the order matters:
-
-`resample` changes `q_dot`, which changes `Qsrc_scale`, which changes
-`phys_scale` — and those are the divisors of the physics residual. **Tune the
-weights before settling the resampling and you have to tune them again.**
-(`drivhist` and `drlags` only add columns to `forcing_feat`; they leave every
-physics scale untouched, so strictly they could come later. They are cheap and
-they change how well the model fits, so they go in the same first pass.)
-
-**Stage 0 — `smokeBench.py`.** Minutes, and it gates everything. Two things to
-take away besides pass/fail: whether the bundles really carry the profiles, and
-the **final `L_data`**, which is what sets the weight range in stage 2.
-
-**Stage 1 — preprocessing.** This is the "what do we do to get good
-preprocessing" question, and it is a measurement, not a guess:
-
-```bash
-python3 PINNmodulusTwoExtProfiles/profileBench.py     --axes resample drivhist drlags --epochs 20 --seeds 0 1 2
-```
-
-* `resample`: `mean` vs `point`. If `mean` wins on the T2/T3 tiers, aliasing was
-  costing you; if the span is inside the seed spread, at `subsample=2` your
-  profiles are slow enough that it does not matter — a legitimate and useful
-  answer.
-* `drivhist`: `on` vs `off`. `off` is the base project's feature set. This is the
-  single most informative point in the whole sweep: it is the direct answer to
-  "do the profiles need their own history at all".
-* `drlags`: how far back driver memory must reach. Read it against `drivhist` —
-  if `off` is competitive, the lag choice is noise.
-
-Then **write the winners into `config.yaml`** (`resample`,
-`use_driver_history`, `driver_rate_lags`) before going on. Everything after this
-is tuned against that preprocessing.
-
-**Stage 2 — the loss weights.** They are only meaningful relative to the
-physics scales, and those scales moved:
-
-```bash
-python3 PINNmodulusTwoExtProfiles/profileBench.py     --axes wphys wbc --epochs 20 --seeds 0 1 2
-```
-
-Picking the range: the weights multiply **balanced** losses, each divided by its
-own running EMA, so `L_phys_bal` sits at ≈1 for the whole run. That means
-
-> `w_phys` is not a relative weight — it is the near-constant **floor** the
-> physics term holds at, while `w_data · L_data` falls as training converges.
-> The physics-to-data ratio at the *end* is about `w_phys / L_data_final`.
-
-So take `L_data_final` from stage 0 and sweep roughly
-`[0, L_data_final, 10 × L_data_final]`. The shipped defaults —
-`[0, 0.01, 0.05, 0.1, 0.3]` for both — span two decades around the base
-project's 0.1 and always include `0.0`, because "does the physics term help at
-all here" has to be answerable with a clean no. Once a winner emerges, refine
-around it: `--axes wphys --w-phys-values 0.02 0.03 0.05 0.07 0.1`.
-
-If `w_phys = 0.3` wins and `L_data_final` is ~1e-2, check the training curves
-before adopting it: the gradient was mostly physics by the end. That may be
-exactly right — it is what a PINN is for — but it should be a decision.
-
-**Stage 3 — architecture, last.** `--axes width depth ratelags`. Re-asked
-because the base project's answers were found where every driver was constant.
-Skip it if stages 1–2 already land where you need; it is the most expensive
-stage and historically the least movement per hour.
-
-### The decision rule at every stage
-
-`profileBench_best.txt` prints a **span per axis** — `max − min` selection MAE —
-next to the seed spread, and one of three verdicts:
-
-| what it says | what to do |
-|---|---|
-| span **below** the seed spread | the knob does not matter on this data. Take the cheapest/simplest setting and stop tuning it. |
-| span **above** the seed spread | worth tuning; refine around the winner. |
-| "seed spread unknown (single seed)" | you cannot conclude anything yet. Re-run with `--seeds 0 1 2`. |
-
-Two more guards print automatically and are worth heeding:
-
-* **`noise_verdict`** — whether the gap to the runner-up beats the seed spread.
-  If it does not, the winner is "one of several equally good", not the optimum,
-  and reporting it as *the* answer overstates what was measured.
-* **`split_verdict`** — whether the winner bought its selection score from one
-  half of the selection set. A configuration that halves the error on OP06 and
-  doubles it on OP09 can still win the mean, and it is the wrong answer to the
-  question this extension exists to ask.
-
-Reading the tiers: judge a configuration on **T1 and T2**, which is what
-selection ran on. A configuration that wins T1/T2 and loses **T3** is not broken
-— T3 is extrapolation and was deliberately never selected on. Never quote a T3
-number as "the model's accuracy" without naming the OP it came from;
-`profileBench_perop.csv` keeps them separate for exactly that reason.
-
-### Budget
-
-One training per configuration per seed. At `subsample 2` / 60 epochs that is
-hours each, so:
-
-| pass | command | configurations |
-|---|---|---|
-| gate | `smokeBench.py` | — (minutes) |
-| stage 1 | `--axes resample drivhist drlags --epochs 20` | 9 |
-| stage 2 | `--axes wphys wbc --epochs 20` | 10 |
-| stage 3 | `--axes width depth ratelags` | 10 |
-
-Times `--seeds 0 1 2`. Read the seconds-per-epoch the training log prints after
-the first configuration before committing to a long run — that number, not an
-estimate, is what the ETA should come from.
-
----
 
 ## Files
 
@@ -409,11 +305,8 @@ estimate, is what the ETA should come from.
 | `op_registry.py` | the plan sheet in code: OP01–OP16, profiles, tiers, the split, split sanity checks. **Runs without data.** |
 | `data.py` | profile-aware loader: window-mean driver resampling, driver rate channels, refitted normalisation, amplification diagnostic, coverage/profile reports |
 | `train.py` | training loop for the heterogeneous OP set; evaluates train + val + test OPs |
-| `op_metrics.py` | the per-OP rollout metrics shared by `train.py` and the benchmark |
-| `bench_profiles.py` | tiered benchmark machinery: multi-OP selection, seed aggregation, verdicts, checkpoints |
-| `profileBench.py` | the Profile Tier Benchmark itself |
-| `smokeBench.py` | the few-minute gate before any long sweep |
-| `config.yaml` | defaults; **this file is the benchmark configuration** |
+| `op_metrics.py` | the per-OP rollout metrics: mae/rmse, the transient/quiescent split, `peak_err`, `late_mae` |
+| `config.yaml` | defaults; the single source for them |
 | `_paths.py` | imports the unchanged `model.py`, `physics.py`, `materials.py`, `device_utils.py` from `PINNmodulusTwo/` |
 
 ### Reused from `PINNmodulusTwo/`, not copied
@@ -439,9 +332,8 @@ source .venv/bin/activate      # the same environment as PINNmodulusTwo
 
 python3 PINNmodulusTwoExtProfiles/op_registry.py     # the split (no data needed)
 python3 PINNmodulusTwoExtProfiles/data.py            # the constants + coverage
-python3 PINNmodulusTwoExtProfiles/smokeBench.py      # the gate
-python3 PINNmodulusTwoExtProfiles/train.py --epochs 60
-python3 PINNmodulusTwoExtProfiles/profileBench.py --seeds 0 1 2
+python3 PINNmodulusTwoExtProfiles/train.py --epochs 5     # does it start
+python3 PINNmodulusTwoExtProfiles/train.py --epochs 60    # the real run
 ```
 
 `--device` defaults to `auto` (CUDA when available). Full server setup — driver,
@@ -454,7 +346,7 @@ Useful flags when something goes wrong:
 |---|---|
 | `L_data` non-finite in epoch 1 | `--max-rate-amp 50`, then `--history-mode raw` |
 | still diverging | `--grad-clip 1.0`, lower `--lr`, larger `--subsample`, `--no-driver-history` |
-| unsure whether the profiles are even being read | `smokeBench.py --skip-training` (seconds, no training) |
+| unsure whether the profiles are even being read | `python3 data.py` — it prints the profile report and the coverage report, no training |
 | want the base project's preprocessing back | `--resample point --no-driver-history` |
 
 ---
@@ -493,8 +385,8 @@ Read these before quoting anything from this folder.
    available where this code was written, so **no number in this extension has
    been measured on the real data.** `config.yaml`'s `w_phys` / `w_bc` are
    placeholders carried over as a starting point, explicitly *not* tuned values.
-   The first real deliverable is a `profileBench` run; until then this folder is
-   a pipeline, not a result.
+   The first real deliverable is a run on the sixteen real bundles; until then
+   this folder is a pipeline, not a result.
 
 2. **The pipeline was exercised on synthetic bundles, not validated by them.**
    Every path here — window-mean resampling, driver rate channels, per-OP EMAs,
@@ -507,9 +399,9 @@ Read these before quoting anything from this folder.
 
 3. **`op_registry.py` is a transcription of the plan sheet and can be wrong.**
    It drives tier labels and reports, never a feature — every model input comes
-   from the `.npz`. `smokeBench` CHECK 1 compares the sheet against what the
-   bundles actually contain and fails on a mismatch; run it first and believe
-   the bundles.
+   from the `.npz`. `data.profile_report()` compares the sheet against what the
+   bundles actually contain -- run `python3 data.py` and believe the bundles,
+   not the table.
 
 4. **The tier assignments are a judgement, not a measurement.** OP16 is called
    `T3` because 90 l/min is 3× the trained maximum, and OP09 `T2` because C‑rate
@@ -532,9 +424,10 @@ Read these before quoting anything from this folder.
    one constant and one profile case. A configuration can be tuned to those two
    specific held-out points. The tiers reduce the risk; they do not remove it.
 
-8. **A `smokeBench` pass means the pipeline is sound, not that the model is
-   accurate.** Its MAE bar is a loose 25 °C sanity check chosen to catch
-   catastrophe, nothing more.
+8. **A short run finishing means the pipeline is sound, not that the model is
+   accurate.** No check in this folder currently says whether a MAE is good --
+   that needs a target accuracy from the aging model, which nobody has
+   supplied.
 
 9. **`bc_V`, voltage and aging remain out of scope**, exactly as in the base
    project. Temperature only.

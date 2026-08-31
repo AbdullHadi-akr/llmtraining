@@ -10,6 +10,39 @@ nur eine Datei liest, dann diese.
 
 ---
 
+## 0. Was sich am 31.08. geändert hat
+
+**Die vier Benchmark-Skripte sind gelöscht** — `smallBench.py`,
+`benchmark_balance.py`, `benchmark_arch.py`, `benchmark_wphys_wbc.py` und die
+gemeinsame `bench_common.py`; in der Profil-Erweiterung ebenso `smokeBench.py`,
+`profileBench.py` und `bench_profiles.py`. Zusammen 4735 Zeilen. Sie werden neu
+aufgebaut, Schritt für Schritt, wenn feststeht, *was* gemessen werden soll.
+
+Der Grund ist nicht, dass sie inhaltlich falsch waren, sondern dass **kein
+einziges ihrer Ergebnisse auf echten Daten gemessen ist**. Jede Zahl in diesem
+Repo kommt vom synthetischen Bündel. Ein Sweep, der 6–8 Tage GPU kostet und
+eine Rangfolge über Konfigurationen aufstellt, die alle noch nie einen trivialen
+Vorhersager geschlagen haben, ist eine Rangfolge zwischen Verlierern. Und vier
+Einstiege, deren Reihenfolge sich in den eigenen Docstrings widersprach, waren
+selbst ein Grund, warum der eine Lauf, auf den alles wartete (Schritt A), nie
+gemacht wurde.
+
+**Was an ihre Stelle getreten ist, ohne Sweep-Maschinerie:** `train.py` kann
+jetzt selbst, was vorher nur `bench_common` konnte.
+
+| vorher | jetzt |
+|---|---|
+| `smallBench.py` druckte „the bar to beat" | `train.py` druckt persistence + Trainings-Mittel neben **jeder** Held-out-MAE |
+| `bench_common` baute Val-/Test-OPs über `data.build_op` | `train.py --val-ops / --test-ops` tut dasselbe, mit derselben Normierung |
+| `smallBench` warnte vor synthetischen Daten | `train.py` druckt das Banner beim Start (`data.cache_is_synthetic`) |
+| `bench_common.EMPTY_HIST` hielt die History-Serien synchron | `train.HISTORY_KEYS` + Assertion in `fit()` |
+
+Ein einzelner `train.py`-Lauf beantwortet damit die Frage, an der alles hängt —
+*schlägt das Modell „nichts tun"?* — ohne dass irgendein Benchmark existieren
+muss. Genau das ist Phase 2 unten.
+
+---
+
 ## 1. Wo wir stehen
 
 | | Stand | Beleg |
@@ -17,40 +50,18 @@ nur eine Datei liest, dann diese.
 | Datenpipeline CSV → NPZ → Training | ✅ läuft | Bericht 28.08. §1 |
 | `A = 118.9 / 29.7`, `dTdt_scale = 2.479` | ✅ gegen Übergabe verifiziert | `UEBERGABE` Z. 29, 121–122 |
 | Training läuft ohne Abbruch | ✅ | Bericht §4 |
-| Rollout zahm | ❌ 342 saturierte Schritte auf einem **Trainings**-OP | `train.py:674` |
-| Loss-Balance | ❌ beide Läufe `FAIL` | `smallBench.py:262` |
+| Echte Daten liegen lokal | ✅ **neu** | `data_cache/` auf der Arbeitsmaschine |
+| Rollout zahm | ❌ 342 saturierte Schritte auf einem **Trainings**-OP | Bericht §5 |
 | Physik-Term | ❌ kollabiert (`L_phys_bal = 2.7e-06`) | Bericht §6 |
 | **Schlägt das Modell „nichts tun"?** | ❓ **unbekannt** | kein Maßstab auf echten Daten |
-| Schritt A (A/B gegen alten Stand) | ❌ nie gelaufen | `README_MODEL_CRITIQUE.md:159` |
-| Drift-Test | ❌ nie gelaufen | ebd. Z. 206 |
+| Held-out-Auswertung im Trainingslauf | ✅ **neu** | `train.py --val-ops OP06 --test-ops OP07` |
 
 Die vorletzte Zeile ist die wichtigste. **Alles andere zu optimieren, bevor sie
-beantwortet ist, ist Blindflug.**
+beantwortet ist, ist Blindflug.** Sie kostet jetzt einen einzigen Lauf.
 
 ---
 
-## 2. Das Problem mit dem Ist-Zustand
-
-```
-Doku:        5041 Zeilen in 9 Dateien   (README_GPU_SERVER allein: 1265)
-Benchmarks:  2735 Zeilen in 4 Dateien   (benchmark_wphys_wbc allein: 1366)
-Ergebnis:    ein Modell, das noch nie einen trivialen Vorhersager geschlagen hat
-```
-
-Die Benchmarks sind inhaltlich gut — das Problem ist, dass es vier Einstiege
-gibt, deren Reihenfolge nirgends steht und die sich in den Docstrings sogar
-**widersprechen**:
-
-* `smallBench.py:320` → als Nächstes `benchmark_balance.py`
-* `benchmark_balance.py` → „läuft VOR dem Gewichts-Sweep"
-* `benchmark_arch.py` → „dieselben Stunden hier beantworten Fragen, die nie
-  gestellt wurden" (also Architektur vor Gewichten)
-
-Drei Dateien, drei Meinungen, kein Fahrplan. Abschnitt 6 räumt das auf.
-
----
-
-## 3. Die eine Regel
+## 2. Die eine Regel
 
 > **Nichts, was Stunden kostet, bevor das Billige gelaufen ist, das es entwerten
 > könnte.**
@@ -60,7 +71,7 @@ das Tor repariert, nicht die nächste Phase gestartet.
 
 ---
 
-## 4. Die Phasen
+## 3. Die Phasen
 
 ### Phase 0 — Synthetisch (Minuten, keine Daten, kein GPU)
 
@@ -73,14 +84,13 @@ python3 -m pytest PINNmodulusTwo/tests -q
 python3 PINNmodulusTwo/tools/rollout_divergence.py
 ```
 
-**Tor G0:** alles grün. Rot → nicht weitermachen, `README_GPU_SERVER.md`
-Kapitel 10.
+**Tor G0:** alles grün.
 
 > **Wozu synthetisch überhaupt gut ist:** für die **Rangfolge** zwischen
 > Konfigurationen, nicht für Beträge. `README_ERSTER_TEST.md` Kapitel 9.1 sagt
 > das ausdrücklich — „die *Richtung* ist robust, die *Beträge* sind es nicht".
-> Wer synthetische MAE-Zahlen als Vorhersage für echte liest, macht genau den
-> Fehler aus dem Bericht vom 28.08. §9.
+> `train.py` druckt jetzt beim Start ein Banner, wenn der Cache synthetisch ist,
+> damit eine solche Zahl nicht versehentlich als Messung zitiert wird.
 
 ### Phase 1 — Daten prüfen (Minuten, echte Daten, kein Training)
 
@@ -101,59 +111,64 @@ python3 PINNmodulusTwo/tools/interface_probe.py
 
 ### Phase 2 — Der Maßstab (Minuten) ← **hier fehlt bisher alles**
 
+Ein kurzer Lauf, allein wegen der Latte. Die MAE des Modells ist an dieser
+Stelle egal:
+
 ```bash
-python3 PINNmodulusTwo/smallBench.py --epochs 1
+python3 PINNmodulusTwo/train.py --epochs 2 --subsample 40 \
+        --val-ops OP06 --test-ops OP07
 ```
 
-> Dieser Lauf meldet zwangsläufig `FAIL` — `converged` braucht mindestens zwei
-> Epochen (`smallBench.py:253`). Das ist hier egal: die Latte hängt nicht am
-> Modell, sondern nur an den Daten, und wird unter der Summary-Tabelle in jedem
-> Fall gedruckt.
-
-Interessiert an diesem Punkt **nicht** die MAE des Modells, sondern die drei
-Zeilen, die `smallBench.py` inzwischen darunter druckt:
+Interessant sind nur die Zeilen, die `evaluate()` unter den Trainings-OPs
+druckt:
 
 ```
-  vs. persistence T(t)=T(0):     ?? °C
-  vs. constant mean of train:    ?? °C
-  -> the bar to beat:            ?? °C
+  [val ] OP06: MAE=?? C  (beats|LOSES TO the trivial baselines:
+                          persistence=?? C, train-mean=?? C)
+  [test] OP07: MAE=?? C  (...)
 ```
 
-**Tor G2:** die Latte steht als Zahl fest, gemessen auf dem **echten** OP07.
-Die synthetischen 11.96 / 6.60 aus `README_ERSTER_TEST.md` sind **nicht** diese
-Zahl und dürfen sie nicht ersetzen.
+`persistence` ist „das Feld ändert sich nie", `train-mean` ist der konstante
+Mittelwert der Trainings-Labels (`bundle.T_mu`, per Konstruktion dieselbe Größe).
+Beide werden auf **genau dem OP** gerechnet, um das es geht — nicht zitiert.
+
+**Tor G2:** die Latte steht als Zahl fest, gemessen auf dem **echten** OP06 und
+OP07. Die synthetischen 11.96 / 6.60 aus `README_ERSTER_TEST.md` sind **nicht**
+diese Zahl und dürfen sie nicht ersetzen.
 
 Alles ab hier wird gegen diese eine Zahl gelesen.
 
 ### Phase 3 — Schritt A, das A/B (≈ 20 min CPU, Minuten GPU)
 
-Der Lauf, den `README_MODEL_CRITIQUE.md:159` „den wichtigsten im ganzen
-Dokument" nennt und der bis heute nicht gemacht wurde. **Zwei** Läufe:
+Der Lauf, den `README_MODEL_CRITIQUE.md` „den wichtigsten im ganzen Dokument"
+nennt und der bis heute nicht gemacht wurde. **Zwei** Läufe, mit `--epochs 10`
+und getrennten Ausgabeordnern, weil beide nach `artifacts/` schreiben:
 
 ```bash
-python3 PINNmodulusTwo/smallBench.py                          # neuer Stand
-python3 PINNmodulusTwo/smallBench.py \
-    --inner-steps 1 --no-residual-output --learn-gains --loss-balance legacy
+# neuer Stand
+python3 PINNmodulusTwo/train.py --epochs 10 --val-ops OP06 --test-ops OP07 \
+    | tee artifacts_A_neu.txt
+
+# der Stand vor den drei Umbauten (Trainingsbudget, Residual-Ausgang, Residuum)
+python3 PINNmodulusTwo/train.py --epochs 10 --val-ops OP06 --test-ops OP07 \
+    --inner-steps 1 --learn-gains --loss-balance legacy \
+    | tee artifacts_A_alt.txt
 ```
 
-**Tor G3:** aus `README_MODEL_CRITIQUE.md:180-186`:
+**Tor G3:**
 
 | Ergebnis | Heißt | Dann |
 |---|---|---|
 | neu deutlich besser | Unterversorgung war der Engpass | Phase 4 |
-| neu ≈ Baseline | Hauptdiagnose war falsch | Architektur zuerst (Phase 5b) |
-| neu schlechter | Overfitting durch 100× Updates, oder Residual-Ausgang | `--no-residual-output` einzeln testen |
+| neu ≈ Baseline | Hauptdiagnose war falsch | Architektur zuerst |
+| neu schlechter | Overfitting durch 100× Updates | `--inner-steps` einzeln variieren |
 | beide > 20 °C | lernt grundsätzlich nicht | **Daten prüfen, nicht Hyperparameter** |
 
 Dazu der Drift-Test, der entscheidet, ob ein Sweep überhaupt etwas misst.
-
-> ⚠️ **`pred_OP07.npz` schreibt `train.py`, nicht `smallBench.py`**
-> (`train.py:844`). `README_MODEL_CRITIQUE.md:206` stellt den Drift-Test direkt
-> hinter den smallBench-Abschnitt, was so gelesen ins Leere läuft — es braucht
-> vorher einen `train.py`-Lauf.
+`train.py` schreibt `artifacts/pred_OP07.npz` jetzt selbst, weil OP07 als
+`--test-ops` mitläuft:
 
 ```bash
-python3 PINNmodulusTwo/train.py --epochs 10        # erzeugt artifacts/pred_OP07.npz
 python3 -c "
 import numpy as np
 d = np.load('PINNmodulusTwo/artifacts/pred_OP07.npz')
@@ -162,42 +177,76 @@ print('Wachstum', e[-(n//5):].mean() / e[1:n//5].mean())
 "
 ```
 
-Wachstum > 3 → Drift dominiert, O1 vor jedem Gewichts-Sweep.
+Wachstum > 3 → Drift dominiert; das ist dann das Thema, nicht die Gewichte.
 
 ### Phase 4 — Rollout zahm bekommen (Stunden)
 
 **Tor G4: `[SATURATED]` muss in der letzten Epoche bei 0 stehen.**
 
-Aktuell 342. `train.py:674` sagt dazu wörtlich: *„it is not a prediction, and a
-run that only survives because of this is not trained."* Ein Sweep über
+Aktuell 342. `train.py` sagt dazu wörtlich: *„it is not a prediction, and a run
+that only survives because of this is not trained."* Eine Rangfolge über
 Konfigurationen, deren Rollout wegläuft, rankt Guard-Verhalten, nicht Physik.
 
 Hebel in dieser Reihenfolge: mehr Epochen → `lr` runter → `rollout_clamp`
 prüfen → `A` senken über längere `rate_lags`.
 
-### Phase 5 — Erst jetzt Benchmarks
+Ein zweites Signal dafür steht seit dem 31.08. in `metrics.txt`: `[DIVERGED]`.
+Der Eval-Rollout läuft **ohne** Clamp, damit eine weggelaufene Trajektorie nicht
+als bloß schlechte MAE erscheint — wird er nicht-endlich, sagt die Zeile ab
+welchem Schritt.
 
-**5a — Balance (~4 h GPU).** `benchmark_balance.py`. Das gerissene Kriterium aus
-Phase 3/4 **ist** die Balance, und `w_phys` bedeutet nichts, solange nicht
-feststeht, wie die Terme skaliert werden.
+### Phase 5 — Erst jetzt wieder messen, und zwar neu gebaut
 
-**5b — Architektur (~1 Tag GPU bei `--epochs 20`).** `benchmark_arch.py`,
-eine Achse nach der anderen. Nur wenn 5a die Balance geklärt hat.
+Die Reihenfolge, in der die neuen Messungen entstehen sollen. **Jede einzeln,
+nicht als Suite** — das war der Fehler beim letzten Mal.
 
-**5c — Gewichte, und zwar `--probe` (9 Punkte), nicht das 10×10-Gitter.**
-`benchmark_wphys_wbc.py --probe`. Das volle Gitter ist laut `smallBench.py:321`
-„100 trainings (~6-8 days)" und misst Gewichte, bevor feststeht, was ein Gewicht
-hier bedeutet.
+**5a — Balance.** Was ein Gewicht überhaupt bedeutet, bevor eines gesucht wird.
+`w_phys` multipliziert `L_phys/EMA(L_phys)`, also eine selbstnormierte Größe;
+solange der Physik-Term kollabiert (`spread_space`/`spread_time` nahe 0), misst
+jeder Gewichts-Sweep den Kollaps und nicht die Physik. Die beiden Diagnosen
+dafür stehen schon in der History (`spread_*`, `div_*`) und im `[FLAT]`-Log.
+
+**5b — Architektur.** Breite, Tiefe, `rate_lags`, `delta_grid` — eine Achse nach
+der anderen, jeweils über mehrere Seeds. Nur wenn 5a geklärt ist.
+
+**5c — Gewichte.** Zuletzt, klein (ein 3×3-Raster, kein 10×10).
 
 **Tor G5, über allem:** sobald ein Lauf die Latte aus Phase 2 unterbietet, ist
-das Modell zum ersten Mal mehr wert als „nichts tun". Vorher ist jede
-Rangfolge zwischen Konfigurationen eine Rangfolge zwischen Verlierern.
+das Modell zum ersten Mal mehr wert als „nichts tun".
+
+---
+
+## 4. Wie die Benchmarks neu aufgebaut werden
+
+Der Punkt der Löschung war, dass beim Neuaufbau **eine** Sache pro Schritt
+dazukommt. Reihenfolge:
+
+1. **Erst ein Lauf, den man von Hand liest.** `train.py --val-ops --test-ops`
+   kann das heute. Solange die Frage „ist eine Konfiguration besser als die
+   andere?" mit zwei Läufen und zwei Zahlen beantwortbar ist, braucht es keine
+   Maschinerie.
+2. **Dann Seeds.** Der erste echte Bedarf: eine MAE-Differenz zwischen zwei
+   Konfigurationen ist wertlos ohne die Streuung über Seeds daneben. Das ist
+   eine Schleife über `--seed` plus Mittelwert/Std — mehr nicht, und es ist die
+   einzige Ergänzung, die den bisherigen Ergebnissen wirklich gefehlt hat.
+3. **Dann eine Achse.** Eine Liste von `fit()`-Overrides, eine CSV-Zeile pro
+   Punkt. Kein Plot, kein Resume, kein Checkpoint-Merge.
+4. **Plots und Resume ganz zuletzt**, und nur für die Achse, die tatsächlich
+   Stunden läuft.
+
+Was aus dem alten Code dabei bleiben soll, ist die *Bewertungslogik*, nicht die
+Infrastruktur: Auswahl auf `--val-ops` und Bericht auf `--test-ops`, MAE als
+Kriterium und niemals `L_data`, und das Seed-Rausch-Urteil, das sagt, ob eine
+Rangfolge überhaupt verteidigt werden kann.
+
+Was **nicht** wiederkommt: dass jedes Skript seine eigene Kopie der Defaults
+mitbringt. `config.yaml` ist jetzt die einzige Quelle.
 
 ---
 
 ## 5. Was du lokal machen musst
 
-Kopiervorlage, in dieser Reihenfolge. Die ersten vier Blöcke brauchen **kein**
+Kopiervorlage, in dieser Reihenfolge. Die ersten drei Blöcke brauchen **kein**
 GPU.
 
 ```bash
@@ -212,84 +261,53 @@ python3 PINNmodulusTwo/tools/rollout_divergence.py
 # Phase 1 -- Minuten
 python3 PINNmodulusTwo/generate_cache.py OP01 OP02 OP03 OP04 OP05 OP06 OP07
 python3 PINNmodulusTwo/tools/data_probe.py
-python3 PINNmodulusTwo/tools/interface_probe.py      | tee PINNmodulusTwo/artifacts/interface.txt
+python3 PINNmodulusTwo/tools/interface_probe.py  | tee interface.txt
 
-# Phase 2 -- Minuten. Nur die "bar to beat"-Zeile zaehlt.
-python3 PINNmodulusTwo/smallBench.py --epochs 1      | tee PINNmodulusTwo/artifacts/latte.txt
+# Phase 2 -- Minuten. Nur die [val]/[test]-Zeilen zaehlen.
+python3 PINNmodulusTwo/train.py --epochs 2 --subsample 40 \
+        --val-ops OP06 --test-ops OP07        | tee latte.txt
 
 # Phase 3 -- ~20 min CPU, das A/B
-python3 PINNmodulusTwo/smallBench.py                 | tee PINNmodulusTwo/artifacts/A_neu.txt
-python3 PINNmodulusTwo/smallBench.py --inner-steps 1 --no-residual-output \
-        --learn-gains --loss-balance legacy          | tee PINNmodulusTwo/artifacts/A_alt.txt
+python3 PINNmodulusTwo/train.py --epochs 10 --val-ops OP06 --test-ops OP07 \
+                                              | tee A_neu.txt
+python3 PINNmodulusTwo/train.py --epochs 10 --val-ops OP06 --test-ops OP07 \
+        --inner-steps 1 --learn-gains --loss-balance legacy \
+                                              | tee A_alt.txt
 ```
 
-> ⚠️ **Beide A/B-Läufe schreiben in dieselbe
-> `artifacts/smallBench_results.txt`** — der zweite überschreibt den ersten.
-> `README_MODEL_CRITIQUE.md:177` verweist genau auf diese Datei zum Vergleich.
-> Das `tee` oben fängt stdout ab und genügt; wer die Datei selbst braucht,
-> kopiert sie zwischen den beiden Läufen weg.
-
 **Was du mir danach schicken kannst,** damit ich weiterrechne statt zu raten:
-`artifacts/latte.txt`, `artifacts/A_neu.txt`, `artifacts/A_alt.txt`,
-`artifacts/interface.txt`. Das sind vier kleine Textdateien.
+`latte.txt`, `A_neu.txt`, `A_alt.txt`, `interface.txt`. Vier kleine Textdateien.
 
 Erst wenn G3 und G4 grün sind, lohnt sich der GPU-Server — vorher kostet er nur
 Geld.
 
 ---
 
-## 6. Aufräumen: 4 Benchmark-Einstiege → 1
+## 6. Doku-Rollen
 
-**Vorschlag, noch nicht umgesetzt.** Die Benchmarks bleiben inhaltlich wie sie
-sind; was sich ändert, ist die Zahl der Einstiege.
-
-Was tatsächlich in den drei Benchmark-Dateien steckt:
-
-| Anteil | Zeilen (geschätzt) | Wo es hingehört |
-|---|---|---|
-| Plot / Report / CSV (`draw_*_boxes`, `write_csv`, `run_report_only`) | ~350 | `bench_common.py` — dreimal derselbe Zweck |
-| Resume / Teil-Checkpoints (`save_probe_part`, `merge_probe_parts`, `_probe_signature`) | ~150 | `bench_common.py` — generisch, nur in einer Datei vorhanden |
-| **Die eigentliche Sweep-Achse** | **~40 je Benchmark** | bleibt |
-
-Ziel:
-
-```
-bench.py --stage balance|arch|weights   # ein Einstieg, drei Gitterdefinitionen
-bench_common.py                         # Plot, Report, Resume, Scoring
-smallBench.py                           # bleibt: Rauchtest, eigener Zweck
-```
-
-Aus 2735 Zeilen in 4 Dateien werden grob 1200 in 2. **Wichtig:** das ist
-Umsortieren, kein Neuschreiben — die gemessenen Achsen und die Scoring-Logik
-bleiben identisch, sonst sind alte Läufe nicht mehr vergleichbar.
-
-**Erst nach G3.** Ein Refactor der Benchmarks, bevor feststeht, ob die
-Umbauten überhaupt geholfen haben, ist die zweite Variable in einem A/B.
-
-## 7. Aufräumen: 9 Doku-Dateien
-
-Nichts löschen — umetikettieren, damit klar ist, was Fahrplan und was Archiv
-ist.
+Nichts gelöscht außer den Benchmarks — umetikettiert, damit klar ist, was
+Fahrplan und was Archiv ist.
 
 | Datei | Rolle |
 |---|---|
 | **`FAHRPLAN.md`** (diese) | **Einstieg. Hier anfangen.** |
 | `ARCHITECTURE.md` | Nachschlagewerk: was das Modell ist, wie der Rollout läuft, offener Befund 4.1 |
+| `README.md` | Nachschlagewerk: Dateien, Flags, warum die Rekurrenz so aussieht |
 | `README_MODEL_CRITIQUE.md` | Entscheidungstabellen für Schritt A |
-| `TRAININGS_BERICHT_2026-08-28.md` | Messprotokoll, korrigiert |
-| `README_GPU_SERVER.md` | Nur aufschlagen, wenn der GPU-Server dran ist (Phase 5) |
+| `TRAININGS_BERICHT_2026-08-28.md` | Messprotokoll, Archiv |
+| `README_GPU_SERVER.md` | Nur aufschlagen, wenn der GPU-Server dran ist. **Die Benchmark-Kapitel 7/8 sind gegenstandslos** |
 | `README_ERSTER_TEST.md` | Archiv. **Alle Zahlen darin sind synthetisch** |
-| `README_LOKALER_LAUF.md` | geht in Abschnitt 5 auf → kann Verweis werden |
+| `README_LOKALER_LAUF.md` | Wohin die Daten gehören |
 | `UEBERGABE_2026-08-27.txt` | Archiv, historischer Stand |
 
 ---
 
-## 8. Was nicht zu tun ist
+## 7. Was nicht zu tun ist
 
 | Nicht | Warum |
 |---|---|
-| `w_phys` auf 1.0 / 10.0 erhöhen | `L_phys_bal = L_phys/EMA(L_phys)` ist selbstnormiert, `w_phys` kommt darin nicht vor (`train.py:600`) |
-| Das 10×10-Gewichtsgitter | ~6–8 Tage, und misst Gewichte, bevor feststeht, was eines bedeutet |
+| Die Benchmarks aus der Historie zurückholen | Sie zu haben war nie das Problem — sie ohne Maßstab zu fahren war es. Erst G2 |
+| `w_phys` auf 1.0 / 10.0 erhöhen | `L_phys_bal = L_phys/EMA(L_phys)` ist selbstnormiert, `w_phys` kommt darin nicht vor |
 | Gegen 11.96 °C vergleichen | Synthetisch, und es ist der Persistenz- nicht der Mittelwert-Vorhersager |
 | „Full Grid 6358 Punkte" | Existiert nicht. 363 ist die native Sensorzahl |
 | Am Physik-Term schrauben | Erst G3. Sonst zweite Variable im A/B |
@@ -297,7 +315,7 @@ ist.
 
 ---
 
-## 9. Abbruchkriterien
+## 8. Abbruchkriterien
 
 Ehrlichkeitsklausel — wann der Plan selbst falsch ist:
 
@@ -306,13 +324,15 @@ Ehrlichkeitsklausel — wann der Plan selbst falsch ist:
   weiter nach unten.
 * **G4 lässt sich nicht auf 0 bringen** → der Rollout ist instabil, nicht
   untertrainiert. Dann `ARCHITECTURE.md` 3.1, nicht mehr Epochen.
-* **G5 bleibt nach Phase 5a+5b rot** → das Modell schlägt einen konstanten
+* **G5 bleibt rot, auch nach 5a und 5b** → das Modell schlägt einen konstanten
   Mittelwert nicht. Dann ist die Frage nicht mehr, welches Gewicht gewinnt,
   sondern ob History-Struktur und Kapazität für diese Aufgabe reichen.
 
 ---
 
-**Stand:** 2026-08-28
-**Nicht ausgeführt:** in der Entwicklungsumgebung gibt es kein `torch`, kein
-`data_cache/` und kein `material_properties/`. Alle Laufzeiten sind aus den
+**Stand:** 2026-08-31
+**Ausgeführt:** Testsuite und ein Ende-zu-Ende-`train.py`-Lauf gegen das
+synthetische Bündel (Banner, Held-out-Auswertung, Baselines). **Nicht
+ausgeführt:** alles auf echten Daten — `data_cache/` und `material_properties/`
+liegen nur auf der Arbeitsmaschine. Alle GPU-Laufzeiten sind aus den
 Projektdokumenten übernommen, nicht nachgemessen.

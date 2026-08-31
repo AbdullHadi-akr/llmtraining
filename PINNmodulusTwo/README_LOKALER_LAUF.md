@@ -1,5 +1,14 @@
 # Lokaler Lauf — Anleitung für die Claude-Code-Sitzung auf deinem Rechner
 
+> **Update 31.08.2026 — die Benchmark-Skripte in diesem Dokument gibt es nicht
+> mehr.** `smallBench.py`, `bench_common.py`, `benchmark_balance.py`,
+> `benchmark_arch.py`, `benchmark_wphys_wbc.py` und in der Profil-Erweiterung
+> `smokeBench.py`, `profileBench.py`, `bench_profiles.py` sind gelöscht; sie
+> werden Schritt für Schritt neu aufgebaut. Jeder Befehl unten, der eines dieser
+> Skripte aufruft, läuft ins Leere. Die Messungen und Befunde bleiben gültig —
+> nur die Aufrufe nicht. Aktueller Einstieg:
+> [`FAHRPLAN.md`](FAHRPLAN.md).
+
 **Diese Datei ist das Übergabeblatt an den lokalen Assistenten.** Öffne Claude
 Code in diesem Repo-Ordner auf dem Rechner, auf dem die Simulationsdaten liegen,
 und sag:
@@ -62,12 +71,12 @@ Gitterpunkt (`materials.py:_load_row_csv`).
 ### Ohne Daten: der synthetische Cache
 
 Fehlt einer der beiden Ordner, lief bisher nichts außer den Unit-Tests — jeder
-Aufruf von `smallBench.py`, `train.py` oder einem Benchmark endete am ersten
+Aufruf von `train.py` endete am ersten
 `np.load` einer fehlenden `OP*.npz`. Dafür gibt es jetzt einen Ersatz:
 
 ```bash
 python3 PINNmodulusTwo/tools/make_synthetic_cache.py
-python3 PINNmodulusTwo/smallBench.py --quick        # laeuft jetzt durch
+python3 PINNmodulusTwo/train.py --epochs 2 --subsample 40   # laeuft jetzt durch
 ```
 
 Der Generator schreibt gültige `.npz`-Bündel und, **nur falls der Ordner fehlt**,
@@ -83,7 +92,7 @@ dem der Rollout tatsächlich instabil wird. Die Labels erfüllen außerdem
 Term ist und nicht in den Daten.
 
 **Er ersetzt keine Messung.** Jede Datei trägt eine `synthetic`-Markierung,
-`smallBench.py` druckt ein Banner, und die Absolutwerte sagen nichts über die
+`train.py` druckt ein Banner (`data.cache_is_synthetic`), und die Absolutwerte sagen nichts über die
 echten OPs. Für „läuft die Pipeline und feuern die Prüfungen" ist er da — sonst
 für nichts. `data_cache/` löschen, bevor die echten Daten hineinkommen.
 
@@ -202,7 +211,7 @@ Das ist die eigentliche Aufgabe. Vorher `README_GPU_SERVER.md` für die
 Umgebung (torch aus dem CUDA-Wheel-Index, dann `requirements-gpu.txt`).
 
 ```bash
-python3 PINNmodulusTwo/smallBench.py
+python3 PINNmodulusTwo/train.py --epochs 10 --val-ops OP06 --test-ops OP07
 ```
 
 **Worauf zu achten ist, in dieser Reihenfolge:**
@@ -227,7 +236,7 @@ python3 PINNmodulusTwo/smallBench.py
    Wärmeresiduum **und** Neumann-BC exakt. Ein fallendes `L_phys` ist dann
    nicht Physik, sondern die triviale Lösung — und das sieht man in keiner
    Verlustkurve.
-7. **„Trivial predictors" am Ende der Zusammenfassung.** `smallBench.py` rechnet
+7. **Die trivialen Vorhersager neben jeder Held-out-MAE.** `train.py` rechnet
    beide trivialen Vorhersager auf dem gehaltenen OP selbst aus und sagt, ob der
    beste Lauf die Schranke unterbietet. Tut er das nicht, ist das Modell — egal
    was sonst auf PASS steht — noch nicht mehr wert als Nichtstun.
@@ -246,7 +255,7 @@ führt zwei: „Temperatur ändert sich nie" mit 11.96 °C und „konstanter Mit
 der Trainingslabels" mit 6.60 °C. Der zweite ist der schärfere und der, an dem
 sich ein Modell messen lassen muss. Beide stammen außerdem vom synthetischen
 Bündel und gelten **nicht** als Absolutwerte für die echten OPs — deshalb rechnet
-`smallBench.py` sie inzwischen bei jedem Lauf auf dem echten Test-OP neu aus und
+`train.py` sie inzwischen bei jedem Lauf auf dem echten Held-out-OP neu aus und
 druckt sie neben die MAE. Zitiere die Zahl aus dem Lauf, nie die aus dem README.
 
 **Ein FAIL nennt jetzt seinen Grund.** Die Zeile `FAIL reason: ...` unter jedem
@@ -270,11 +279,13 @@ verlieren. Genau dann steht ein `NOTE:` darunter.
 Erst wenn Schritt 2 sauber durchläuft. Beide dauern lange, also auf der GPU.
 
 ```bash
-python3 PINNmodulusTwo/benchmark_arch.py      # Lag-Sweep
-python3 PINNmodulusTwo/benchmark_wphys_wbc.py # was bringt der Physik-Term?
+# Die Sweep-Skripte sind geloescht (Banner oben). Ein Vergleich ist heute zwei
+# Laeufe und zwei [val ]-Zeilen:
+python3 PINNmodulusTwo/train.py --rate-lags 5 20   --val-ops OP06 --epochs 20
+python3 PINNmodulusTwo/train.py --rate-lags 50 150 --val-ops OP06 --epochs 20
 ```
 
-Das Gitter von `benchmark_arch.py` ist bereits auf die A-Achse umgestellt:
+Die Achse, um die es dabei geht, ist `A = 1/(lag_n * rate_scale)`, nicht die Sekundenzahl:
 `[5,20]` (Default) · `[2,10]` · `[10,60]` · `[50,150]` · `[200,600]` ·
 `[5,20,60]`. Sagt Schritt 1 SNR < 10, `[20,60]` ergänzen.
 
@@ -299,7 +310,7 @@ In `PINNmodulusTwoExtProfiles` wurde **überhaupt nichts ausgeführt**; alle
 Änderungen dort sind aus dem Basisbefund abgeleitet. Erster Prüfstein:
 
 ```bash
-python3 PINNmodulusTwoExtProfiles/smokeBench.py
+python3 PINNmodulusTwoExtProfiles/data.py            # profile_report + coverage_report
 ```
 
 Dort ist **A größer** als im Basisprojekt, weil das Pooling über OP01–OP16

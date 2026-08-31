@@ -59,11 +59,11 @@ Which OPs are needed, in priority order — the defaults in
 - [ ] `OP03.npz` — train (30 °C, ṁ 0.0013)
 - [ ] `OP04.npz` — train (25 °C, ṁ 0.0026)
 - [ ] `OP05.npz` — train (40 °C, ṁ 0.0026)
-- [ ] `OP06.npz` — **validation**, benchmark selection ranks on this one (25 °C, ṁ 0)
+- [ ] `OP06.npz` — **validation** (`--val-ops`), what a tuning decision may look at (25 °C, ṁ 0)
 - [ ] `OP07.npz` — **report only**, never part of any selection (10 °C, ṁ 0)
 
-Without OP01–OP05 nothing trains; without OP06 the benchmarks cannot select a
-model; without OP07 there is no report number.
+Without OP01–OP05 nothing trains; without OP06 there is nothing to choose a
+configuration on; without OP07 there is no report number.
 
 **`PINNmodulusTwoExtProfiles/` — the profile extension** needs **all sixteen**,
 not a subset: OP01–OP05, OP07, OP08, OP10, OP11, OP12, OP14 to train, OP06 and
@@ -142,6 +142,10 @@ controller constraints.
 
 ## Layout
 
+> **Start here:** [`PINNmodulusTwo/FAHRPLAN.md`](PINNmodulusTwo/FAHRPLAN.md) —
+> the gated order of what to run, and what changed on 31.08.2026 when the eight
+> benchmark scripts were deleted.
+
 ```
 PINNmodulusTwo/              <- the active model, constant operating points
 PINNmodulusTwoExtProfiles/   <- extension of it to the OPs whose drivers are PROFILES
@@ -164,8 +168,10 @@ residual, and the symmetry boundary condition `dT/dx = 0` at the cell centre.
 Start with [`PINNmodulusTwo/README.md`](PINNmodulusTwo/README.md). How it works
 internally — control flow, the model, where to extend it — is in
 [`PINNmodulusTwo/ARCHITECTURE.md`](PINNmodulusTwo/ARCHITECTURE.md) (in German);
-for the GPU server setup and the full benchmark session see
-[`PINNmodulusTwo/README_GPU_SERVER.md`](PINNmodulusTwo/README_GPU_SERVER.md).
+for the GPU server setup see
+[`PINNmodulusTwo/README_GPU_SERVER.md`](PINNmodulusTwo/README_GPU_SERVER.md)
+(its benchmark chapters name scripts that no longer exist — see the banner at
+the top of that file).
 Where the model currently stands — what was broken, what is fixed, and what to
 look for in each test before spending GPU days — is in
 [`PINNmodulusTwo/README_MODEL_CRITIQUE.md`](PINNmodulusTwo/README_MODEL_CRITIQUE.md).
@@ -188,9 +194,8 @@ This folder extends the same model to the full **OP01–OP16**. The network, the
 physics residual and the recurrence are imported unchanged from
 `PINNmodulusTwo/`; what it owns is everything the profiles force: anti-aliased
 driver resampling, causal driver-rate feature channels, normalisation constants
-refitted on the wider set, and its own benchmark — **`profileBench`, the Profile
-Tier Benchmark** — because the loss weights are only meaningful relative to
-physics scales that have moved.
+refitted on the wider set, and its own evaluation — because the loss weights are
+only meaningful relative to physics scales that have moved.
 
 Start with
 [`PINNmodulusTwoExtProfiles/README.md`](PINNmodulusTwoExtProfiles/README.md).

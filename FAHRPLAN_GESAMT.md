@@ -1,5 +1,16 @@
 # Fahrplan bis zum fertigen Modell
 
+> **Update 31.08.2026 — die acht Benchmark-Skripte sind gelöscht.**
+> `smallBench.py`, `bench_common.py`, `benchmark_balance.py`,
+> `benchmark_arch.py`, `benchmark_wphys_wbc.py`, `smokeBench.py`,
+> `profileBench.py`, `bench_profiles.py`. Sie werden Schritt für Schritt neu
+> aufgebaut, sobald feststeht, was gemessen werden soll. Die Phasen E0–E5 unten
+> bleiben inhaltlich gültig; wo sie ein gelöschtes Skript aufrufen, steht jetzt
+> der `train.py`-Aufruf, der dasselbe leistet. E6 und die Profil-Stages sind
+> gegenstandslos, bis der Neuaufbau ansteht —
+> [`PINNmodulusTwo/FAHRPLAN.md`](PINNmodulusTwo/FAHRPLAN.md) §4 hat die
+> Reihenfolge dafür.
+
 **Stand: 2026-08-31.** Geltungsbereich: **beide** Projekte — `PINNmodulusTwo/`
 (Basis, OP01–OP07) und `PINNmodulusTwoExtProfiles/` (Erweiterung, OP01–OP16 mit
 Profilen) — vom heutigen Stand bis zu einem abgeschlossenen, zitierfähigen
@@ -21,21 +32,24 @@ prüfbar:
 | # | Kriterium | Woran man es sieht |
 |---|---|---|
 | **F1** | **Zielgenauigkeit dokumentiert** | Eine Zahl in °C, von der Fachseite, als Anforderung des Alterungsmodells. Steht als `README_MODEL_CRITIQUE.md` **O5** seit Wochen offen |
-| **F2** | **Modell schlägt beide trivialen Vorhersager** | `smallBench.py` druckt „bar to beat"; die Test-MAE liegt darunter — auf **echtem**, gehaltenem OP |
+| **F2** | **Modell schlägt beide trivialen Vorhersager** | `train.py` druckt persistence + Trainings-Mittel neben jeder Held-out-MAE; die MAE liegt darunter — auf **echtem**, gehaltenem OP |
 | **F3** | **Rollout stabil** | `[SATURATED]` steht in der letzten Epoche bei 0, über die volle Trajektorie, nicht nur 60 Schritte |
 | **F4** | **Ergebnis reproduzierbar** | Ein Commit-Hash + eine `config.yaml` + **ein gespeicherter Checkpoint** + eine `metrics.txt`, die zusammengehören |
-| **F5** | **Genauigkeit je Tier getrennt** | T1-interp / T2-profile / T3-extrap einzeln berichtet, nie eine Zahl für alles (`profileBench_perop.csv`) |
+| **F5** | **Genauigkeit je Tier getrennt** | T1-interp / T2-profile / T3-extrap einzeln berichtet, nie eine Zahl für alles (`op_registry` hält die Tiers; der Bericht muss neu gebaut werden) |
 | **F6** | **Grenzen dokumentiert** | Wo das Modell *nicht* gilt: außerhalb des trainierten Envelopes, an Materialgrenzen, bei Profiltypen ohne Trainingsbeispiel |
 
 **F1 ist keine Code-Frage und blockiert F6.** Ohne Zielgenauigkeit kann kein
-Benchmark sagen, ob ein Ergebnis gut ist — 8 °C besteht den `smallBench`-Check
+Messung sagen, ob ein Ergebnis gut ist — 8 °C unterbietet die trivialen Vorhersager
 und ist als Eingang eines Alterungsmodells vermutlich trotzdem zu grob. Diese
 Zahl bitte **jetzt** besorgen, parallel zu allem anderen; sie kostet dich ein
 Gespräch und entscheidet später, ob Etappe E6 zwei Tage oder zwei Wochen dauert.
 
-**F4 ist heute nicht erfüllbar.** `train.py` speichert keine Gewichte —
-kein `torch.save`, kein `--save-checkpoint`. Die Save-Logik existiert nur in
-`bench_common.py:215` für Benchmark-Läufe. Siehe **E0.3**.
+**F4 ist seit dem 31.08. erfüllbar.** `train.py` schreibt am Ende jedes Laufes
+`artifacts/model.pt` — Gewichte plus vollständige `RecurrentField`-Konfiguration
+plus `T_mu`/`T_sigma`, also alles, was ein Reload braucht
+(`--save-checkpoint ""` schaltet es ab). Vorher lag die einzige `torch.save` in
+`bench_common.py`; mit dessen Löschung wäre F4 sonst unerreichbar geworden.
+Siehe **E0.3**.
 
 ---
 
@@ -151,16 +165,21 @@ den du auf dem Rechner **mit** den Daten ausführen würdest.
 > Guard ist trotzdem nötig, weil der Befehl in der Doku steht und der Ordner
 > nicht wiederherstellbar ist.
 
-### E0.3 — Checkpoint-Speicherung in `train.py` nachrüsten
+### E0.3 — Checkpoint-Speicherung in `train.py` — ✅ erledigt 31.08.2026
 
-Ohne das ist **F4 unerreichbar**: das fertige Modell existiert nach dem Lauf
-nur im RAM. `bench_common.py:215` hat die Logik bereits (`torch.save` mit
-`checkpoint_path`); `train.py` muss sie aufrufen. Dazu gehört, dass
-`config.yaml` und der Commit-Hash **mit in die Datei** gehen — ein Checkpoint,
-zu dem die Konfiguration fehlt, ist kein reproduzierbares Ergebnis.
+`train.py` schreibt `artifacts/model.pt`: `state_dict`, die vollständigen
+`RecurrentField`-Konstruktorargumente (Breite, Tiefe, `k_max`, History-Modus,
+`rate_lags` in **normierter** Zeit), `T_mu`/`T_sigma`/`T_span_ref` für die
+Rückrechnung in °C, und der Lauf selbst (OPs, Epochen, Seed, ob der Cache
+synthetisch war). Damit ist ein Reload
+`RecurrentField(**ckpt["model_config"])` + `load_state_dict(..., strict=True)`
+und hängt nicht daran, ob `config.yaml` später noch dasselbe sagt.
+`tests/test_local_smoke.py::test_checkpoint_round_trips_without_config_yaml`
+hält das fest.
 
-Klein, aber nicht aufschiebbar: sobald E6 läuft, sind das Läufe über Stunden,
-deren Ergebnis sonst verfällt.
+Offen bleibt der **Commit-Hash** in der Datei — dafür braucht es einen
+`git`-Aufruf aus `train.py` heraus, und der Lauf soll nicht daran scheitern,
+dass er außerhalb eines Checkouts startet.
 
 ### E0.4 — Zielgenauigkeit anfragen (F1)
 
@@ -218,19 +237,19 @@ später mitten im Sweep unbequem.
 ## E2 — Die Latte
 
 ```bash
-python3 PINNmodulusTwo/smallBench.py --epochs 1 | tee PINNmodulusTwo/artifacts/latte.txt
+python3 PINNmodulusTwo/train.py --epochs 2 --subsample 40 \
+        --val-ops OP06 --test-ops OP07 | tee latte.txt
 ```
 
-Der Lauf meldet zwangsläufig `FAIL` — `converged` braucht mindestens zwei
-Epochen. Das ist hier egal: die Latte hängt nicht am Modell, sondern nur an den
-Daten, und wird unter der Summary-Tabelle in jedem Fall gedruckt.
+Zwei Epochen reichen: die Latte hängt nicht am Modell, sondern nur an den Daten.
 
-Interessant sind **nicht** die MAE des Modells, sondern die drei Zeilen darunter:
+Interessant ist **nicht** die MAE des Modells, sondern was in Klammern daneben
+steht:
 
 ```
-  vs. persistence T(t)=T(0):     ?? °C
-  vs. constant mean of train:    ?? °C
-  -> the bar to beat:            ?? °C
+  [val ] OP06: MAE=?? C  (beats|LOSES TO the trivial baselines:
+                          persistence=?? C, train-mean=?? C)
+  [test] OP07: MAE=?? C  (...)
 ```
 
 **Tor G2:** die Latte steht als Zahl fest, gemessen auf dem **echten** OP07.
@@ -252,14 +271,16 @@ Dokument" nennt und der bis heute nicht gemacht wurde.
 
 ```bash
 # neuer Stand
-python3 PINNmodulusTwo/smallBench.py                 | tee PINNmodulusTwo/artifacts/A_neu.txt
+python3 PINNmodulusTwo/train.py --epochs 10 --val-ops OP06 --test-ops OP07 \
+                                                     | tee A_neu.txt
 
 # alter Stand als Baseline
-python3 PINNmodulusTwo/smallBench.py --inner-steps 1 --no-residual-output \
-        --learn-gains --loss-balance legacy          | tee PINNmodulusTwo/artifacts/A_alt.txt
+python3 PINNmodulusTwo/train.py --epochs 10 --val-ops OP06 --test-ops OP07 \
+        --inner-steps 1 --learn-gains --loss-balance legacy \
+                                                     | tee A_alt.txt
 
-# Drift-Test -- braucht vorher einen train.py-Lauf, smallBench schreibt pred_*.npz nicht
-python3 PINNmodulusTwo/train.py --epochs 10
+# Drift-Test -- pred_OP07.npz schreibt der zweite Lauf oben schon, weil OP07
+# als --test-ops mitlaeuft
 python3 -c "
 import numpy as np
 d = np.load('PINNmodulusTwo/artifacts/pred_OP07.npz')
@@ -269,9 +290,11 @@ print(f'frueh {frueh:.3f} C  spaet {spaet:.3f} C  Wachstum {spaet/frueh:.2f}x')
 "
 ```
 
-> ⚠️ **Beide A/B-Läufe schreiben in dieselbe `artifacts/smallBench_results.txt`**
-> — der zweite überschreibt den ersten. Das `tee` oben fängt stdout ab und
-> genügt; wer die Datei selbst braucht, kopiert sie zwischen den Läufen weg.
+> ⚠️ **Beide A/B-Läufe schreiben in dieselbe `artifacts/metrics.txt`** — der
+> zweite überschreibt den ersten, ebenso `artifacts/pred_OP07.npz`. Das `tee`
+> oben fängt stdout ab und genügt für den Vergleich; wer die Dateien selbst
+> braucht, kopiert sie zwischen den Läufen weg (der Drift-Test liest
+> `pred_OP07.npz` des **zuletzt** gelaufenen Standes).
 
 **Tor G3 — drei Ablesungen, drei Entscheidungen:**
 
@@ -352,34 +375,39 @@ Datum, Commit, Config, Latte, Test-MAE. Ein Satz, der vorher nicht sagbar war.
 
 Erst jetzt. Vorher hat kein Sweep eine Aussage.
 
-### E6.0 — Vorher: 4 Benchmark-Einstiege → 1
+### E6.0 — Vorher: die Messmaschinerie neu bauen
 
-`FAHRPLAN.md` §6 hat den Vorschlag ausformuliert: `bench.py --stage
-balance|arch|weights`, gemeinsame Maschinerie in `bench_common.py`, aus 2735
-Zeilen in 4 Dateien werden grob 1200 in 2. **Umsortieren, kein Neuschreiben** —
-die gemessenen Achsen und die Scoring-Logik bleiben identisch, sonst sind alte
-Läufe nicht mehr vergleichbar.
+Die vier Skripte sind am 31.08. gelöscht worden (Banner oben). Der Neuaufbau
+kommt **hierher**, nicht früher, und in vier Schritten — die Reihenfolge steht
+in `PINNmodulusTwo/FAHRPLAN.md` §4:
 
-Das ist der richtige Zeitpunkt: nach G3/G5 steht fest, ob die Umbauten geholfen
-haben, und vor den langen Sweeps zahlt sich der eine Einstieg aus. Optional —
-wenn die Zeit drückt, geht E6a–c auch mit den vier Einstiegen, dann aber in
-genau der Reihenfolge unten, weil die Docstrings sich widersprechen.
+1. Zwei `train.py`-Läufe von Hand vergleichen. Solange das reicht, reicht das.
+2. **Seeds.** Der erste echte Bedarf: eine MAE-Differenz zwischen zwei
+   Konfigurationen ist wertlos ohne die Streuung über Seeds daneben. Eine
+   Schleife über `--seed` plus Mittelwert/Std.
+3. **Eine Achse.** Liste von `fit()`-Overrides, eine CSV-Zeile je Punkt.
+4. Plots und Resume ganz zuletzt, nur für die Achse, die wirklich Stunden läuft.
+
+Aus dem alten Code übernommen wird die **Bewertungslogik** — Auswahl auf
+`--val-ops`, Bericht auf `--test-ops`, Kriterium MAE und nie `L_data`, plus das
+Seed-Rausch-Urteil —, nicht die Infrastruktur.
 
 ### E6a — Loss-Balance (~4 h GPU)
 
-`benchmark_balance.py`. Das in E3/E4 gerissene Kriterium **ist** die Balance,
-und `w_phys` bedeutet nichts, solange nicht feststeht, wie die Terme skaliert
-werden.
+Die erste Achse. Das in E3/E4 gerissene Kriterium **ist** die Balance, und
+`w_phys` bedeutet nichts, solange nicht feststeht, wie die Terme skaliert
+werden. Die Diagnosen dafür liegen schon in der History (`spread_space`,
+`spread_time`, `div_*`) und im `[FLAT]`-Log.
 
 ### E6b — Architektur (~1 Tag GPU bei `--epochs 20`)
 
-`benchmark_arch.py`, eine Achse nach der anderen. Nur wenn E6a die Balance
-geklärt hat. Vorgezogen, falls E3(a) „neu ≈ Baseline" ergab.
+Breite, Tiefe, `rate_lags`, `delta_grid` — eine Achse nach der anderen. Nur wenn
+E6a die Balance geklärt hat. Vorgezogen, falls E3(a) „neu ≈ Baseline" ergab.
 
-### E6c — Gewichte, `--probe` (9 Punkte), **nicht** das 10×10-Gitter
+### E6c — Gewichte, klein (3×3), **nicht** das 10×10-Gitter
 
-`benchmark_wphys_wbc.py --probe`. Das volle Gitter sind „100 trainings (~6-8
-days)" und misst Gewichte, bevor feststeht, was ein Gewicht hier bedeutet.
+Das volle Gitter waren „100 trainings (~6-8 days)" und misst Gewichte, bevor
+feststeht, was ein Gewicht hier bedeutet.
 
 ### E6d — Die Materialgrenzen (`ARCHITECTURE.md` 4.1)
 
@@ -425,7 +453,7 @@ Schritten zählen:
 
 Ab OP08 werden die Treiber zeitabhängig: Fluidtemperaturprofil, CC-CV-Strom,
 Volumenstromprofil. Gleiches Modell, gleiche Physik, gleiche Rekurrenz — was
-sich ändert, sind **Vorverarbeitung, Normierung und Benchmark**.
+sich ändert, sind **Vorverarbeitung, Normierung und was zu messen ist**.
 
 > ⚠️ **Nichts aus E6 überträgt sich als Zahl.** Die Normierung poolt hier über
 > OP01–OP16, das verschiebt `T_sigma`, `dTdt_scale` und `A`. Die
@@ -437,23 +465,28 @@ Die Reihenfolge ist **nicht** frei: `resample` ändert `q_dot` → `Qsrc_scale` 
 `phys_scale`, und das sind die Divisoren des Physik-Residuums. Wer die Gewichte
 vor dem Resampling einstellt, stellt sie zweimal ein.
 
+Die **Reihenfolge der Stages** bleibt gültig; die Skripte, die sie gefahren
+hätten, sind gelöscht. Was heute schon geht, und in welcher Reihenfolge der
+Rest nachkommt:
+
 ```bash
-# Stage 0 -- Tor, Minuten
-python3 PINNmodulusTwoExtProfiles/smokeBench.py
+# Stage 0 -- Tor, Minuten. Ersetzt smokeBench: Plan-Sheet gegen die Buendel,
+# Abdeckung der Held-out-Treiber, und ein kurzer Lauf.
+python3 PINNmodulusTwoExtProfiles/op_registry.py     # der Split, ohne Daten
+python3 PINNmodulusTwoExtProfiles/data.py            # profile_report + coverage_report
+python3 PINNmodulusTwoExtProfiles/train.py --epochs 5 --subsample 40
 
-# Stage 1 -- Vorverarbeitung (9 Konfigurationen x 3 Seeds)
-python3 PINNmodulusTwoExtProfiles/profileBench.py \
-    --axes resample drivhist drlags --epochs 20 --seeds 0 1 2
+# Stage 1 -- Vorverarbeitung: resample, use_driver_history, driver_rate_lags.
+# Bis die Seed-Schleife aus E6.0 steht, von Hand: je zwei Laeufe, verglichen
+# ueber die val-MAE, die train.py ohnehin druckt.
+python3 PINNmodulusTwoExtProfiles/train.py --resample mean  --epochs 20
+python3 PINNmodulusTwoExtProfiles/train.py --resample point --epochs 20
 
-# --> Gewinner in config.yaml schreiben (resample, use_driver_history,
-#     driver_rate_lags), BEVOR es weitergeht
+# --> Gewinner in config.yaml schreiben, BEVOR es weitergeht
 
-# Stage 2 -- Loss-Gewichte (10 x 3)
-python3 PINNmodulusTwoExtProfiles/profileBench.py \
-    --axes wphys wbc --epochs 20 --seeds 0 1 2
-
-# Stage 3 -- Architektur, zuletzt und optional (10 x 3)
-python3 PINNmodulusTwoExtProfiles/profileBench.py --axes width depth ratelags
+# Stage 2 -- Loss-Gewichte. Stage 3 -- Architektur, zuletzt und optional.
+# Beide erst, wenn die Achsen-Maschinerie aus E6.0 existiert: ohne Streuung
+# ueber Seeds ist eine MAE-Differenz zwischen zwei Gewichten nicht lesbar.
 ```
 
 Aus Stage 0 zwei Dinge mitnehmen: ob die Bündel die Profile wirklich tragen, und
@@ -462,7 +495,7 @@ hier **kein** relatives Gewicht, sondern der nahezu konstante Boden, auf dem der
 Physik-Term liegt; das Verhältnis am Ende ist etwa `w_phys / L_data_final`. Also
 grob `[0, L_data_final, 10 × L_data_final]` sweepen.
 
-**Die Entscheidungsregel an jeder Stage** — `profileBench_best.txt` druckt sie
+**Die Entscheidungsregel an jeder Stage** — der neu gebaute Bericht muss sie drucken
 automatisch:
 
 | Ausgabe | Zu tun |
@@ -483,7 +516,7 @@ die falsche Antwort auf die Frage, für die diese Erweiterung existiert.
       verliert, ist nicht kaputt — T3 ist Extrapolation und war nie
       Auswahlkriterium
 - [ ] Keine T3-Zahl wird ohne den OP zitiert, aus dem sie kommt
-      (`profileBench_perop.csv` hält sie getrennt)
+      (per-OP getrennt halten, nie eine Zahl für alles)
 
 ---
 

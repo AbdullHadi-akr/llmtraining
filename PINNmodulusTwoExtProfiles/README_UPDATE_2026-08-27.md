@@ -1,5 +1,14 @@
 # Update 27.08.2026 — Rollout-Divergenz und was sich hier ändert
 
+> **Update 31.08.2026 — die Benchmark-Skripte in diesem Dokument gibt es nicht
+> mehr.** `smallBench.py`, `bench_common.py`, `benchmark_balance.py`,
+> `benchmark_arch.py`, `benchmark_wphys_wbc.py` und in der Profil-Erweiterung
+> `smokeBench.py`, `profileBench.py`, `bench_profiles.py` sind gelöscht; sie
+> werden Schritt für Schritt neu aufgebaut. Jeder Befehl unten, der eines dieser
+> Skripte aufruft, läuft ins Leere. Die Messungen und Befunde bleiben gültig —
+> nur die Aufrufe nicht. Aktueller Einstieg:
+> [`../PINNmodulusTwo/FAHRPLAN.md`](../PINNmodulusTwo/FAHRPLAN.md).
+
 Dieses Dokument fasst einen Befund aus dem Basisprojekt zusammen und beschreibt,
 was daraus für **diese Erweiterung** folgt. Die ausführliche Herleitung mit allen
 Messungen steht in

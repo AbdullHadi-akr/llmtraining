@@ -1,5 +1,14 @@
 # Erster Test — vollständige Beschreibung des Laufs
 
+> **Update 31.08.2026 — die Benchmark-Skripte in diesem Dokument gibt es nicht
+> mehr.** `smallBench.py`, `bench_common.py`, `benchmark_balance.py`,
+> `benchmark_arch.py`, `benchmark_wphys_wbc.py` und in der Profil-Erweiterung
+> `smokeBench.py`, `profileBench.py`, `bench_profiles.py` sind gelöscht; sie
+> werden Schritt für Schritt neu aufgebaut. Jeder Befehl unten, der eines dieser
+> Skripte aufruft, läuft ins Leere. Die Messungen und Befunde bleiben gültig —
+> nur die Aufrufe nicht. Aktueller Einstieg:
+> [`FAHRPLAN.md`](FAHRPLAN.md).
+
 **Stand: 27.08.2026** · Projekt `PINNmodulusTwo` · gilt ab Commit „Ursache des
 NaN-Abbruchs beheben"
 

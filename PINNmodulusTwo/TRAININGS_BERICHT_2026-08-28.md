@@ -1,5 +1,14 @@
 # Trainingsbericht PINNmodulusTwo — 2026-08-28
 
+> **Update 31.08.2026 — die Benchmark-Skripte in diesem Dokument gibt es nicht
+> mehr.** `smallBench.py`, `bench_common.py`, `benchmark_balance.py`,
+> `benchmark_arch.py`, `benchmark_wphys_wbc.py` und in der Profil-Erweiterung
+> `smokeBench.py`, `profileBench.py`, `bench_profiles.py` sind gelöscht; sie
+> werden Schritt für Schritt neu aufgebaut. Jeder Befehl unten, der eines dieser
+> Skripte aufruft, läuft ins Leere. Die Messungen und Befunde bleiben gültig —
+> nur die Aufrufe nicht. Aktueller Einstieg:
+> [`FAHRPLAN.md`](FAHRPLAN.md).
+
 > **Korrekturstand 2026-08-28 (readme update 28.8).** Die Messwerte dieses
 > Berichts sind unverändert. Mehrere Bewertungen darin waren falsch und sind
 > korrigiert — betroffen waren der genannte `FAIL`-Grund (§4), der

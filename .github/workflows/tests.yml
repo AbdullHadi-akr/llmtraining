@@ -58,6 +58,17 @@ jobs:
           import sys
           sys.path.insert(0, 'tests'); import conftest
           import model, physics, data, materials, device_utils, train
-          import bench_common, smallBench, generate_cache
-          import benchmark_arch, benchmark_balance, benchmark_wphys_wbc
+          import generate_cache, selftest
           print('all modules import')"
+
+      - name: import check (profile extension)
+        # Same failure mode, for the extension. It imports the base project
+        # through _paths, so this also catches a base-project rename that the
+        # extension still refers to by the old name.
+        working-directory: PINNmodulusTwoExtProfiles
+        run: |
+          python -c "
+          import sys
+          sys.path.insert(0, '../PINNmodulusTwo/tests'); import conftest
+          import _paths, data, op_registry, op_metrics, train
+          print('extension modules import')"

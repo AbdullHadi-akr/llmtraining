@@ -1,5 +1,14 @@
 # PINNmodulusTwo auf einem NVIDIA-GPU-Server
 
+> **Update 31.08.2026 — die Benchmark-Skripte in diesem Dokument gibt es nicht
+> mehr.** `smallBench.py`, `bench_common.py`, `benchmark_balance.py`,
+> `benchmark_arch.py`, `benchmark_wphys_wbc.py` und in der Profil-Erweiterung
+> `smokeBench.py`, `profileBench.py`, `bench_profiles.py` sind gelöscht; sie
+> werden Schritt für Schritt neu aufgebaut. Jeder Befehl unten, der eines dieser
+> Skripte aufruft, läuft ins Leere. Die Messungen und Befunde bleiben gültig —
+> nur die Aufrufe nicht. Aktueller Einstieg:
+> [`FAHRPLAN.md`](FAHRPLAN.md).
+
 Schritt-für-Schritt vom frischen Linux-Server (Ubuntu 22.04/24.04, SSH-Zugang mit
 `sudo`) bis zum laufenden Training. Der Code wählt das Device seit dem
 GPU-Umbau automatisch: `--device auto` (Default) nimmt die GPU, wenn eine da

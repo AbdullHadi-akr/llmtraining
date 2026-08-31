@@ -32,12 +32,22 @@ Learned: the MLP weights and the per-layer swish ``beta`` (plus the gains, when
 
 Output parameterisation
 -----------------------
-With ``residual_output`` (the default) the network predicts the deviation from
-the spatially averaged temperature level of the anchor slice, and :meth:`field`
-adds that level back. The level is spatially constant, so the autograd Laplacian
-in ``physics.py`` and the ``dT/dx = 0`` boundary term are untouched, while the
-rollout carries the overall temperature level instead of re-deriving it at every
-one of its ~7000 steps.
+``residual_output`` is OFF by default, and that default is load-bearing rather
+than a preference. With it ON, :meth:`field` returns ``level(t) + net(...)``
+where ``level`` is the spatial mean of the anchor slice -- so
+``level(t) ~ level(t - delta_grid) + mean(net)`` is an integrator of gain
+exactly 1 with no leak. Any one-signed component of the network output
+accumulates over the ~7000 rollout steps and nothing pulls it back: measured on
+a synthetic bundle (20 epochs, 3 seeds, no guards) it aborted 9/9 in EVERY
+history configuration, ``raw`` included, where there are no rate channels at
+all. See ``ARCHITECTURE.md`` 3.1.
+
+The parameterisation itself is kept -- switched on deliberately it is a real
+experiment, and the level is spatially constant so the autograd Laplacian in
+``physics.py`` and the ``dT/dx = 0`` boundary term stay exact either way. What
+is not kept is it being the default: this class used to default to ``True``,
+and ``PINNmodulusTwoExtProfiles`` inherited that silently for its whole life by
+never passing the argument.
 """
 
 from __future__ import annotations
@@ -207,7 +217,7 @@ class RecurrentField(nn.Module):
         weight_norm: bool = True,
         beta_init: float = 1.0,
         use_autograd_time: bool = False,
-        residual_output: bool = True,
+        residual_output: bool = False,
         learn_gains: bool = False,
     ) -> None:
         super().__init__()

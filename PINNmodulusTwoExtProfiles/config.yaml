@@ -1,10 +1,9 @@
 # Defaults for the PINNmodulusTwo PROFILE EXTENSION (every key is overridable
-# on the CLI). train.py reads this in _load_yaml_defaults(); smokeBench.py and
-# profileBench.py read the keys they share.
+# on the CLI). train.py reads this in _load_yaml_defaults().
 #
-# This file is the benchmark configuration: a bare `python3 train.py` trains the
-# same model profileBench measures. Keys that exist in PINNmodulusTwo/config.yaml
-# keep the same meaning there and here; the block at the bottom is new.
+# Keys that exist in PINNmodulusTwo/config.yaml keep the same meaning there and
+# here; the profile block below is new. The benchmark scripts that used to read
+# this file (smokeBench.py, profileBench.py) are deleted -- see the README.
 
 # ---- hardware ---------------------------------------------------------------
 device: auto               # auto | cpu | cuda | cuda:N
@@ -15,9 +14,10 @@ tf32: false
 # ---- data -------------------------------------------------------------------
 # The split lives in op_registry.py (DEFAULT_TRAIN/VAL/TEST_OPS) and is repeated
 # here so a run can be re-pointed without editing code. Keep the two in sync, or
-# pass --ops/--val-ops/--test-ops explicitly.
+# pass --ops/--val-ops/--test-ops explicitly. val_ops is what a tuning decision
+# may look at; test_ops is read once and never selected on.
 ops:      [OP01, OP02, OP03, OP04, OP05, OP07, OP08, OP10, OP11, OP12, OP14]
-val_ops:  [OP06, OP09]      # SELECTION set of profileBench
+val_ops:  [OP06, OP09]      # SELECTION set: constant + profile, one each
 test_ops: [OP13, OP15, OP16]  # report only, never selected on
 subsample_time: 2          # dt = 0.1s * subsample -> 0.2s (CFL limit ~0.241s)
 train_frac: 0.8            # timeline fraction used for the pooled statistics
@@ -120,7 +120,8 @@ holdout_tail: false
 # ---- loss weights -----------------------------------------------------------
 # NOT inherited from PINNmodulusTwo on purpose: phys_scale/Qsrc_scale are fitted
 # on a different OP set here, so the same number means a different mixing ratio.
-# These are placeholders until profileBench has run -- see the README.
+# These are placeholders: nothing has measured them on this OP set yet, and the
+# benchmark that was going to is deleted -- see the README.
 w_data: 1.0
 w_phys: 0.1
 w_bc: 0.1
