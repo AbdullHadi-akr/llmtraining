@@ -32,8 +32,12 @@ import argparse
 import time
 from pathlib import Path
 
-import numpy as np
-import torch
+from env_check import require_training_env
+
+require_training_env()   # a useful sentence instead of a pandas ImportError
+
+import numpy as np  # noqa: E402
+import torch  # noqa: E402
 
 from data import (
     build_op, cache_is_synthetic, coverage_report, effective_rate_scale,

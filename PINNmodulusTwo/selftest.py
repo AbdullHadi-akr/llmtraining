@@ -17,7 +17,12 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-import numpy as np
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from env_check import require_training_env  # noqa: E402
+
+require_training_env()   # a useful sentence instead of a pandas ImportError
+
+import numpy as np  # noqa: E402
 
 # Nothing below touches a network, but ``physics`` imports ``model``, which
 # imports Modulus at module scope -- so this file could only ever run on the one

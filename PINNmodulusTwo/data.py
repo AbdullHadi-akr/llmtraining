@@ -71,10 +71,14 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List, Sequence
 
-import numpy as np
+from env_check import require_training_env
 
-from materials import load_material_properties
-from op_registry import PROFILE_CHANNELS
+require_training_env()   # a useful sentence instead of a pandas ImportError
+
+import numpy as np  # noqa: E402
+
+from materials import load_material_properties  # noqa: E402
+from op_registry import PROFILE_CHANNELS  # noqa: E402
 
 THIS_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = THIS_DIR.parent
@@ -136,6 +140,11 @@ TRANSIENT_TAU = 1.0
 # Below this the within-OP temporal spread of a channel is treated as numerical
 # noise rather than a profile, in the channel's own physical units.
 PROFILE_DETECT_TOL = 1e-6
+
+# Temperature-history segment lengths the report quotes A for. Only a reporting
+# default -- the value that trains comes from config.yaml / --rate-lags, and
+# train.py prints A for whatever was actually asked for.
+TEMPERATURE_RATE_LAGS_FOR_REPORT = (5.0, 20.0)
 
 
 # ---------------------------------------------------------------------------
@@ -871,6 +880,27 @@ def normalisation_report(bundle: NormBundle) -> List[str]:
         f"rate_lags={list(bundle.driver_rate_lags)} s  "
         f"n_forcing={bundle.n_forcing} (1 + {bundle.n_driver_rate} rate channels)",
     ]
+
+    # The amplification of the hybrid TEMPERATURE history. It used to be printed
+    # only by train.py, which meant the one number a data check is supposed to
+    # produce could not be read off a data check.
+    #
+    # It is reported against the subsample this bundle was loaded at, because
+    # dTdt_scale is an RMS of a central difference ON THAT GRID: a coarse grid
+    # smooths the derivative and a fine one does not, so A is not a property of
+    # the data alone. Quoting a value without its subsample is how two people
+    # end up comparing different numbers under the same name.
+    dt_s = bundle.ops[0].dtn * bundle.T_span_ref if bundle.ops else float("nan")
+    amps = [(lag, 1.0 / ((lag / bundle.T_span_ref) * bundle.dTdt_scale + 1e-30))
+            for lag in TEMPERATURE_RATE_LAGS_FOR_REPORT]
+    lines.append(
+        "  A = 1/(lag_n * dTdt_scale), the factor the hybrid temperature history "
+        "multiplies a one-step jump by:"
+    )
+    lines.append(
+        "    " + "   ".join(f"lag {lag:g}s -> A = {a:.1f}" for lag, a in amps)
+        + f"      (at dt = {dt_s:.3g} s; A DEPENDS ON THIS)"
+    )
     rms = bundle.per_op_Qsrc_rms
     if rms:
         lo = min(rms, key=rms.get)
@@ -988,6 +1018,19 @@ def profile_report(bundle: NormBundle, extra_ops: Sequence[OPData] = ()) -> List
     The plan sheet in ``op_registry`` is a transcription and can be wrong; the
     ``.npz`` is the ground truth. Disagreement is worth seeing, so both are
     printed and mismatches are marked.
+
+    On a mismatch there is a THIRD source worth consulting, and it is what
+    separates the two very different causes: ``meta_json.profile_flags``, which
+    the upstream assembly wrote to record what it BELIEVED it was producing.
+
+    * the sheet claims a profile, the assembly flagged it, the data is constant
+      -> the assembly ran but the profile file was missing or empty, and the
+         channel silently fell back to its scalar. A data-build problem.
+    * the sheet claims a profile and the assembly never flagged it
+      -> the sheet is wrong for this OP, or this OP was exported without it.
+
+    Guessing between those two costs a rebuild of the wrong thing, so the flags
+    are printed whenever they add information.
     """
     from op_registry import OPS, profiles_of
 
@@ -1003,6 +1046,35 @@ def profile_report(bundle: NormBundle, extra_ops: Sequence[OPData] = ()) -> List
             f"sheet={','.join(claimed) or '-':<45} "
             f"transient={op.transient_frac*100:5.1f}%{flag}"
         )
+        if flag:
+            meta = tuple(m for m in op.profile_flags_meta if m in PROFILE_CHANNELS)
+            missing = tuple(c for c in claimed if c not in detected)
+            extra = tuple(c for c in detected if c not in claimed)
+            lines.append(
+                f"      upstream assembly flagged: "
+                f"{','.join(meta) or '(nothing, or no meta_json in the bundle)'}"
+            )
+            for chan in missing:
+                if chan in meta:
+                    lines.append(
+                        f"      ! {chan}: the assembly flagged it as a profile but "
+                        f"the values do not vary. The profile file was missing or "
+                        f"empty and the channel fell back to its scalar -- rebuild "
+                        f"this OP and check its raw export."
+                    )
+                else:
+                    lines.append(
+                        f"      ! {chan}: the sheet claims it, the assembly never "
+                        f"flagged it, and the values do not vary. Either the sheet "
+                        f"is wrong for {op.op_id} or it was exported without this "
+                        f"profile. Believe the bundle, then fix whichever is wrong."
+                    )
+            for chan in extra:
+                lines.append(
+                    f"      ! {chan}: varies in the bundle but the sheet does not "
+                    f"claim it. The sheet is a transcription -- check it against "
+                    f"the source before trusting the tier for {op.op_id}."
+                )
         for name, (lo, hi) in sorted(op.profile_coverage.items()):
             t_lo, t_hi = float(op.t[0]), float(op.t[-1])
             if lo > t_lo + 1e-6 or hi < t_hi - 1e-6:
