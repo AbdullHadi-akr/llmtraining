@@ -40,6 +40,11 @@ BOX_TIME_SEED = 20240517
 # History shape returned by fit(); used as a placeholder when fit() itself failed.
 EMPTY_HIST = {"epoch": [], "L_data": [], "L_phys": [], "L_bc": [],
               "L_phys_bal": [], "L_bc_bal": [], "ratio_phys": [], "ratio_bc": [],
+              # Must stay in step with the history train.fit builds, or a
+              # benchmark that aggregates a crashed seed against a successful
+              # one hits a KeyError on the series only one of them carries.
+              "div_data": [], "div_phys": [], "div_bc": [],
+              "spread_space": [], "spread_time": [],
               "delta": [], "aborted": True}
 
 

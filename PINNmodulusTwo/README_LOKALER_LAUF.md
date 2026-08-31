@@ -59,6 +59,38 @@ PINNmodulusTwo/material_properties/JR1 Center/*.csv
 Die Property-CSVs haben eine Kopfzeile und **eine** Datenzeile, eine Spalte je
 Gitterpunkt (`materials.py:_load_row_csv`).
 
+### Ohne Daten: der synthetische Cache
+
+Fehlt einer der beiden Ordner, lief bisher nichts außer den Unit-Tests — jeder
+Aufruf von `smallBench.py`, `train.py` oder einem Benchmark endete am ersten
+`np.load` einer fehlenden `OP*.npz`. Dafür gibt es jetzt einen Ersatz:
+
+```bash
+python3 PINNmodulusTwo/tools/make_synthetic_cache.py
+python3 PINNmodulusTwo/smallBench.py --quick        # laeuft jetzt durch
+```
+
+Der Generator schreibt gültige `.npz`-Bündel und, **nur falls der Ordner fehlt**,
+ein Ersatz-`material_properties/`. Ein vorhandenes lässt er unangetastet und
+leitet die Punktzahl je Schicht sogar aus dessen CSV-Spalten ab, damit beides
+zusammenpasst.
+
+Er ist kalibriert, nicht geraten: bei der Voreinstellung von 1445 s (der echten
+OP01-Länge) kommt `dTdt_scale = 2.51` gegen echte 2.479 heraus und
+`A = 115 / 28.8` gegen echte 118.9 / 29.7 — also dasselbe Verstärkungsregime, in
+dem der Rollout tatsächlich instabil wird. Die Labels erfüllen außerdem
+`dT/dx = 0` bei `x = 0`, damit ein BC-Term, der nicht konvergiert, ein Fehler im
+Term ist und nicht in den Daten.
+
+**Er ersetzt keine Messung.** Jede Datei trägt eine `synthetic`-Markierung,
+`smallBench.py` druckt ein Banner, und die Absolutwerte sagen nichts über die
+echten OPs. Für „läuft die Pipeline und feuern die Prüfungen" ist er da — sonst
+für nichts. `data_cache/` löschen, bevor die echten Daten hineinkommen.
+
+Fehlt zusätzlich Modulus (Laptop ohne CUDA-Stack), setzt `--modulus-stub` die
+init-treue Ersatzschicht aus `tools/_modulus_stub.py` ein — ebenfalls mit
+Banner, ebenfalls nie für eine zitierte Zahl.
+
 ### Alternative Orte
 
 `data.py` sucht den Cache in dieser Reihenfolge und nimmt den ersten Treffer:
@@ -176,7 +208,22 @@ python3 PINNmodulusTwo/smallBench.py
    `--no-residual-output`, dann `--rollout-clamp 50`.
 4. **`[SATURATED] epoch N: ... x/y steps`** — der Zählstand soll **fallen**.
    Flach oder steigend heißt, das Modell fängt sich nicht.
-5. **Die MAE-Zahlen aus `metrics.txt`** in `README_ERSTER_TEST.md` Kapitel 6
+5. **`BC points (x=0): n/363`** und die beiden `[WARN]`-Zeilen darunter. Ist
+   `n = 0`, wird `L_bc` identisch 0 und der Lauf fällt für den Rest der Zeit
+   durch die Balance-Prüfung, ohne dass irgendwo steht, dass die BC nie
+   ausgewertet wurde. Ist `n` kleiner als `--batch-bc`, wird der BC-Term aus
+   `n` Punkten geschätzt statt aus `batch_bc`.
+6. **`spread s/t=` in der Epochenzeile** — wie viel Struktur der eigene Rollout
+   noch trägt, relativ zu den Labels. Fällt einer der beiden Werte unter 0.2,
+   kommt eine `[FLAT]`-Zeile: ein räumlich und zeitlich konstantes Feld erfüllt
+   Wärmeresiduum **und** Neumann-BC exakt. Ein fallendes `L_phys` ist dann
+   nicht Physik, sondern die triviale Lösung — und das sieht man in keiner
+   Verlustkurve.
+7. **„Trivial predictors" am Ende der Zusammenfassung.** `smallBench.py` rechnet
+   beide trivialen Vorhersager auf dem gehaltenen OP selbst aus und sagt, ob der
+   beste Lauf die Schranke unterbietet. Tut er das nicht, ist das Modell — egal
+   was sonst auf PASS steht — noch nicht mehr wert als Nichtstun.
+8. **Die MAE-Zahlen aus `metrics.txt`** in `README_ERSTER_TEST.md` Kapitel 6
    eintragen und die dort stehenden synthetischen Zahlen ersetzen. Dabei den
    Hinweis, dass es synthetische Zahlen sind, mit entfernen.
 
@@ -185,6 +232,28 @@ abbrach. Die 11.96 °C aus den alten Dokumenten sind eine **Baseline** (der
 Fehler eines Vorhersagers, der nichts tut), keine frühere Messung. Es gibt
 keine Verbesserung „von 11 auf 0.5". Diese Zahl ist der Maßstab, gegen den die
 erste echte MAE zu lesen ist.
+
+**Und sie ist nicht die einzige Baseline.** `README_ERSTER_TEST.md` Kapitel 6
+führt zwei: „Temperatur ändert sich nie" mit 11.96 °C und „konstanter Mittelwert
+der Trainingslabels" mit 6.60 °C. Der zweite ist der schärfere und der, an dem
+sich ein Modell messen lassen muss. Beide stammen außerdem vom synthetischen
+Bündel und gelten **nicht** als Absolutwerte für die echten OPs — deshalb rechnet
+`smallBench.py` sie inzwischen bei jedem Lauf auf dem echten Test-OP neu aus und
+druckt sie neben die MAE. Zitiere die Zahl aus dem Lauf, nie die aus dem README.
+
+**Ein FAIL nennt jetzt seinen Grund.** Die Zeile `FAIL reason: ...` unter jedem
+Lauf sagt, welche der vier Prüfungen gekippt ist. Das ist nicht kosmetisch:
+`passed` ist eine Und-Verknüpfung aus Stabilität, Konvergenz, **beiden**
+Balance-Prüfungen und der MAE-Schranke, und diese Schranke ist ein
+`test_mae < 20`, das kein Lauf dieses Projekts je gerissen hat. Ein FAIL kam
+damit fast immer vom Physik- oder vom BC-Term — und `L_bc_bal` stand früher in
+keiner Zusammenfassungstabelle.
+
+**PASS heißt „der Lauf ist brauchbar", nicht „das Modell ist gut."** Die vier
+Prüfungen sind Rauchtests. Die Frage, ob sich das Training überhaupt gelohnt
+hat, beantwortet allein der Vergleich mit den trivialen Vorhersagern; ein Lauf
+kann alle vier bestehen und trotzdem gegen „Temperatur bleibt konstant"
+verlieren. Genau dann steht ein `NOTE:` darunter.
 
 ---
 
