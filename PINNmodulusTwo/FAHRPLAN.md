@@ -30,8 +30,8 @@ zusammen unter einer Stunde. Erst Schritt 6 kostet etwas.
 **Nach jedem Schritt steht, was dich stoppen muss.** Wenn ein Stopp-Kriterium
 zutrifft: nicht weitermachen, sondern die genannte Datei schicken.
 
-- [ ] **1** Code holen
-- [ ] **2** Läuft der Code? (keine Daten nötig)
+- [x] **1** Code holen — 31.08.
+- [x] **2** Läuft der Code? (keine Daten nötig) — 31.08., grün
 - [ ] **3** Cache bauen, alle sechzehn
 - [ ] **4** Stimmen die Daten? ← erstes echtes Tor
 - [ ] **5** Die Latte ← das entscheidende Tor
@@ -43,7 +43,9 @@ Wird beim Abhaken ausgefüllt. Leer = noch nicht gemessen.
 
 | Schritt | Kriterium | gemessen | Datum |
 |---|---|---|---|
-| 2 | `pytest` grün | | |
+| 2 | `selftest.py` | **all checks passed** | 31.08. |
+| 2 | `pytest` | **112 passed, 1 skipped** (83 s) | 31.08. |
+| 2 | `op_registry.py` | 11 train / 2 val / 3 test, keine Warnung | 31.08. |
 | 3 | 16 OPs gebaut (+ OP19?) | | |
 | 4 | `MISMATCH`-Zeilen | | |
 | 4 | `bc_pairs` > 0 | | |
@@ -65,7 +67,7 @@ source modulus_env/bin/activate
 
 ---
 
-### - [ ] Schritt 1 — Code holen (1 min)
+### - [x] Schritt 1 — Code holen (1 min)
 
 PR #20 ist gemergt, es reicht also `main`:
 
@@ -82,16 +84,29 @@ git pull
 
 ---
 
-### - [ ] Schritt 2 — Läuft der Code überhaupt? (2 min, keine Daten nötig)
+### - [x] Schritt 2 — Läuft der Code überhaupt? (2 min, keine Daten nötig)
 
 ```bash
+source modulus_env/bin/activate          # <- OHNE DAS schlaegt alles fehl
 python3 PINNmodulusTwo/selftest.py
 python3 -m pytest PINNmodulusTwo/tests -q
 python3 PINNmodulusTwo/op_registry.py
 ```
 
-**Erwartung:** `all checks passed`, `110 passed`, und eine Tabelle mit
-11 train / 2 val / 3 test OPs ohne Warnung darunter.
+**Gemessen am 31.08.:** `all checks passed`, **112 passed, 1 skipped** (83 s),
+und die Tabelle mit 11 train / 2 val / 3 test OPs ohne Warnung. ✅
+
+> **Die Aktivierungszeile ist der Stolperstein.** Ohne sie laeuft alles unter
+> `/usr/bin/python3` und der Fehler lautet
+> `ModuleNotFoundError: No module named 'pandas'` — vier Importe tief in
+> `materials.py`, wo nichts kaputt ist. `op_registry.py` laeuft trotzdem durch,
+> weil es reine Standardbibliothek ist, was den Eindruck verstaerkt, es fehle
+> nur eine Bibliothek.
+>
+> Seit dem 31.08. faengt `env_check.py` das ab und sagt stattdessen, welcher
+> Interpreter laeuft und dass das venv fehlt. **Nicht** `pip install pandas` ins
+> System-Python — das macht den naechsten Fehler schwerer lesbar, nicht
+> leichter.
 
 **Stopp wenn:** irgendetwas davon rot ist. → Ausgabe schicken.
 
@@ -556,8 +571,9 @@ Ehrlichkeitsklausel — wann der Plan selbst falsch ist:
 
 ---
 
-**Zuletzt fortgeschrieben:** 2026-08-31 — Ersteinrichtung, noch kein Schritt
-abgehakt. PR #20 ist gemergt, alles hier steht auf `main`.
+**Zuletzt fortgeschrieben:** 2026-08-31 — **Schritt 1 und 2 sind gruen**
+(112 passed). Damit steht zum ersten Mal etwas Gemessenes in der Stand-Tabelle.
+Als Naechstes Schritt 3, der Cache.
 
 **Ausgeführt:** Testsuite (110 grün) und Ende-zu-Ende-`train.py`-Läufe gegen ein
 synthetisches Bündel — Banner, Training, val/test, `op_metrics`, Coverage-Report,

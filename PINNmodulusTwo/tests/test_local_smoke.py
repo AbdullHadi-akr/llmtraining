@@ -415,3 +415,56 @@ def test_val_ops_still_fail_fast(synthetic_cache):
     """
     with pytest.raises(SystemExit):
         train_mod.require_ops("OP01", "OP99")
+
+
+# --------------------------------------------------------------------------
+# environment guard
+# --------------------------------------------------------------------------
+
+def test_env_check_names_the_interpreter_not_the_import(monkeypatch):
+    """The message has to point at the venv, not at whichever import failed.
+
+    The real failure was `ModuleNotFoundError: No module named 'pandas'` raised
+    four imports deep in materials.py. Every word true, none of it the problem
+    -- and the obvious reading ("pip install pandas") half-populates the system
+    interpreter and makes the NEXT error worse. So the guard must name the
+    interpreter in use and the activate command.
+    """
+    import env_check
+
+    monkeypatch.setattr(env_check, "_REQUIRED", (("no_such_module_xyz", "no-such"),))
+    monkeypatch.setattr(env_check.sys, "prefix", "/usr")
+    monkeypatch.setattr(env_check.sys, "base_prefix", "/usr")   # not a venv
+
+    with pytest.raises(SystemExit) as exc:
+        env_check.require_training_env()
+
+    msg = str(exc.value)
+    assert "no_such_module_xyz" in msg
+    assert env_check.sys.executable in msg      # WHICH python is running
+    assert "activate" in msg                     # and what to do about it
+    assert "Do NOT pip install" in msg
+
+
+def test_env_check_is_silent_when_the_env_is_fine():
+    """A no-op in a working environment -- it runs at every entry point."""
+    import env_check
+    env_check.require_training_env()             # must not raise
+
+
+def test_env_check_imports_nothing_third_party():
+    """It has to survive exactly the situation it diagnoses.
+
+    A guard that itself needs numpy cannot report that numpy is missing.
+    """
+    import ast
+    from pathlib import Path
+
+    src = (Path(__file__).resolve().parent.parent / "env_check.py").read_text()
+    stdlib_only = {"__future__", "importlib", "importlib.util", "sys", "pathlib"}
+    for node in ast.walk(ast.parse(src)):
+        if isinstance(node, ast.Import):
+            for a in node.names:
+                assert a.name in stdlib_only, f"env_check imports {a.name}"
+        elif isinstance(node, ast.ImportFrom):
+            assert node.module in stdlib_only, f"env_check imports {node.module}"

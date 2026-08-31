@@ -71,10 +71,14 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List, Sequence
 
-import numpy as np
+from env_check import require_training_env
 
-from materials import load_material_properties
-from op_registry import PROFILE_CHANNELS
+require_training_env()   # a useful sentence instead of a pandas ImportError
+
+import numpy as np  # noqa: E402
+
+from materials import load_material_properties  # noqa: E402
+from op_registry import PROFILE_CHANNELS  # noqa: E402
 
 THIS_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = THIS_DIR.parent
