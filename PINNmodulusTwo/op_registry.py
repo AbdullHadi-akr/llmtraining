@@ -160,12 +160,18 @@ ALL_OPS: tuple = tuple(OPS)
 # a bug.
 MEASUREMENT_OPS = ("OP17", "OP18", "OP19")
 
-# Which of them this pipeline can actually build a bundle for. OP17 and OP18
-# have no row in legacy/battery_surrogate_agenticWorkflow/op_matrix.yaml and no
-# raw export, so generate_cache.py cannot produce them today; OP19 has both.
-# This is a statement about the DATA on disk, not about the model: data.build_op
-# reads any bundle that exists and detects profiles from it, so the day an
-# OP17.npz appears it needs no code change here -- only a line in this comment.
+# Which of them exist as data today.
+#
+# OP17 and OP18 HAVE NOT BEEN SIMULATED YET. That is the reason, and it is worth
+# stating as such rather than as its symptom: they have no row in
+# legacy/battery_surrogate_agenticWorkflow/op_matrix.yaml and no raw export
+# BECAUSE the runs have not been done, not because anything about them is
+# unsupported. OP19 has been simulated and has both.
+#
+# So this is a statement about what has been computed, not about what the code
+# can handle. data.build_op reads any bundle that exists and detects which
+# channels are profiles from the bundle itself, so the day an OP17.npz appears
+# it needs no code change here -- only its id added to this tuple.
 MEASUREMENT_OPS_AVAILABLE = ("OP19",)
 
 

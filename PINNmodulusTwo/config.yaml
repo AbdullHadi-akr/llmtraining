@@ -52,8 +52,10 @@ test_ops: [OP13, OP15, OP16]  # report only, read once, never selected on
 #   OP19  Fahrzyklus TDD.3    -- WLTP (synthetic), mixed
 #
 # **OP19 exists** and has a row in op_matrix.yaml, so generate_cache.py can
-# build it; OP17 and OP18 have neither, so they cannot be built today. Set this
-# to [OP19] once OP19.npz is on the machine.
+# build it. **OP17 and OP18 have not been simulated yet** -- that is why they
+# have no row and no raw export, and it is the only thing missing: nothing in
+# the code needs changing when they arrive. Set this to [OP19] once OP19.npz is
+# on the machine.
 #
 # Read the number as "does a model fitted to StarCCM+ agree with a real cell?",
 # never as a held-out simulation result: it mixes model error, measurement error

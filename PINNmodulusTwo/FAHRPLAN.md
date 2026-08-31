@@ -1,7 +1,24 @@
-# Fahrplan — ein Projekt, OP01–OP16, von vorne
+# Fahrplan — ein Projekt, OP01–OP16
 
 **Diese Datei ist der Einstieg.** Alles andere ist Nachschlagewerk. Wenn du nur
 eine Datei liest, dann diese.
+
+> ### Lebendes Dokument
+>
+> Diese Datei wird nach **jedem** Ergebnis fortgeschrieben — sie ist kein Plan,
+> den man einmal schreibt und dann abarbeitet. Die Regeln dafür:
+>
+> * **Haken setzen, sobald ein Schritt durch ist** (`- [ ]` → `- [x]`), und die
+>   gemessene Zahl in die Tabelle „Stand" darunter eintragen. Ein Haken ohne
+>   Zahl ist wertlos: „gelaufen" und „das Kriterium erfüllt" sind zwei Dinge.
+> * **Gemessene Zahlen ersetzen Vermutungen im Text.** Wo hier „unbekannt" oder
+>   „ungemessen" steht und eine Messung vorliegt, wird der Satz umgeschrieben,
+>   nicht ergänzt.
+> * **Ein rotes Tor ändert den Plan, nicht nur den Haken.** Wenn Schritt 5
+>   `LOSES TO` sagt, ist die Reihenfolge darunter falsch und wird neu geschrieben
+>   — nicht abgehakt und ignoriert.
+> * **Nichts hier ist gemessen, solange kein Haken steht.** Jede Zahl in diesem
+>   Repo stammt bis heute aus einem synthetischen Bündel.
 
 ---
 
@@ -13,6 +30,31 @@ zusammen unter einer Stunde. Erst Schritt 6 kostet etwas.
 **Nach jedem Schritt steht, was dich stoppen muss.** Wenn ein Stopp-Kriterium
 zutrifft: nicht weitermachen, sondern die genannte Datei schicken.
 
+- [ ] **1** Code holen
+- [ ] **2** Läuft der Code? (keine Daten nötig)
+- [ ] **3** Cache bauen, alle sechzehn
+- [ ] **4** Stimmen die Daten? ← erstes echtes Tor
+- [ ] **5** Die Latte ← das entscheidende Tor
+- [ ] **6** Erster ernsthafter Lauf (GPU)
+
+## Stand
+
+Wird beim Abhaken ausgefüllt. Leer = noch nicht gemessen.
+
+| Schritt | Kriterium | gemessen | Datum |
+|---|---|---|---|
+| 2 | `pytest` grün | | |
+| 3 | 16 OPs gebaut (+ OP19?) | | |
+| 4 | `MISMATCH`-Zeilen | | |
+| 4 | `bc_pairs` > 0 | | |
+| 4 | **`A` je Lag** | | |
+| 4 | `dTdt_scale` | | |
+| 5 | OP06 `beats` / `LOSES TO` | | |
+| 5 | OP09 `beats` / `LOSES TO` | | |
+| 6 | `[SATURATED]` letzte Epoche | | |
+| 6 | MAE OP06 / OP09 | | |
+| 6 | MAE OP13 / OP15 / OP16 | | |
+
 Alles läuft aus dem Repo-Wurzelverzeichnis:
 
 ```bash
@@ -22,7 +64,7 @@ source modulus_env/bin/activate
 
 ---
 
-### Schritt 1 — Code holen (1 min)
+### - [ ] Schritt 1 — Code holen (1 min)
 
 ```bash
 git fetch origin
@@ -38,7 +80,7 @@ git pull
 
 ---
 
-### Schritt 2 — Läuft der Code überhaupt? (2 min, keine Daten nötig)
+### - [ ] Schritt 2 — Läuft der Code überhaupt? (2 min, keine Daten nötig)
 
 ```bash
 python3 PINNmodulusTwo/selftest.py
@@ -53,7 +95,7 @@ python3 PINNmodulusTwo/op_registry.py
 
 ---
 
-### Schritt 3 — Cache bauen, alle sechzehn (10–30 min)
+### - [ ] Schritt 3 — Cache bauen, alle sechzehn (10–30 min)
 
 Der Cache muss neu, weil bisher nur OP01–OP07 gebraucht wurden:
 
@@ -73,7 +115,7 @@ python3 PINNmodulusTwo/generate_cache.py OP19 2>&1 | tee -a 03_cache.txt
 
 ---
 
-### Schritt 4 — Stimmen die Daten? (2 min) ← **das erste echte Tor**
+### - [ ] Schritt 4 — Stimmen die Daten? (2 min) ← **das erste echte Tor**
 
 ```bash
 python3 PINNmodulusTwo/data.py 2>&1 | tee 04_daten.txt
@@ -95,7 +137,7 @@ größer, weiß niemand — das ist die Zahl, die ich als Nächstes brauche.
 
 ---
 
-### Schritt 5 — Die Latte (5–10 min, CPU reicht) ← **das entscheidende Tor**
+### - [ ] Schritt 5 — Die Latte (5–10 min, CPU reicht) ← **das entscheidende Tor**
 
 ```bash
 python3 PINNmodulusTwo/train.py --epochs 2 --subsample 40 --device cpu \
@@ -124,7 +166,7 @@ verschwendete Zeit. → `05_latte.txt` schicken, ich sage dir den Wert für
 
 ---
 
-### Schritt 6 — Der erste ernsthafte Lauf (Stunden, jetzt GPU)
+### - [ ] Schritt 6 — Der erste ernsthafte Lauf (Stunden, jetzt GPU)
 
 Erst wenn 4 und 5 grün sind.
 
@@ -236,9 +278,14 @@ bei OP01–OP16. Was das Blatt nennt, ist die Art des Versuchs:
 
 > **OP19 existiert** und hat eine Zeile in
 > `legacy/battery_surrogate_agenticWorkflow/op_matrix.yaml`, lässt sich also mit
-> `generate_cache.py` bauen. **OP17 und OP18 haben dort keine Zeile und keinen
-> Rohexport** — sie sind heute nicht baubar. „OP01 bis OP19" heißt in der Praxis
-> also **siebzehn** verfügbare Betriebspunkte, nicht neunzehn.
+> `generate_cache.py` bauen.
+>
+> **OP17 und OP18 sind schlicht noch nicht simuliert.** Deshalb haben sie weder
+> eine Zeile noch einen Rohexport — es fehlt der Simulationslauf, nicht die
+> Unterstützung. Sobald sie gerechnet sind, brauchen sie **keine Codeänderung**:
+> nur ihre Id in `op_registry.MEASUREMENT_OPS_AVAILABLE`.
+>
+> „OP01 bis OP19" heißt heute also **siebzehn** verfügbare Betriebspunkte.
 
 Sie werden über `--measurement-ops` ausgerollt und berichtet, aber **nie**
 trainiert und **nie** ausgewählt. In `config.yaml` steht `measurement_ops: []`;
@@ -473,7 +520,7 @@ Nach dem Aufräumen: **10 Python-Dateien, 4 Dokumente.**
 | Nicht | Warum |
 |---|---|
 | Die Benchmarks aus der Historie zurückholen | Sie zu haben war nie das Problem — sie ohne Maßstab zu fahren war es. Erst G2 |
-| OP17/OP18 bauen wollen | Kein `op_matrix.yaml`-Eintrag, kein Rohexport. OP19 geht, aber nur über `--measurement-ops`, nie im Training |
+| Auf OP17/OP18 warten | Noch nicht simuliert. Sie blockieren nichts — OP01–OP16 sind vollständig |
 | OP19 als Test-OP zählen | Fahrzyklus, gemischt geladen/entladen, gemessen statt simuliert. Verliert anfangs zu Recht |
 | `w_phys` auf 1.0 / 10.0 erhöhen | `L_phys_bal = L_phys/EMA(L_phys)` ist selbstnormiert, `w_phys` kommt darin nicht vor |
 | Zahlen aus dem alten OP01–OP05-Projekt übernehmen | Andere Normierung, anderes `A`, andere `phys_scale`. Nichts überträgt sich als Betrag |
@@ -498,9 +545,15 @@ Ehrlichkeitsklausel — wann der Plan selbst falsch ist:
 
 ---
 
-**Stand:** 2026-08-31
-**Ausgeführt:** Testsuite (107 grün) und ein Ende-zu-Ende-`train.py`-Lauf gegen
-ein synthetisches Bündel — Banner, Training, val/test, `op_metrics`,
-Coverage-Report, Baselines, Checkpoint-Roundtrip. **Nicht ausgeführt:** alles auf
-echten Daten. `data_cache/` und `material_properties/` liegen nur auf der
-Arbeitsmaschine.
+**Zuletzt fortgeschrieben:** 2026-08-31 — Ersteinrichtung, noch kein Schritt
+abgehakt.
+
+**Ausgeführt:** Testsuite (110 grün) und Ende-zu-Ende-`train.py`-Läufe gegen ein
+synthetisches Bündel — Banner, Training, val/test, `op_metrics`, Coverage-Report,
+Baselines, Checkpoint-Roundtrip, und ein nicht gelisteter OP als
+`--measurement-ops`.
+
+**Nicht ausgeführt:** alles auf echten Daten. `data_cache/` und
+`material_properties/` liegen nur auf der Arbeitsmaschine. Die Tabelle „Stand"
+ganz oben ist deshalb leer — sie ist die einzige Stelle, an der eine gemessene
+Zahl in dieser Datei steht.
