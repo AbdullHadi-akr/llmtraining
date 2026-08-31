@@ -58,6 +58,11 @@ jobs:
           import sys
           sys.path.insert(0, 'tests'); import conftest
           import model, physics, data, materials, device_utils, train
-          import bench_common, smallBench, generate_cache
-          import benchmark_arch, benchmark_balance, benchmark_wphys_wbc
+          import op_registry, op_metrics, generate_cache, selftest
           print('all modules import')"
+
+      - name: op_registry consistency
+        # The plan sheet and the split live in the same file and can drift apart:
+        # an OP in two roles, or in none. Runs without any data.
+        working-directory: PINNmodulusTwo
+        run: python op_registry.py

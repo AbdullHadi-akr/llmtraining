@@ -1,5 +1,14 @@
 # PINNmodulusTwo — Kontrollfluss und Modell
 
+> **Update 31.08.2026 — die Benchmark-Skripte in diesem Dokument gibt es nicht
+> mehr.** `smallBench.py`, `bench_common.py`, `benchmark_balance.py`,
+> `benchmark_arch.py`, `benchmark_wphys_wbc.py` und in der Profil-Erweiterung
+> `smokeBench.py`, `profileBench.py`, `bench_profiles.py` sind gelöscht; sie
+> werden Schritt für Schritt neu aufgebaut. Jeder Befehl unten, der eines dieser
+> Skripte aufruft, läuft ins Leere. Die Messungen und Befunde bleiben gültig —
+> nur die Aufrufe nicht. Aktueller Einstieg:
+> [`FAHRPLAN.md`](FAHRPLAN.md).
+
 Wie ein Trainingslauf tatsächlich abläuft, was das Modell ist, und wo man
 ansetzt, um es zu erweitern.
 
@@ -70,14 +79,15 @@ unterscheiden sich nur in der Achse, die sie variieren:
 | Skript | Achse | Laufzeit | Wann |
 |---|---|---|---|
 | `selftest.py` | — reine Arithmetik | Sekunden | vor allem anderen |
-| `smallBench.py` | `w_phys`, 2 Werte | 2–5 min | Rauchtest |
-| `benchmark_balance.py` | Loss-Skalierung, Eingangskanäle | ~7 h, 2 Sessions | **zuerst** — legt fest, was ein Gewicht bedeutet |
-| `benchmark_wphys_wbc.py` | `w_phys` × `w_bc` | ~6 h Probe, Tage fürs Gitter | danach |
-| `benchmark_arch.py` | Breite, Tiefe, Lags, `delta_grid` | ~1–1,5 Tage | danach |
+| `pytest tests/` | — Rollout-Stabilität, History-Fastpath, Buchhaltung | Sekunden | vor allem anderen |
+| `train.py --epochs 5 --subsample 40` | — | Minuten | läuft es überhaupt |
+| `train.py --val-ops OP06 --test-ops OP07` | — | je nach `--epochs` | die eine Zahl, die zählt |
 
-Die gemeinsame Maschinerie — pro Seed trainieren, über Seeds mitteln, val/test
-trennen, Rausch-Verdikt — liegt in `bench_common.py`. Ein neuer Benchmark
-beschreibt nur seine eigene Achse.
+**Die vier Benchmark-Skripte sind am 31.08.2026 gelöscht** (Banner oben).
+Ein Vergleich zwischen zwei Konfigurationen ist heute zwei `train.py`-Läufe und
+zwei `[val ]`-Zeilen. Was beim Neuaufbau als Erstes dazukommen muss, ist die
+**Streuung über Seeds** — ohne sie ist eine MAE-Differenz nicht lesbar.
+Reihenfolge: `FAHRPLAN.md` §4.
 
 ---
 
@@ -155,7 +165,7 @@ Vor `t = 0` gilt `T(t) := T(0)` (`_padded_lookup`).
 | | Was | Warum |
 |---|---|---|
 | **Gelernt** | MLP-Gewichte · `β` je Schicht im Swish `x·σ(βx)` · `src_gain` / `diff_gain` | die Gains korrigieren einen Skalenunterschied zwischen Quell- und Diffusionsterm; sie laufen mit `gain_lr_mult`-facher LR, sonst bleiben sie bei ihrer 1.0-Initialisierung stehen |
-| **Fest** | `δ` · `k_max` · `Δgrid` · `rate_lags` · Lag-Gates | als **Buffer** registriert, nicht als Parameter. Die History-Anordnung wird einmal konfiguriert und mit `benchmark_arch.py` gesweept, statt zu hoffen, dass das Netz sie findet |
+| **Fest** | `δ` · `k_max` · `Δgrid` · `rate_lags` · Lag-Gates | als **Buffer** registriert, nicht als Parameter. Die History-Anordnung wird einmal konfiguriert und durch zwei `train.py`-Läufe verglichen, statt zu hoffen, dass das Netz sie findet |
 
 `gates()` gibt konstant Einsen zurück — es gibt kein Lag-Gating mehr. Die Methode
 existiert nur noch, damit Log, `metrics.txt` und Checkpoints eine stabile Form
@@ -406,7 +416,7 @@ Die Messung oben ist in der echten Geometrie gemacht (`A = 119/30`), sie
 überträgt sich also für OP01–05 direkt. Was **nicht** übertragbar ist:
 
 * Die absoluten MAE-Werte. Die Trajektorie ist synthetisch.
-* Die Zahlen für `PINNmodulusTwoExtProfiles`: das Pooling über OP01–OP16
+* Die Zahlen nach dem Merge: das Pooling über OP01–OP16
   vergrössert `T_sigma`, verkleinert `dTdt_scale` und **erhöht damit `A`** über
   die 119 hinaus. Dort ist die Lag-Wahl ungetestet.
 
@@ -440,7 +450,7 @@ gemessen"): längere Segmente machen den Kanal zum Fortschrittsindikator und
 verschlechtern die MAE auf jedem Seed; `--max-rate-amp` dämpft das Signal und
 verschlechtert sie ebenfalls. Die richtige Antwort auf `A ≈ 119` ist also
 **nicht, `A` zu senken**, sondern den Integrator abzuschalten und die Sättigung
-per `rollout_clamp` abzufangen. `benchmark_arch.py` sweept die Achse trotzdem —
+per `rollout_clamp` abzufangen. Die Achse bleibt zu messen —
 auf echten Daten kann das Optimum woanders liegen.
 
 #### Was ausdrücklich NICHT hilft
@@ -537,7 +547,7 @@ x-benachbarte Gitterpunkte (`data._measure_bc_scale`), nicht mehr das frühere
 ### 4.1 Materialkonstanten, Divergenzform und Materialgrenzen — offener Befund
 
 > **Status: dokumentiert, nicht behoben.** Bewusst so: erst Schritt A aus
-> [`README_MODEL_CRITIQUE.md`](README_MODEL_CRITIQUE.md) laufen lassen, bevor am
+> [`FAHRPLAN.md`](FAHRPLAN.md) Phase 2/3 laufen lassen, bevor am
 > Physik-Term geschraubt wird. Eine Änderung hier wäre sonst eine zweite
 > unabhängige Variable in einem A/B, das ohnehin noch aussteht.
 
@@ -741,7 +751,7 @@ Trajektorie. Hunderte sind richtig, Zehntausende nicht.
 Das zweite OP sieht dabei bereits die Gewichte, die das erste aktualisiert hat —
 die OP-Reihenfolge ist hier die Listenreihenfolge aus `ops` und wird nicht
 gemischt. (Die Profil-Erweiterung mischt sie, weil ihre OPs über 0 C bis 4 C
-weit heterogener sind; siehe `PINNmodulusTwoExtProfiles/README.md`.)
+weit heterogener sind -- das ist seit dem Merge der Normalfall.)
 
 ### 6.1 Warum überhaupt balanciert wird
 
@@ -795,7 +805,7 @@ ratio_phys = w_phys · L_phys_bal  ÷  (w_data · L_data_bal)
 ```
 
 — die Mischung, die der Optimierer **tatsächlich** gesehen hat. Genau darauf
-sieht `benchmark_balance.py`.
+gehört in die erste neu gebaute Achse (`FAHRPLAN.md` §4).
 
 ### 6.2 Drei Details, die keine Kleinigkeiten sind
 
@@ -842,31 +852,34 @@ Gemessene Ersparnis: **~3 %**. Der Rollout dominiert, nicht das Residuum.
 | Neues History-Layout | `model._history_*` + `history_mode` | `k_max` folgt dem Layout; `history_at()` für die Physik getrennt halten |
 | Anderer Zeitableiter | `physics.heat_residual`, `time_deriv` | BDF-Stencils lesen über `δ`, nicht über `Δgrid` |
 | Weiterer Loss-Term | `train.fit` + `_LossBalancer.KEYS` | einen Divisor spendieren, sonst ist sein Gewicht wieder skalenabhängig |
-| Neue Sweep-Achse | neues `benchmark_*.py` | `bench_common.train_one_seed` benutzen; die Achse ist Daten, kein Code |
-| **Neues Trainings-Flag** | `train.parse_args` **und** `bench_common.make_train_args` **und** `smallBench._make_args` | `fit()` liest per `getattr` — ein vergessenes Feld **wirft nicht**, es fällt still auf einen anderen Default zurück |
+| Neue Sweep-Achse | existiert nicht mehr | die Maschinerie ist gelöscht; `FAHRPLAN.md` §4 hat die Reihenfolge des Neuaufbaus |
+| **Neues Trainings-Flag** | `train.parse_args` **und** `config.yaml` | `fit()` liest per `getattr` mit Default — ein vergessenes Feld **wirft nicht**, es fällt still auf diesen Default zurück |
+| **Checkpoint-relevantes Feld** | zusätzlich `train.save_checkpoint` (`model_config`) | sonst lädt der Checkpoint mit einer anderen Geometrie als der, die trainiert hat; `test_checkpoint_round_trips_without_config_yaml` fängt das |
 
-> **Die häufigste Falle in diesem Projekt** ist die letzte Zeile, und sie hat
-> schon einmal zugeschlagen: `smallBench` reichte `delta_grid` nicht durch, und
-> der Rauchtest lief still mit dem Datenschritt statt dem konfigurierten Anker —
-> bei `subsample=2` zufällig identisch, bei jedem anderen Wert nicht.
-> (`smallBench.py:114`)
+> **Die häufigste Falle in diesem Projekt** ist die vorletzte Zeile, und sie hat
+> schon zweimal zugeschlagen: `smallBench` reichte `delta_grid` nicht durch (bei
+> `subsample=2` zufällig identisch, sonst nicht), und die Profil-Erweiterung
+> reichte `residual_output` nie durch und lief deshalb still mit dem alten
+> Modell-Default `True` — einem Integrator ohne Leck. Seit dem 31.08. gibt es nur
+> noch **zwei** Orte für einen Default (`train.parse_args` und `config.yaml`)
+> statt vier, und `residual_output` ist auch im `RecurrentField`-Konstruktor auf
+> `False` gestellt, damit der stille Pfad nicht mehr in den Abbruch führt.
 
 ### 7.1 Checkliste vor dem Commit einer Änderung
 
 - [ ] `python3 PINNmodulusTwo/selftest.py` grün (Sekunden, ohne Daten, ohne GPU)
-- [ ] neues Flag in **allen drei** Arg-Buildern gesetzt (siehe Tabelle oben)
+- [ ] `python3 -m pytest PINNmodulusTwo/tests -q` grün
+- [ ] neues Flag in `train.parse_args` **und** `config.yaml` (siehe Tabelle oben)
 - [ ] neue Bundle-Konstante auch in `build_op()` durchgereicht
-- [ ] wenn die Skalierung berührt wurde: gehört sie in die Benchmark-Signatur?
-      (`_probe_signature`, `_merge_parts`) — sonst mischen zwei Sessions still
-      Unvergleichbares
-- [ ] `python3 PINNmodulusTwo/smallBench.py --epochs 5 --device cuda` endet mit
-      `✓ ALL CHECKS PASSED`
+- [ ] neues Layout-Feld auch in `train.save_checkpoint`
+- [ ] `python3 PINNmodulusTwo/train.py --epochs 5 --subsample 40 --device cuda`
+      läuft durch, ohne `[ABORT]`, `[SATURATED]` oder `[DIVERGED]`
 
 > **Warum ein Selbsttest.** Die Eigenschaften, die er prüft — eine vergiftete
 > EMA, ein Divisor dessen Horizont an der OP-Zahl hängt, eine „Normierung", die
 > nicht normiert — sind in einem Trainingslog **unsichtbar**. Sie sehen aus wie
 > ein Lauf, der halt schlecht konvergiert ist. Die nächste Gelegenheit, sie zu
-> bemerken, ist ein mehrstündiger Benchmark.
+> bemerken, ist ein mehrstündiger Lauf.
 
 ---
 
@@ -876,11 +889,13 @@ Alles landet in `PINNmodulusTwo/artifacts/` (nicht in git):
 
 | Datei | Von wem |
 |---|---|
-| `metrics.txt`, `training_curves.png`, `timeseries.png`, `pred_OP0*.npz` | `train.py` |
-| `smallBench_results.txt`, `smallBench_convergence.png` | `smallBench.py` |
-| `benchmark_balance.csv`, `_best.txt`, `.png`, `_ratio.png`, `balance_parts.json` | `benchmark_balance.py` |
-| `benchmark_wphys_wbc.csv`, `_best.txt`, `_settings.txt`, `probe_parts.json` | `benchmark_wphys_wbc.py` |
-| `benchmark_arch.csv`, `_best.txt`, `.png` | `benchmark_arch.py` |
+| `metrics.txt` | `train.py` — Trainings-OPs, `[val ]`, `[test]`, jeweils mit trivialen Vorhersagern |
+| `training_curves.png`, `timeseries.png` | `train.py` |
+| `pred_OP*.npz` | `train.py` — je ein Trainings- und je ein Held-out-OP |
+| `model.pt` | `train.py` — Gewichte + `model_config` + `T_mu`/`T_sigma` (`--save-checkpoint ""` schaltet ab) |
+
+Die Benchmark-Artefakte (`smallBench_results.txt`, `benchmark_*.csv`,
+`*_parts.json`) gibt es nicht mehr — die Skripte sind gelöscht.
 
 Die `*_parts.json` tragen eine **Signatur** aller Einstellungen, die einen Lauf
 prägen — das Balancing eingeschlossen. Läuft ein zweiter Teil mit anderen

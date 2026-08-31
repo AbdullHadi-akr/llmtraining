@@ -20,16 +20,14 @@ llmtraining/
     └── ...
 ```
 
-Both projects find it there: `PINNmodulusTwo/data.py` and
-`PINNmodulusTwoExtProfiles/data.py` each search their own folder first and fall
-back to this shared one (full list under [`data_cache/`](#data_cache--the-op-bundles)
-below). **`data_cache/` at the top level is the one to use** for anything new —
-one copy, both projects.
+`PINNmodulusTwo/data.py` searches its own folder first and falls back to this
+shared one (full list under [`data_cache/`](#data_cache--the-op-bundles) below).
+**`data_cache/` at the top level is the one to use.**
 
 ### 1b. The material-property CSVs — equally missing, equally required
 
-`PINNmodulusTwo/materials.py` reads these from `PINNmodulusTwo/material_properties/`,
-and the extension reads that same copy. They are untracked too, so they also have
+`PINNmodulusTwo/materials.py` reads these from
+`PINNmodulusTwo/material_properties/`. They are untracked too, so they also have
 to be put there by hand:
 
 ```
@@ -45,35 +43,33 @@ PINNmodulusTwo/material_properties/
 
 - [ ] `material_properties/` present
 
-Without it nothing runs at all — `materials.py` is imported by `data.py` in both
-projects, so this fails before the first OP is even looked up.
+Without it nothing runs at all — `materials.py` is imported by `data.py`, so
+this fails before the first OP is even looked up.
 
-Which OPs are needed, in priority order — the defaults in
-[`PINNmodulusTwo/config.yaml`](PINNmodulusTwo/config.yaml) are
-`ops: [OP01…OP05]`, validation on OP06, report on OP07:
+**All sixteen are needed, not a subset.** There is one project and it trains on
+the whole plan sheet; the split is in
+[`PINNmodulusTwo/op_registry.py`](PINNmodulusTwo/op_registry.py) (run it, it
+needs no data):
 
-**`PINNmodulusTwo/` — the constant-driver model** (`ops` in its `config.yaml`):
+| | OPs | role |
+|---|---|---|
+| train | OP01–05, 07, 08, 10, 11, 12, 14 | eleven; every profile type a val OP needs occurs here |
+| val | OP06, OP09 | one constant, one profile — what a tuning decision may look at |
+| test | OP13, OP15, OP16 | the extrapolation tier; read once, never selected on |
 
-- [ ] `OP01.npz` — train (25 °C, ṁ 0.0013)
-- [ ] `OP02.npz` — train (15 °C, ṁ 0.0013)
-- [ ] `OP03.npz` — train (30 °C, ṁ 0.0013)
-- [ ] `OP04.npz` — train (25 °C, ṁ 0.0026)
-- [ ] `OP05.npz` — train (40 °C, ṁ 0.0026)
-- [ ] `OP06.npz` — **validation**, benchmark selection ranks on this one (25 °C, ṁ 0)
-- [ ] `OP07.npz` — **report only**, never part of any selection (10 °C, ṁ 0)
+- [ ] `OP01.npz` … `OP16.npz` — all sixteen
 
-Without OP01–OP05 nothing trains; without OP06 the benchmarks cannot select a
-model; without OP07 there is no report number.
+Missing any one of them fails immediately with the list of what is available.
 
-**`PINNmodulusTwoExtProfiles/` — the profile extension** needs **all sixteen**,
-not a subset: OP01–OP05, OP07, OP08, OP10, OP11, OP12, OP14 to train, OP06 and
-OP09 to select on, OP13, OP15 and OP16 to report. Its `README.md` states that
-**no result has been measured yet**, and this cache is the only reason why.
+**`OP19.npz` — optional, and a different question.** OP17–OP19 are the
+mini-module *measurement* comparison: measured data rather than a
+Batemo/StarCCM+ simulation, partly discharge where OP01–OP16 are all charge,
+drivers read from test data, and OP19 is a synthetic drive cycle. Of the three
+only OP19 exists in this pipeline — `op_matrix.yaml` has no OP17 or OP18 at all.
+Pass it as `--measurement-ops OP19` to roll it out and report it; it is never
+trained on and never selected on.
 
-- [ ] `OP08.npz` … `OP16.npz` — required by the extension, on top of the seven above
-- [ ] `OP19.npz` — optional; used by neither config, module-test data (see `op_matrix.yaml`)
-
-`OP16` is also what `python3 PINNmodulusTwo/data.py` uses as its held-out demo.
+- [ ] `OP19.npz` — optional; the sim-vs-measurement check
 
 ### 2. Full path — the raw CSVs (only if the cache has to be rebuilt)
 
@@ -100,9 +96,8 @@ legacy/battery_surrogate_agenticWorkflow/
                 *_ModuleTestData*.csv            (OP19)
 ```
 
-- [ ] `data_raw/OP01/OP01/` … `data_raw/OP07/OP07/` — the seven `PINNmodulusTwo` uses
-- [ ] `data_raw/OP08/OP08/` … `data_raw/OP16/OP16/` — the rest of what the extension needs
-- [ ] `data_raw/OP19/OP19/` — optional, module-test data, in neither config
+- [ ] `data_raw/OP01/OP01/` … `data_raw/OP16/OP16/` — the sixteen the model uses
+- [ ] `data_raw/OP19/OP19/` — optional, the measurement comparison
 
 Already in git, so nothing to copy: the three coordinate CSVs under
 `legacy/battery_surrogate_agenticWorkflow/coordinates/`, `op_matrix.yaml`,
@@ -111,10 +106,8 @@ Already in git, so nothing to copy: the three coordinate CSVs under
 Then, from the repo root:
 
 ```bash
-# what PINNmodulusTwo needs
-python3 PINNmodulusTwo/generate_cache.py OP01 OP02 OP03 OP04 OP05 OP06 OP07
-# the rest, for PINNmodulusTwoExtProfiles
-python3 PINNmodulusTwo/generate_cache.py OP08 OP09 OP10 OP11 OP12 OP13 OP14 OP15 OP16
+python3 PINNmodulusTwo/generate_cache.py OP01 OP02 OP03 OP04 OP05 OP06 OP07 \
+        OP08 OP09 OP10 OP11 OP12 OP13 OP14 OP15 OP16
 ```
 
 which writes straight into the top-level `data_cache/`, where both projects
@@ -124,14 +117,15 @@ find it.
 
 ```bash
 ls data_cache/
-python3 -c "import sys; sys.path.insert(0, 'PINNmodulusTwo'); import data; print(data.available_ops())"
-python3 -c "import sys; sys.path.insert(0, 'PINNmodulusTwoExtProfiles'); import data; print(data.available_ops())"
+python3 PINNmodulusTwo/op_registry.py    # the split; needs no data
+python3 PINNmodulusTwo/data.py           # constants, profile report, coverage
 ```
 
-The last two need the training environment (numpy, torch) and should list every
-OP you copied — the second from the base project's view, the third from the
-extension's. A missing OP fails immediately with the list of what is available,
-rather than after the first training run.
+The last one needs the training environment (numpy, torch, pandas) and prints
+the pooled constants next to a **profile report**: what the bundles actually
+contain, against what the plan sheet claims. A `MISMATCH` line there means the
+sheet is wrong or a bundle was built from the wrong export — believe the
+bundles.
 
 ---
 Predicting the internal temperature field of a battery cell from operating-point
@@ -142,11 +136,14 @@ controller constraints.
 
 ## Layout
 
+> **Start here:** [`PINNmodulusTwo/FAHRPLAN.md`](PINNmodulusTwo/FAHRPLAN.md) —
+> the gated order of what to run, and what changed on 31.08.2026 when the two
+> projects were merged and the eight benchmark scripts deleted.
+
 ```
-PINNmodulusTwo/              <- the active model, constant operating points
-PINNmodulusTwoExtProfiles/   <- extension of it to the OPs whose drivers are PROFILES
-data_cache/                  <- OP*.npz bundles (not in git, see below)
-legacy/                      <- earlier approaches, kept for reference only
+PINNmodulusTwo/   <- the model, the training, the tests. One project.
+data_cache/       <- OP*.npz bundles (not in git, see above)
+legacy/           <- earlier approaches, kept for reference only
 ```
 
 There is exactly one dependency list: `PINNmodulusTwo/requirements-gpu.txt`. The
@@ -154,69 +151,63 @@ former root-level `requirements.txt` is deleted — a UTF-16 encoded Windows
 `pip freeze` that installed the CPU wheels, and which the GPU guide already
 listed as a trap. Recoverable from the git history if anyone still needs it.
 
-### `PINNmodulusTwo/` — the active approach
+### `PINNmodulusTwo/` — the model
 
 A recurrent PINN: a Modulus `FCLayer` MLP with a per-layer learnable swish,
 wrapped in a PyTorch recurrence that feeds the model's own past predictions back
 in as temperature history. The loss combines a data term, the anisotropic heat
 residual, and the symmetry boundary condition `dT/dx = 0` at the cell centre.
+Training is free-running: the data loss is taken on the model's own
+autoregressive rollout, seeded only by the measured initial condition. There is
+no teacher forcing anywhere.
+
+It trains on the **whole plan sheet, OP01–OP16** — constant drivers and profiles
+together. Until 31.08.2026 this was split into a constant-driver project and a
+profile extension next door; they are merged, because the profile pipeline is a
+strict superset (a constant driver is a profile that does not move) and two
+copies of the same model only drift apart. `--resample point
+--no-driver-history` reproduces the old constant-only preprocessing exactly.
+
+From OP08 the drivers become **profiles** that vary in time — a fluid
+temperature profile, a pre-simulated CC-CV current whose CV phase tapers the
+current away, and in OP15 a volume-flow profile. That is what the recurrence is
+for: two OPs can share the same instantaneous driver values at some time `t` and
+have very different temperatures because their *history* differed.
+
+| file | what it is |
+|---|---|
+| `model.py` | `RecurrentField` + the Modulus MLP + `rollout` |
+| `physics.py` | the nondimensional anisotropic heat residual and the Neumann BC |
+| `data.py` | loading, normalisation, driver resampling, the three reports |
+| `op_registry.py` | the plan sheet in code: OP01–OP16, tiers, the split. Runs without data |
+| `op_metrics.py` | per-OP metrics: MAE, RMSE, peak error, transient vs. quiescent |
+| `train.py` | the training loop, evaluation, checkpoint |
+| `tests/`, `selftest.py` | seconds, no data, no GPU |
 
 Start with [`PINNmodulusTwo/README.md`](PINNmodulusTwo/README.md). How it works
 internally — control flow, the model, where to extend it — is in
 [`PINNmodulusTwo/ARCHITECTURE.md`](PINNmodulusTwo/ARCHITECTURE.md) (in German);
-for the GPU server setup and the full benchmark session see
+the GPU server setup is
 [`PINNmodulusTwo/README_GPU_SERVER.md`](PINNmodulusTwo/README_GPU_SERVER.md).
-Where the model currently stands — what was broken, what is fixed, and what to
-look for in each test before spending GPU days — is in
-[`PINNmodulusTwo/README_MODEL_CRITIQUE.md`](PINNmodulusTwo/README_MODEL_CRITIQUE.md).
 
-The recurrence is deliberately **not** adaptive: the history spacing `δ`, the lag
-count `k`, the lag gates and the hybrid `rate_lags` are all fixed
-hyperparameters. Learned are the MLP weights and the per-layer swish `β`. The
-physics gains `src_gain` / `diff_gain` are pinned at 1.0 (`--learn-gains` frees
-them again).
-
-### `PINNmodulusTwoExtProfiles/` — the profile extension
-
-`PINNmodulusTwo` trains on OP01–OP05, where every driver (C-rate, fluid inlet
-temperature, volume flow) is held constant for the whole charge. From OP08 the
-plan sheet turns those drivers into **profiles** that vary in time — a fluid
-temperature profile, a pre-simulated CC-CV current, and in OP15 a volume-flow
-profile.
-
-This folder extends the same model to the full **OP01–OP16**. The network, the
-physics residual and the recurrence are imported unchanged from
-`PINNmodulusTwo/`; what it owns is everything the profiles force: anti-aliased
-driver resampling, causal driver-rate feature channels, normalisation constants
-refitted on the wider set, and its own benchmark — **`profileBench`, the Profile
-Tier Benchmark** — because the loss weights are only meaningful relative to
-physics scales that have moved.
-
-Start with
-[`PINNmodulusTwoExtProfiles/README.md`](PINNmodulusTwoExtProfiles/README.md).
-Note that **no result from it has been measured yet**: it needs the data cache
-below, which is not in git.
+**Nothing here has been measured on the real data yet.** Every MAE in the
+repository came off a synthetic fixture, which is why the benchmarks were
+deleted rather than kept: a sweep that ranks configurations none of which has
+beaten a trivial predictor is a ranking between losers. `train.py` now prints
+both trivial predictors next to every OP's MAE, so one run answers that.
 
 ### `data_cache/` — the OP bundles
 
-One `OP*.npz` per operating point. **Not tracked in git** (the `.gitignore` keeps
-only sources and documentation), so it never arrives with a fresh clone — it has to
-be present on each machine.
-
-`PINNmodulusTwo/data.py` searches these locations and takes the first that
-exists, so an existing cache keeps working wherever it already sits:
+One `OP*.npz` per operating point. **Not tracked in git**, so it never arrives
+with a fresh clone. `data.py` searches, first hit wins:
 
 1. `PINNmodulusTwo/data_cache/` — project-local override
-2. `data_cache/` — **preferred**: shared, top level
-3. `legacy/battery_surrogate_agenticWorkflow/data_cache/`
-4. `battery_surrogate_agenticWorkflow/data_cache/` — pre-restructure location
+2. `PINNmodulusTwoExtProfiles/data_cache/` — where a pre-merge cache may still sit
+3. `data_cache/` — **preferred**: shared, top level
+4. `legacy/battery_surrogate_agenticWorkflow/data_cache/`
 
-`PINNmodulusTwoExtProfiles/data.py` searches the same list, with its own
-`PINNmodulusTwoExtProfiles/data_cache/` ahead of it. The material-property CSVs
-in `PINNmodulusTwo/material_properties/` are equally untracked, and both
-projects read that one copy.
-
-Requesting an OP that has no bundle fails immediately and lists what is
+The material-property CSVs in `PINNmodulusTwo/material_properties/` are equally
+untracked. Requesting an OP with no bundle fails immediately and lists what is
 available, instead of surfacing after the first training run.
 
 ### `legacy/` — earlier approaches

@@ -2,12 +2,11 @@
 
 Everything here guards a failure this project has actually had:
 
-* a training report that attributed a FAIL to a check which had passed, because
-  the benchmark printed ``FAIL`` and nothing else;
-* a BC term whose contribution was invisible in every summary table;
 * an MAE quoted against a baseline measured on a different dataset;
-* a history series added to ``train.fit`` and not to ``bench_common.EMPTY_HIST``,
-  which only shows up when a benchmark aggregates a crashed seed.
+* an absolute MAE quoted off the synthetic fixture as though it were a
+  measurement;
+* a history series added to ``train.fit`` and not to every place that appends
+  to it, which misaligns the CSV and the plots by a row and raises nothing.
 
 The fixture is the synthetic cache, so these run on a bare checkout. conftest.py
 has already substituted Modulus by the time this module is imported.
@@ -27,10 +26,8 @@ PKG_DIR = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PKG_DIR))
 sys.path.insert(0, str(PKG_DIR / "tools"))
 
-import bench_common  # noqa: E402
 import data as data_mod  # noqa: E402
 import make_synthetic_cache as msc  # noqa: E402
-import smallBench  # noqa: E402
 import train as train_mod  # noqa: E402
 
 
@@ -43,7 +40,8 @@ def test_baselines_are_measured_on_the_op_in_hand():
 
     The numbers in README_ERSTER_TEST chapter 6 came off a synthetic bundle and
     its own text says they do not transfer as absolute values, so the baselines
-    have to be recomputed per run rather than quoted.
+    have to be recomputed per run rather than quoted. ``train.evaluate`` prints
+    them next to every held-out MAE for exactly that reason.
     """
     lab = np.array([[10.0, 20.0],
                     [12.0, 26.0],
@@ -51,7 +49,7 @@ def test_baselines_are_measured_on_the_op_in_hand():
     op = SimpleNamespace(T_lab=lab)
     bundle = SimpleNamespace(T_mu=20.0)
 
-    persistence, mean = smallBench._trivial_baselines(op, bundle)
+    persistence, mean = train_mod.trivial_baselines(op, bundle)
 
     # persistence holds row 0: errors are 0,0 / 2,6 / 4,12 -> mean 4.0
     assert persistence == pytest.approx(4.0)
@@ -68,7 +66,7 @@ def test_persistence_baseline_is_zero_for_a_constant_field():
     says nothing at all about the model.
     """
     lab = np.full((5, 3), 7.5)
-    persistence, mean = smallBench._trivial_baselines(
+    persistence, mean = train_mod.trivial_baselines(
         SimpleNamespace(T_lab=lab), SimpleNamespace(T_mu=7.5))
     assert persistence == pytest.approx(0.0)
     assert mean == pytest.approx(0.0)
@@ -135,19 +133,19 @@ def test_synthetic_labels_satisfy_the_neumann_bc(synthetic_cache):
 
 
 def test_cache_is_flagged_as_synthetic(synthetic_cache):
-    """smallBench must be able to tell the fixture from measured data.
+    """``train.py`` must be able to tell the fixture from measured data.
 
-    ``_cache_is_synthetic`` re-reads ``data.DATA_CACHE`` on each call, so the
+    ``cache_is_synthetic`` re-reads ``data.DATA_CACHE`` on each call, so the
     fixture's monkeypatched cache is what gets inspected here.
     """
-    assert smallBench._cache_is_synthetic() is True
+    assert data_mod.cache_is_synthetic() is True
 
 
 def test_a_cache_without_the_marker_is_not_flagged(tmp_path, monkeypatch):
     """The banner must not fire on measured bundles, which carry no marker."""
     np.savez_compressed(tmp_path / "OP01.npz", T=np.zeros((2, 2)))
     monkeypatch.setattr(data_mod, "DATA_CACHE", tmp_path)
-    assert smallBench._cache_is_synthetic() is False
+    assert data_mod.cache_is_synthetic() is False
 
 
 # --------------------------------------------------------------------------
@@ -183,10 +181,13 @@ def test_an_unreadable_bundle_counts_as_measured(tmp_path):
 # --------------------------------------------------------------------------
 
 def _tiny_args(cache_dir, **over):
+    # --val-ops/--test-ops empty: the defaults come from config.yaml and name
+    # OPs the synthetic fixture does not contain.
     argv = ["train.py", "--ops", "OP01", "--epochs", "1", "--subsample", "40",
             "--inner-steps", "1", "--batch-data", "64", "--batch-phys", "16",
             "--batch-bc", "8", "--width", "8", "--depth", "2",
-            "--device", "cpu", "--no-residual-output"]
+            "--device", "cpu", "--no-residual-output",
+            "--val-ops", "--test-ops"]
     old = sys.argv
     sys.argv = argv
     try:
@@ -198,17 +199,18 @@ def _tiny_args(cache_dir, **over):
     return args
 
 
-def test_fit_history_matches_empty_hist_keys(synthetic_cache):
-    """Every series fit() records must exist in bench_common.EMPTY_HIST.
+def test_fit_history_matches_the_declared_keys(synthetic_cache):
+    """fit() records exactly train.HISTORY_KEYS, and every series is aligned.
 
-    The benchmarks aggregate a crashed seed's EMPTY_HIST alongside a successful
-    seed's real history. A key present in only one of them is a KeyError hours
-    into a sweep, which is the worst possible moment to find out.
+    ``fit`` has two places that append a row -- the normal epoch and the abort
+    path -- and both are written out by hand. A series added to one and not the
+    other shifts the plots and the CSV by a row with nothing raised, so the
+    declared key list is the contract and this is what holds it.
     """
     args = _tiny_args(synthetic_cache)
     _, _, _, _, hist = train_mod.fit(args)
 
-    assert set(hist) == set(bench_common.EMPTY_HIST)
+    assert set(hist) == set(train_mod.HISTORY_KEYS) | {"aborted"}
     # and every per-epoch series is the same length as the epoch column
     n = len(hist["epoch"])
     for key, series in hist.items():
@@ -251,12 +253,135 @@ def test_balanced_loss_is_the_raw_loss_over_the_recorded_divisor(synthetic_cache
 def test_zero_weight_bc_is_recorded_as_nan_not_zero(synthetic_cache):
     """A skipped term is an absent measurement, not a measurement of zero.
 
-    smallBench excludes a zero-weight term from the 'balanced ~ O(1)' check on
-    exactly this basis; if the series came back 0.0 the check would fail the
-    reference run it exists to provide.
+    A 0.0 would plot as a flat line the run never produced, and would read as
+    'the BC term converged perfectly' in any later comparison.
     """
     args = _tiny_args(synthetic_cache, w_bc=0.0)
     _, _, _, _, hist = train_mod.fit(args)
 
     assert np.isnan(hist["L_bc_bal"][-1])
     assert np.isnan(hist["div_bc"][-1])
+
+
+# --------------------------------------------------------------------------
+# checkpoints and held-out evaluation
+# --------------------------------------------------------------------------
+
+def test_checkpoint_round_trips_without_config_yaml(synthetic_cache, tmp_path):
+    """The saved file alone has to rebuild the model, weights and all.
+
+    Until 31.08.2026 the only ``torch.save`` in the project lived in
+    ``bench_common.py``, so a plain ``train.py`` run left the finished model in
+    RAM and nothing else. What makes the file usable is not the ``state_dict``
+    -- it is the layout next to it: ``RecurrentField(**model_config)`` has to
+    accept every key, and ``load_state_dict`` has to be happy with
+    ``strict=True``. A layout key that drifts out of step with the constructor
+    fails exactly here and nowhere else.
+    """
+    import torch
+    from model import RecurrentField
+
+    args = _tiny_args(synthetic_cache)
+    model, bundle, _packed, dtn, hist = train_mod.fit(args)
+    path = tmp_path / "model.pt"
+    train_mod.save_checkpoint(model, bundle, args, dtn, hist, path)
+
+    ckpt = torch.load(path, weights_only=False)
+    rebuilt = RecurrentField(**ckpt["model_config"])
+    rebuilt.load_state_dict(ckpt["model_state_dict"], strict=True)
+
+    # de-normalisation has to travel too, or the weights predict a z-score
+    # against a normalisation nothing recorded
+    assert ckpt["bundle_stats"]["T_sigma"] == pytest.approx(bundle.T_sigma)
+    assert ckpt["bundle_stats"]["T_mu"] == pytest.approx(bundle.T_mu)
+    # and the run must be identifiable as synthetic after the fact
+    assert ckpt["run"]["synthetic_cache"] is True
+
+
+def test_held_out_op_uses_the_training_normalisation(synthetic_cache):
+    """``build_op`` re-fits nothing -- that is what makes it out-of-sample.
+
+    A held-out OP normalised against its own statistics would be an easier
+    problem than the one the model was trained on, and the resulting MAE would
+    not be a generalisation estimate at all.
+    """
+    bundle = data_mod.load_ops(op_ids=["OP01"], subsample_time=40)
+    held = data_mod.build_op("OP02", bundle, subsample_time=40)
+
+    # Tn is the held-out OP put through the TRAINING transform, exactly.
+    expected = (held.T_lab - bundle.T_mu) / bundle.T_sigma
+    assert np.allclose(held.Tn, expected, atol=1e-5)
+    assert held.xn.shape == bundle.xn.shape
+
+
+def test_trivial_baselines_are_what_evaluate_compares_against(synthetic_cache):
+    """The bar printed next to a held-out MAE is measured on that OP."""
+    bundle = data_mod.load_ops(op_ids=["OP01"], subsample_time=40)
+    held = data_mod.build_op("OP02", bundle, subsample_time=40)
+
+    persistence, mean = train_mod.trivial_baselines(held, bundle)
+
+    assert persistence == pytest.approx(
+        float(np.abs(held.T_lab - held.T_lab[0][None, :]).mean()))
+    assert mean == pytest.approx(float(np.abs(held.T_lab - bundle.T_mu).mean()))
+    assert persistence > 0 and mean > 0
+
+
+# --------------------------------------------------------------------------
+# device selection
+# --------------------------------------------------------------------------
+
+def test_ask_never_blocks_without_a_terminal(monkeypatch, capsys):
+    """``--device ask`` must fall back, not hang, when nobody can answer.
+
+    It is the default, so every CI job, every ``nohup``ed run and every piped
+    invocation goes through this branch. A training script that blocks on a
+    prompt no one can see is strictly worse than one that picks a default and
+    says which.
+    """
+    import device_utils
+
+    monkeypatch.setattr(device_utils.sys.stdin, "isatty", lambda: False)
+    # input() must never be reached; make it loud if it is.
+    monkeypatch.setattr("builtins.input", lambda *a: pytest.fail("ask blocked"))
+
+    dev = device_utils.resolve_device("ask")
+
+    assert dev.type in {"cpu", "cuda"}
+    assert "not an interactive terminal" in capsys.readouterr().out
+
+
+def test_ask_accepts_an_index_or_the_spec(monkeypatch):
+    """A prompt that only takes '2' is worse than one that also takes 'cuda:0'."""
+    import device_utils
+
+    monkeypatch.setattr(device_utils.sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr(device_utils, "available_devices",
+                        lambda: [("cpu", "CPU"), ("cuda:0", "fake"), ("cuda:1", "fake")])
+
+    monkeypatch.setattr("builtins.input", lambda *a: "3")
+    assert device_utils._prompt_for_device() == "cuda:1"
+    monkeypatch.setattr("builtins.input", lambda *a: "cuda:1")
+    assert device_utils._prompt_for_device() == "cuda:1"
+    monkeypatch.setattr("builtins.input", lambda *a: "")      # Enter = default
+    assert device_utils._prompt_for_device() == "cuda:0"
+    monkeypatch.setattr("builtins.input", lambda *a: (_ for _ in ()).throw(EOFError))
+    assert device_utils._prompt_for_device() == "cuda:0"
+
+
+def test_an_unlisted_op_gets_a_label_not_an_exception():
+    """A bundle outside the plan sheet must not cost a finished training run.
+
+    The DATA path already accepts one: ``build_op`` reads any bundle that
+    exists and detects which channels are profiles from the bundle itself,
+    never from the table. Only the TIER is unknown, and ``evaluate`` runs after
+    training -- raising there would throw away hours over a label.
+    """
+    import op_registry
+
+    assert op_registry.tier_of("OP06") == op_registry.TIER_INTERP
+    assert op_registry.tier_or_unknown("OP06") == op_registry.TIER_INTERP
+    assert op_registry.tier_or_unknown("OP17") == op_registry.TIER_UNKNOWN
+    # the strict lookup still raises, because the split checks depend on it
+    with pytest.raises(KeyError):
+        op_registry.tier_of("OP17")

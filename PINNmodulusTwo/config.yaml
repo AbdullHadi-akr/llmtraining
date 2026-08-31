@@ -1,28 +1,88 @@
 # Defaults for PINNmodulusTwo/train.py (every key is overridable on the CLI).
+# train.py reads this file in _load_yaml_defaults().
 #
-# These match what the benchmarks run. They used to differ (subsample 40 vs 2,
-# raw vs hybrid history, k_max 4 vs 2, no grad clipping), so `train.py` without
-# flags trained a DIFFERENT model than every benchmark in this folder -- and
-# the smoke test that gates the long runs exercised the raw history path, not
-# the hybrid one the benchmarks use.
+# ONE project, ONE config. Until 31.08.2026 there was a constant-driver project
+# here and a profile extension next door, each with its own config and its own
+# defaults. They are merged: the profile pipeline is a strict superset (a
+# constant driver is a profile that does not move), so training on the whole
+# plan sheet at once is the only mode. `resample: point` plus
+# `use_driver_history: false` reproduces the old constant-only preprocessing if
+# a comparison ever needs it.
 #
-# Note: subsample_time 2 makes a plain `train.py` run much slower than the old
-# default 40 (~20x more rollout steps). That is the honest cost of matching the
-# configuration the results are actually produced with.
-# train.py reads this file in _load_yaml_defaults(); smallBench.py and the two
-# benchmark scripts read the keys they share (device, seed, ...).
+# One caveat when changing a default here: _load_yaml_defaults() swallows every
+# error, a missing pyyaml included, and falls back to the literals in
+# train.py's argparse. Keep the two in step for anything load-bearing --
+# residual_output is the one where the difference is a run that aborts in
+# epoch 1 versus one that trains.
 
 # ---- hardware ---------------------------------------------------------------
-# auto | cpu | cuda | cuda:N   ("auto" = CUDA when available, otherwise CPU)
-device: auto
+# ask | auto | cpu | cuda | cuda:N
+#
+# "ask" lists what this machine has and prompts for one. That is the default
+# because the same checkout is run on a laptop CPU and on a GPU server, and the
+# wrong choice is a wasted afternoon in either direction -- a run that quietly
+# takes the CPU on a GPU box, or one that fails hours in because the card was
+# not really visible.
+#
+# It never blocks a script: with no terminal to ask (CI, nohup, a pipe) it falls
+# back to "auto" and says so. Set this to cpu / cuda / auto to skip the prompt
+# permanently on a given machine, or pass --device on the command line.
+device: ask
 # TF32 matmuls on Ampere+ GPUs. Off on purpose: the physics residual
 # differentiates the network twice and TF32 degrades second derivatives.
 tf32: false
 
-# ---- data -------------------------------------------------------------------
-ops: [OP01, OP02, OP03, OP04, OP05]
-test_op: OP07
-subsample_time: 2          # dt = 0.1s * subsample -> 0.2s (CFL-Grenze ~0.241s)
+# ---- data: the full plan sheet, OP01-OP16 -----------------------------------
+# The split lives in op_registry.py (DEFAULT_TRAIN/VAL/TEST_OPS) and is repeated
+# here so a run can be re-pointed without editing code. Keep the two in sync, or
+# pass --ops/--val-ops/--test-ops explicitly. The rules the split follows are
+# argued out in op_registry.py; the short version:
+#   * every profile TYPE a selection OP relies on must occur in training,
+#   * selection never touches the extrapolation tier,
+#   * every one of OP01-OP16 is used exactly once.
+ops:      [OP01, OP02, OP03, OP04, OP05, OP07, OP08, OP10, OP11, OP12, OP14]
+val_ops:  [OP06, OP09]        # what a tuning decision may look at
+test_ops: [OP13, OP15, OP16]  # report only, read once, never selected on
+
+# The mini-module MEASUREMENT comparison ("Abgleich mit Minimodul-Test" on the
+# plan sheet). Rolled out and reported, never trained on, never selected on.
+#
+#   OP17  DCH, CC 2C          -- a DISCHARGE. OP01-OP16 are all charge.
+#   OP18  Fast Charge Lotus   -- charge, V_max 4.3 V
+#   OP19  Fahrzyklus TDD.3    -- WLTP (synthetic), mixed
+#
+# **OP19 exists** and has a row in op_matrix.yaml, so generate_cache.py can
+# build it. **OP17 and OP18 have not been simulated yet** -- that is why they
+# have no row and no raw export, and it is the only thing missing: nothing in
+# the code needs changing when they arrive. Set this to [OP19] once OP19.npz is
+# on the machine.
+#
+# Read the number as "does a model fitted to StarCCM+ agree with a real cell?",
+# never as a held-out simulation result: it mixes model error, measurement error
+# and the sim-to-test gap with nothing separating them. And expect OP19 to lose
+# to the trivial predictors at first -- it is a drive cycle, a regime the model
+# has never seen.
+measurement_ops: []
+
+subsample_time: 2          # dt = 0.1s * subsample -> 0.2s (CFL limit ~0.241s)
+train_frac: 0.8            # timeline fraction used for the pooled statistics
+
+# ---- driver preprocessing ---------------------------------------------------
+# How the DRIVERS (heat source + config profiles) are reduced onto the
+# subsampled grid. 'mean' averages each driver over the raw interval that ends
+# at the kept sample -- anti-aliased and, for the heat source,
+# energy-preserving. 'point' is a plain [::N] and is exact only while the
+# drivers are constant, which is why it is no longer the default.
+# Temperature is always point-sampled: it is a state, not a rate.
+resample: mean
+
+# Causal rate channels for q_dot and the four profile-capable config channels
+# (c_rate, cell_current, fluid_inlet_temp, fluid_mass_flow). Cumulative segment
+# lengths in SECONDS, same layout as the temperature history below. These are
+# EXOGENOUS -- they carry no feedback, so they have none of the amplification
+# risk the temperature rate_lags below do.
+use_driver_history: true
+driver_rate_lags: [5.0, 20.0]
 
 # ---- model ------------------------------------------------------------------
 layer_size: 128
@@ -119,8 +179,22 @@ gain_lr_mult: 25.0         # only applies when learn_gains: true
 grad_clip: 1.0             # 0 disables clipping
 early_stopping_patience: 0 # 0 disables early stopping
 seed: 0
+# Reshuffle the OP order every epoch. With a dozen heterogeneous OPs and one
+# frozen rollout per OP, a fixed order lets the same OP always take the last
+# optimiser step of every epoch.
+shuffle_ops: true
+# Truncate the TRAINING rollout at split_t so the late window of a training OP
+# is genuinely held out. Off by default: with the CC-CV OPs the late window IS
+# the CV taper, and dropping it takes the hardest part of the trajectory out of
+# training. Turning it on makes op_metrics' `late` column a real held-out
+# number for training OPs instead of a relabelled training error.
+holdout_tail: false
 
 # ---- loss weights -----------------------------------------------------------
+# NOT carried over from the old constant-driver project: phys_scale and
+# Qsrc_scale are fitted on a different OP set now, so the same number means a
+# different mixing ratio. These are placeholders -- nothing has measured them on
+# OP01-OP16.
 w_data: 1.0
 w_phys: 0.1
 w_bc: 0.1
@@ -156,11 +230,6 @@ bc_norm: 0.0               # >0 overrides the L_bc divisor with a constant
 residual_norm: rms
 # A loss term with weight 0 still costs a forward pass and an autograd Hessian.
 zero_weight_terms: skip    # skip | compute
-
-# ---- optional input features (OFF: measure them with benchmark_balance.py) ---
-subsample_mode: stride     # stride | mean (mean = crude anti-alias, changes data)
-forcing_energy: false      # cumulative injected heat as a 2nd forcing channel
-config_rates: false        # d(config)/dt for config channels that are profiles
 
 # ---- batch sizes ------------------------------------------------------------
 # On a GPU these can be raised a lot (that is where the speed-up comes from);

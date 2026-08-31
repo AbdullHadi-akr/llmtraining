@@ -3,26 +3,37 @@
 > **Neu hier? → [`FAHRPLAN.md`](FAHRPLAN.md).** Ein Einstieg, gegatterte
 > Reihenfolge, und was lokal zu tun ist. Diese Datei bleibt Nachschlagewerk.
 
-> **Update 27.08.2026 — der erste durchlaufende Test.** Bis dahin brach
-> jeder Lauf in Epoche 1 mit `L_data = nan` ab; die Ursache war
-> `residual_output`. [`README_ERSTER_TEST.md`](README_ERSTER_TEST.md) beschreibt
-> Modell, Architektur, Training, Daten, Loss und Ergebnisse vollständig, dazu die
-> Ursache und den gemessenen Vergleich der `rate_lags` und von `hybrid` gegen
-> `raw`.
+> **Update 31.08.2026 — ein Projekt, ein Datensatz, keine Benchmarks.**
 >
-> **Nächster Schritt: der erste Lauf auf echten Daten.** Bis heute ist nichts
-> davon auf OP01–OP07 verifiziert — `data_cache/` und `material_properties/`
-> sind gitignored und liegen nur lokal, alle bisherigen MAE-Zahlen sind
-> synthetisch. [`README_LOKALER_LAUF.md`](README_LOKALER_LAUF.md) ist die
-> Anleitung dafür: wohin die Daten gehören, der Sekunden-Test vorweg
-> (`tools/data_probe.py`), der eigentliche Lauf und worauf dabei zu achten ist.
+> * `PINNmodulusTwoExtProfiles/` ist hier aufgegangen. Die Profil-Pipeline ist
+>   eine echte Obermenge der konstanten — ein konstanter Treiber ist ein Profil,
+>   das sich nicht bewegt — also gibt es keinen Grund für zwei Projekte.
+>   Trainiert wird auf dem ganzen Plansheet **OP01–OP16**.
+> * Die acht Benchmark-Skripte sind gelöscht und werden Schritt für Schritt neu
+>   aufgebaut. Was sie an Nützlichem konnten, kann `train.py` selbst: `--val-ops`
+>   / `--test-ops`, per-OP-Metriken je Tier, Coverage-Report und die beiden
+>   trivialen Vorhersager neben jeder Zeile.
+> * `train.py` schreibt jetzt `artifacts/model.pt` — vorher lag die einzige
+>   `torch.save` im gelöschten `bench_common.py`.
+>
+> Warum, und in welcher Reihenfolge die Messungen zurückkommen:
+> [`FAHRPLAN.md`](FAHRPLAN.md) §0 und §3.
 
 Implementation of **method #2** from the Notion page *"Battery Model with NVIDIA
 MODULUS"*: use Modulus as much as practical, but bring our **own recurrence** in
 PyTorch. Roughly a 50:50 Modulus / PyTorch split. **Temperature only** — `bc_V`
-is deliberately out of scope. Trains on **OP01–OP05**, validates on **OP06**
-(that is what benchmark selection ranks on) and reports **OP07**, which never
-takes part in any selection.
+is deliberately out of scope.
+
+Trains on eleven of the sixteen plan-sheet OPs, validates on **OP06 + OP09**
+(`--val-ops`: what a tuning decision may look at) and reports **OP13, OP15,
+OP16** (`--test-ops`: the extrapolation tier, read once, never selected on).
+`op_registry.py` holds that split and argues for it; run it, it needs no data.
+
+**OP17–OP19 are not part of this.** They are the mini-module *measurement*
+comparison — measured data rather than simulation, partly discharge where
+OP01–OP16 are all charge — and of the three only OP19 exists in this pipeline at
+all. `--measurement-ops OP19` rolls it out and reports it, never trains or
+selects on it.
 
 ## What comes from Modulus vs. PyTorch
 
@@ -38,8 +49,18 @@ takes part in any selection.
 
 - `data.py` — loads the OPs from the cached `.npz` (JR1 heat = `q_source[:,0]`),
   pooled z-score for temperature, shared `L_ref`/`T_span_ref` non-dimensionalisation,
-  anisotropic Fourier tensor, and a per-timestep **config feature block** that
-  already supports time-varying **profiles**.
+  anisotropic Fourier tensor, and the per-timestep **config feature block**.
+  Owns everything the profiles force: anti-aliased driver resampling
+  (`--resample mean`), causal driver-rate channels (`--driver-rate-lags`), and
+  the three reports — `normalisation_report`, `profile_report` (what the bundles
+  actually contain, against what the plan sheet claims) and `coverage_report`
+  (which held-out driver leaves the trained range, and by how many sigmas).
+- `op_registry.py` — the plan sheet in code: OP01–OP16, which OP carries which
+  profile, the tiers, and the split. **Runs without data.**
+- `op_metrics.py` — per-OP rollout metrics. Not just a mean: a CC-CV OP spends
+  most of its samples in the easy CC phase and a short window in the CV taper,
+  so `mae_transient` / `mae_quiescent`, `peak_err` (the number an aging model
+  consumes) and `late_mae` are reported alongside `mae`/`rmse`.
 - `model.py` — `LearnableSwish`, `ModulusMLP` (Modulus `FCLayer`s), and
   `RecurrentField`. The recurrence is deliberately **not** adaptive: `δ`, `k`,
   `delta_grid`, `rate_lags` and the lag gates are all fixed hyperparameters —
@@ -54,20 +75,14 @@ takes part in any selection.
   assembled residual is divided by **one** scale, not each term by its own.
 - `train.py` — training loop + evaluation, plots, metrics. One free-running
   rollout per OP per epoch, then `--inner-steps` minibatch updates against it.
-- `bench_common.py` — shared benchmark machinery: per-seed training, mean/std
-  aggregation over seeds, the val/test split, and the seed-noise verdict. A
-  benchmark only describes its own sweep axis.
-- `benchmark_wphys_wbc.py` — 2D sweep of the loss weights `w_phys` x `w_bc`.
-- `benchmark_arch.py` — width, depth, history lags and anchor lag (`delta_grid`),
-  one axis at a time.
-- `smallBench.py` — 2-5 minute smoke test; run it before any long sweep.
-- `config.yaml` — hyperparameters, matching what the benchmarks run
-  (CLI overrides available).
-- [`README_MODEL_CRITIQUE.md`](README_MODEL_CRITIQUE.md) — what was wrong with the
-  model, what is fixed, what is still open, and **what you have to see in which
-  test to know which step comes next**. Everything in it is so far verified
-  mathematically only, not measured on real data; it names the run that settles
-  that. Read it before committing GPU days to a sweep.
+- `selftest.py` — seconds-long arithmetic checks on the loss balancing and the
+  residual scaling. No data, no GPU.
+- `tests/` — rollout stability, the history fast path (bit-exactness against the
+  general path), the checkpoint round-trip, and the loss bookkeeping. Needs
+  neither Modulus nor the data cache; runs in seconds.
+- `config.yaml` — hyperparameters. Since the benchmark scripts are gone this is
+  the ONLY place a default lives (CLI overrides available).
+
 
 ## Why recurrence (profiles)
 
@@ -79,8 +94,9 @@ these cases — this is the whole reason method #2 needs recurrence.
 `k` (how many history points) and `δ` (their spacing) are **fixed
 hyperparameters**, not learned — as are the `rate_lags` in hybrid mode and the
 lag gates, which are permanently on. The history layout is configured once and
-stays put; only the network trains. Sweep the layout with `benchmark_arch.py`
-rather than expecting the model to find it.
+stays put; only the network trains. Sweep the layout by running `train.py` at
+two settings and comparing the held-out MAE, rather than expecting the model to
+find it.
 
 Hybrid history keeps the same raw interpolation for the physics residual, but
 feeds the network a more compact feature block:
@@ -172,11 +188,10 @@ reason rather than switched off:
   mode. `--residual-norm legacy` restores only the old *overall* divisor
   `sqrt(phys_scale)`; it does not bring back dividing `dTdt`, `aniso` and `Qsrc`
   by three different numbers, which changed the equation rather than scaling it
-  (see `README_MODEL_CRITIQUE.md` §1.3).
+  (see `physics.heat_residual` and `ARCHITECTURE.md` 1.3).
 
-`smallBench.py` and both benchmark scripts pass all of these through to `fit()`,
-and `config.yaml` holds the defaults — so a bare run, a smoke test and a
-benchmark all balance the same way.
+`config.yaml` holds the defaults and `train.py` is the only entry point, so
+there is no longer a second configuration that some other script would run.
 
 ## Run
 
@@ -185,9 +200,13 @@ source .venv/bin/activate
 python3 PINNmodulusTwo/train.py --epochs 60
 ```
 
-Everything not passed comes from `config.yaml`, which now holds the same
-settings the benchmarks use — so a bare run trains the model the benchmarks
-measure. Note that `subsample: 2` makes this slow (~1.5–2.5 h at 60 epochs); use
+Everything — the OP set, the split, the preprocessing — comes from
+`config.yaml`. A bare run trains on OP01–OP16 and reports val and test.
+
+Everything not passed comes from `config.yaml`, which is the single source of
+defaults. Add `--val-ops OP06 --test-ops OP07` (they are already the config
+defaults) to get a held-out number rather than only the in-time tail of an OP
+the model trained on. Note that `subsample: 2` makes this slow (~1.5–2.5 h at 60 epochs); use
 `--epochs 5` for a quick check, or `--subsample 40` for a pure "does it start"
 run.
 
@@ -197,7 +216,13 @@ auf der CPU. Explizit erzwingen mit `--device cuda` / `--device cuda:1` /
 Datenübertragung): **[README_GPU_SERVER.md](README_GPU_SERVER.md)**.
 
 Outputs land in `PINNmodulusTwo/artifacts/`: `metrics.txt`, `training_curves.png`,
-`timeseries.png`, and `pred_OP0*.npz`.
+`timeseries.png`, and `pred_OP0*.npz` (one per training OP and per held-out OP).
+
+`metrics.txt` reports three groups, and the difference between them is the
+point: the training OPs (`MAE train` in-sample, `MAE test` the in-time tail past
+`split_t`), `[val ]` — whole unseen OPs a tuning decision may look at, and
+`[test]` — whole unseen OPs nothing selected on. Only the last is a report
+number, and only if you read it once.
 
 ## Notes
 
@@ -260,8 +285,9 @@ Outputs land in `PINNmodulusTwo/artifacts/`: `metrics.txt`, `training_curves.png
   do NOT rank configurations the same way -- `[200, 600]` wins on `L_data` and
   loses on MAE. Against trivial baselines the model is worth several times over:
   6.60 C for "predict the training mean", 11.96 C for "hold the initial
-  condition". Use `benchmark_arch.py` and MAE, never `L_data`, to choose
-  `rate_lags` or `history_mode`.
+  condition". Those two numbers are printed next to every `--val-ops` /
+  `--test-ops` MAE, computed on the OP in hand — see `trivial_baselines`. Choose
+  `rate_lags` or `history_mode` on that MAE, never on `L_data`.
 - **What transfers between datasets is `A`, not the lag in seconds.** `A` depends
   on `rate_scale = dTdt_scale`, which is a property of the data. The same
   seconds give a different `A` on a different OP set -- check the startup line.

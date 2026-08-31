@@ -134,13 +134,45 @@ OPS: Dict[str, OPSpec] = {
 
 ALL_OPS: tuple = tuple(OPS)
 
-# OP17-OP19 of the sheet ("Abgleich mit Minimodul-Test") compare against measured
-# mini-module data instead of the Batemo/StarCCM+ simulations: their C-rate,
-# temperatures and flow all read "Test Data", and OP19 is a synthetic WLTP drive
-# cycle. They are a different validation exercise -- measurement vs. simulation,
-# partly discharge, partly a drive cycle -- and are deliberately out of scope
-# here. Nothing in this extension reads them.
+# ---- OP17-OP19: "Abgleich mit Minimodul-Test" -------------------------------
+# A different exercise from everything above: these compare against MEASURED
+# mini-module data instead of the Batemo/StarCCM+ simulations. Every driver
+# column in the sheet reads "Test Data" -- C-rate, both temperatures, the flow
+# and the SOC window -- so there is no plan-sheet row to transcribe the way
+# OP01-OP16 have one. What the sheet does name is the kind of test:
+#
+#   OP17  "DCH, CC"            DISCHARGE, 2C. The only discharge anywhere; every
+#                              one of OP01-OP16 is a charge (CH).
+#   OP18  "Fast Charge Lotus"  charge, V_max 4.3 V (the training block is 4.35).
+#   OP19  "Fahrzyklus TDD.3"   WLTP (synthetic), mixed charge/discharge,
+#                              V_max 4.3 V.
+#
+# They are never trained on and never selected on -- pass them to train.py as
+# --measurement-ops. Read the result as "does a model fitted to StarCCM+ agree
+# with a real cell?", never as a held-out simulation number: it mixes model
+# error with measurement error and with the sim-to-test gap, and nothing
+# separates the three.
+#
+# Two of them are also harder than any test OP, for a reason no coverage report
+# will phrase for you: OP17 is a discharge and OP19 is a drive cycle, and the
+# model has seen neither regime. Expect them to lose to the trivial predictors
+# until the training envelope covers discharge at all. That is information, not
+# a bug.
 MEASUREMENT_OPS = ("OP17", "OP18", "OP19")
+
+# Which of them exist as data today.
+#
+# OP17 and OP18 HAVE NOT BEEN SIMULATED YET. That is the reason, and it is worth
+# stating as such rather than as its symptom: they have no row in
+# legacy/battery_surrogate_agenticWorkflow/op_matrix.yaml and no raw export
+# BECAUSE the runs have not been done, not because anything about them is
+# unsupported. OP19 has been simulated and has both.
+#
+# So this is a statement about what has been computed, not about what the code
+# can handle. data.build_op reads any bundle that exists and detects which
+# channels are profiles from the bundle itself, so the day an OP17.npz appears
+# it needs no code change here -- only its id added to this tuple.
+MEASUREMENT_OPS_AVAILABLE = ("OP19",)
 
 
 # ---- the split --------------------------------------------------------------
@@ -173,6 +205,28 @@ def spec(op_id: str) -> OPSpec:
 
 def tier_of(op_id: str) -> str:
     return spec(op_id).tier
+
+
+TIER_UNKNOWN = "T?-unlisted"
+
+
+def tier_or_unknown(op_id: str) -> str:
+    """``tier_of``, but a label instead of an exception for an unlisted OP.
+
+    The plan sheet in this file covers OP01-OP16. The DATA path does not depend
+    on it at all -- ``data.build_op`` reads any bundle that exists and detects
+    which channels are profiles from the bundle itself -- so an OP that is not
+    in the table is perfectly trainable and reportable. What is missing is only
+    its TIER, i.e. how hard it is meant to be.
+
+    ``tier_of`` raising is right where the answer has to be trustworthy (the
+    split checks). It is wrong at the end of a finished training run, where it
+    would throw away hours over a label. Hence two functions.
+    """
+    try:
+        return spec(op_id).tier
+    except KeyError:
+        return TIER_UNKNOWN
 
 
 def profiles_of(op_id: str) -> tuple:

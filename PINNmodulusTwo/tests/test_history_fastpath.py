@@ -66,6 +66,11 @@ def _model(dtype=torch.float64, **over) -> RecurrentField:
         rate_lags=(0.05, 0.2), layer_size=8, num_layers=2,
         delta_seconds=1.0, dtn=DTN, t_span_ref=30.0, rate_scale=1.3,
         delta_grid=0.03, weight_norm=False,
+        # Explicit, and not the constructor default any more: this file's whole
+        # subject is that level_rollout() and level() agree bit for bit, and with
+        # residual_output off both return None and every level assertion below
+        # passes without comparing anything.
+        residual_output=True,
     )
     kw.update(over)
     model = RecurrentField(**kw).to(dtype)

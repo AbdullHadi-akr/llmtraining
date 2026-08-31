@@ -1,8 +1,7 @@
-"""Per-OP rollout metrics shared by ``train.py`` and the benchmark.
+"""Per-OP rollout metrics for ``train.py``.
 
-Separate module rather than living in either, because ``profileBench`` imports
-``train.fit`` and ``train`` reports the same numbers the benchmark ranks on --
-putting them in one of the two would make the import cycle.
+A separate module rather than part of ``train.py`` so that whatever compares
+configurations later can import the metrics without importing the training loop.
 
 Why more than one number
 ------------------------
@@ -42,12 +41,12 @@ from typing import Dict
 import numpy as np
 import torch
 
-import _paths  # noqa: F401
-from model import rollout  # from PINNmodulusTwo, unchanged
+from model import rollout
 
-# Boxplot sampling, same contract as ``PINNmodulusTwo/bench_common.py``: one box
-# per sampled time point summarising the SENSORS at that moment, drawn from a
-# fixed seed so every configuration is scored at the same instants.
+# Boxplot sampling: one box per sampled time point summarising the SENSORS at
+# that moment, drawn from a fixed seed so every configuration is scored at the
+# same instants. Nothing draws these yet -- the benchmark that did is deleted --
+# but the sampling rule belongs with the metrics it applies to.
 N_BOX_TIMES = 10
 BOX_TIME_SEED = 20240517
 
