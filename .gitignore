@@ -19,6 +19,11 @@
 !TRAININGS_BERICHT_*.md
 !**/TRAININGS_BERICHT_*.md
 
+# Keep the roadmap tracked. It is the single entry point and deliberately NOT
+# called README_*, so the allowlist above does not catch it.
+!FAHRPLAN.md
+!**/FAHRPLAN.md
+
 # Keep the CI workflow tracked (the allowlist above is .py/.md only)
 !.github/workflows/*.yml
 

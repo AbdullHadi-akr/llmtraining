@@ -4,19 +4,21 @@
 Runs a short training (few epochs, 2 w_phys values) to verify:
 1. CFL stability (no inf/NaN losses)
 2. Loss convergence (L_data decreasing)
-3. Balanced losses are ~O(1) -- BOTH the physics and the BC term
-4. The rollout stays finite
-5. Test MAE beats the trivial predictors measured on the held-out OP itself
+3. Balanced losses are ~O(1) -- reported per term, L_phys_bal AND L_bc_bal
+4. Test MAE is reasonable (< 20°C)
 
-Check 5 replaces a bare ``test_mae < 20``, which a model that has learned
-nothing passes comfortably: persistence alone scores around 12 C on this data.
-Every failing check is now named in the output and in the artifacts -- a bare
-FAIL leaves the reader to reconstruct a conjunction of five booleans from the
-source, and the 2026-08-28 report got that reconstruction wrong.
+All four are smoke tests: they ask whether the RUN is usable, not whether the
+MODEL is good. Check 4 in particular is a 20 °C bound and passing it means very
+little. The line that answers "is this worth more than doing nothing" is the
+trivial-predictor comparison printed underneath it, computed on the same
+held-out OP -- see ``_trivial_baselines``. A run can pass all four checks and
+still lose to predicting a constant.
 
 No ``data_cache/``? ``python3 PINNmodulusTwo/tools/make_synthetic_cache.py``
-writes a synthetic one and every command below then runs on a bare checkout.
-A run on it is labelled as synthetic in the banner and in the artifacts.
+writes a synthetic one, and every command below then runs on a bare checkout --
+``--modulus-stub`` covers a machine without Modulus on top of that. Both are
+announced in a banner and recorded in the artifacts, because a number off either
+must never be quoted as a measurement.
 
 This is also "step A" of PINNmodulusTwo/README_MODEL_CRITIQUE.md: run it once as
 it stands and once as
@@ -155,7 +157,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--quick", action="store_true",
                    help="cut the run down for a laptop CPU: 3 epochs, 25 inner "
                         "steps, one w_phys. Enough to see every check fire and "
-                        "the artifacts written; too short to judge accuracy")
+                        "the artifacts written; far too short to judge accuracy")
     cli = p.parse_args()
     if cli.quick:
         # Only override what the user did not ask for explicitly, so
@@ -250,27 +252,27 @@ def _rollout_mae(model, op, bundle, device) -> float:
     return float(np.abs(T_pred - op.T_lab).mean())
 
 
-def _baseline_maes(op, bundle) -> dict:
-    """The two trivial predictors, on the SAME trajectory the model MAE uses.
+def _trivial_baselines(op, bundle) -> tuple[float, float]:
+    """MAE of the two trivial predictors on ``op``, in physical °C.
 
-    An MAE without a yardstick says nothing, and the yardstick has to be
-    measured on the OP in hand. README_ERSTER_TEST chapter 6 quotes 11.96 C and
-    6.60 C for these two, but those came off a synthetic bundle and its own
-    chapter warns they do not transfer as absolute numbers -- so comparing a
-    real-data MAE against them is apples to oranges in both directions. These
-    are recomputed here, per run, from ``op.T_lab``.
+    Without these a Test MAE is a number with no scale. The pair is the one
+    README_ERSTER_TEST.md chapter 6 uses, and the model has to beat the BETTER
+    of the two to have learned anything:
 
-    * ``persistence``: T(t) = T(0). Knows the initial condition, nothing else.
-      The model is handed exactly the same initial condition, so this is the
-      floor a recurrent surrogate has to beat to have learned any dynamics.
-    * ``train_mean``: the pooled training mean, i.e. ``bundle.T_mu``. Knows the
-      training labels and nothing about this OP.
+    * persistence -- ``T(t) = T(0)``, i.e. the field never changes;
+    * mean -- the constant mean of the training labels. That constant is
+      ``bundle.T_mu`` by construction (``data.py`` pools it over the training
+      portion of the training OPs), so this is not a second definition of the
+      same thing, it IS the same thing.
+
+    The numbers in README_ERSTER_TEST.md (11.96 °C and 6.60 °C) come from a
+    SYNTHETIC bundle and its chapter 9.1 says the magnitudes do not carry over
+    to the real OPs -- so they must not be used as the yardstick here. These are
+    computed on whatever ``op`` actually is, which is the point.
     """
-    lab = op.T_lab
-    return {
-        "persistence": float(np.abs(lab - lab[0][None, :]).mean()),
-        "train_mean": float(np.abs(lab - bundle.T_mu).mean()),
-    }
+    persistence = float(np.abs(op.T_lab - op.T_lab[0][None, :]).mean())
+    mean = float(np.abs(op.T_lab - bundle.T_mu).mean())
+    return persistence, mean
 
 
 def _cache_is_synthetic() -> bool:
@@ -278,7 +280,7 @@ def _cache_is_synthetic() -> bool:
 
     Absolute MAE off that fixture means nothing about the real OPs, so a run on
     it must never be quoted as a result. Cheap to check and easy to forget,
-    hence the banner rather than a comment in a README.
+    hence the banner rather than a line in a README.
     """
     try:
         import data as _data
@@ -367,67 +369,50 @@ def main():
         # Check 3: Balanced losses are ~O(1) -- only where a term is switched on
         L_phys_bal = hist.get("L_phys_bal", [1.0])[-1]
         L_bc_bal = hist.get("L_bc_bal", [1.0])[-1]
+        # Kept apart on purpose: a single `balanced` flag cannot say WHICH term
+        # broke it, and a run reading only L_phys_bal then blames the physics
+        # weight for a bc failure -- or, at w_phys=0 where the physics term is
+        # skipped entirely, has nothing left to blame and reaches for the MAE.
         phys_balanced = (not phys_on) or 0.01 < L_phys_bal < 100
         bc_balanced = (not bc_on) or 0.01 < L_bc_bal < 100
         balanced = phys_balanced and bc_balanced
 
-        # Structure left in the model's own rollout, relative to the labels
-        # (train.py records it per epoch). Both residual terms are satisfied
-        # exactly by a constant field, so this is what tells a physics term that
-        # converged apart from one that collapsed. Reported, not gated: a short
-        # smoke run is entitled to a flat-ish rollout, and turning that into a
-        # FAIL would cry wolf on every 3-epoch run.
+        # The divisors those balanced losses came out of, and how much structure
+        # the rollout still carries (train.py records both per epoch).
+        #
+        # They answer the two questions a bare L_phys_bal cannot. A value far
+        # below 1 means either the term genuinely fell or the EMA divisor is
+        # stale from an earlier regime, and those call for opposite responses --
+        # the divisor separates them. And a field constant in space and time
+        # satisfies the heat residual AND the Neumann BC exactly, so a physics
+        # loss going to zero is only good news while the spread stays up.
+        #
+        # Reported, never gated: a short smoke run is entitled to a flat-ish
+        # rollout, and turning that into a FAIL would cry wolf on every one.
         spread_space = hist.get("spread_space", [float("nan")])[-1]
         spread_time = hist.get("spread_time", [float("nan")])[-1]
         div_phys = hist.get("div_phys", [float("nan")])[-1]
         div_bc = hist.get("div_bc", [float("nan")])[-1]
 
-        # Check 4: does the model beat the trivial predictors on the held-out OP?
-        # The old gate was a bare ``test_mae < 20.0``, which no run of this
-        # project has ever failed and which passes comfortably for a model that
-        # has learned nothing: persistence alone scores around 12 C. Both
-        # baselines are measured on this very OP, so the comparison is like for
-        # like -- see _baseline_maes.
+        # Check 4: Test MAE is reasonable
         held = build_op(cli.test_op, bundle, subsample_time=cli.subsample)
         test_mae = _rollout_mae(model, held, bundle, device)
-        base = _baseline_maes(held, bundle)
-        best_base_name = min(base, key=base.get)
-        best_base = base[best_base_name]
-        # Skill: >0 means better than the better trivial predictor, 0 means level
-        # with it, <0 means the trivial predictor wins.
-        skill = 1.0 - test_mae / best_base if best_base > 0 else float("nan")
-        beats_baseline = np.isfinite(test_mae) and test_mae < best_base
-        # Kept as a separate, much weaker gate: a diverged rollout produces a
-        # huge or non-finite MAE, and that is worth naming as its own failure
-        # rather than folding into "lost to the baseline".
-        mae_finite = np.isfinite(test_mae) and test_mae < 1e3
+        mae_ok = test_mae < 20.0
+
+        # The two trivial predictors on the SAME held-out OP. `mae_ok` only asks
+        # whether the rollout stayed finite-ish (< 20 °C); it is a smoke-test
+        # bound, not a quality bar, and passing it says nothing about whether
+        # the model beats doing nothing. `beats_trivial` is that question.
+        mae_persist, mae_mean = _trivial_baselines(held, bundle)
+        mae_trivial = min(mae_persist, mae_mean)
+        beats_trivial = test_mae < mae_trivial
 
         # In-time MAE for training OPs
-        train_maes = [_rollout_mae(model, op, bundle, device)
+        train_maes = [_rollout_mae(model, op, bundle, device) 
                       for op in [build_op(oid, bundle, cli.subsample) for oid in cli.ops]]
         train_mae = float(np.mean(train_maes))
 
-        passed = stable and converged and balanced and mae_finite and beats_baseline
-
-        # Which checks failed, in the words of the check. A bare FAIL sends the
-        # reader to the source to reconstruct a conjunction of five booleans --
-        # and the 2026-08-28 training report got that reconstruction wrong,
-        # blaming an MAE gate that had in fact passed.
-        reasons: list[str] = []
-        if not stable:
-            reasons.append("L_data or L_phys non-finite")
-        if not converged:
-            reasons.append("L_data did not decrease")
-        if not phys_balanced:
-            reasons.append(f"L_phys_bal={L_phys_bal:.3e} outside [0.01, 100]")
-        if not bc_balanced:
-            reasons.append(f"L_bc_bal={L_bc_bal:.3e} outside [0.01, 100]")
-        if not mae_finite:
-            reasons.append(f"test MAE={test_mae:.4g} C -- rollout diverged")
-        elif not beats_baseline:
-            reasons.append(
-                f"test MAE={test_mae:.2f} C does not beat {best_base_name}"
-                f"={best_base:.2f} C")
+        passed = stable and converged and balanced and mae_ok
 
         results.append({
             "w_phys": w_phys,
@@ -436,20 +421,21 @@ def main():
             "L_bc_bal": L_bc_bal,
             "train_mae": train_mae,
             "test_mae": test_mae,
-            "baselines": base,
-            "best_base_name": best_base_name,
-            "best_base": best_base,
-            "skill": skill,
+            "mae_persist": mae_persist,
+            "mae_mean": mae_mean,
+            "mae_trivial": mae_trivial,
+            "beats_trivial": beats_trivial,
             "spread_space": spread_space,
             "spread_time": spread_time,
             "div_phys": div_phys,
             "div_bc": div_bc,
             "stable": stable,
             "converged": converged,
+            "phys_balanced": phys_balanced,
+            "bc_balanced": bc_balanced,
             "balanced": balanced,
-            "mae_ok": beats_baseline,
+            "mae_ok": mae_ok,
             "passed": passed,
-            "reasons": reasons,
         })
         all_histories.append({"w_phys": w_phys, "hist": hist})
 
@@ -460,57 +446,82 @@ def main():
         print(f"    L_data(final):  {L_data_final:.4e}  {'✓' if stable else '✗ (inf/NaN)'}")
         phys_note = ("(w_phys=0: term not computed)" if not phys_on
                      else "✓" if phys_balanced else "✗ (not ~O(1))")
-        print(f"    L_phys_bal:     {L_phys_bal:.4e}  {phys_note}")
         bc_note = ("(w_bc=0: term not computed)" if not bc_on
                    else "✓" if bc_balanced else "✗ (not ~O(1))")
+        print(f"    L_phys_bal:     {L_phys_bal:.4e}  {phys_note}")
         print(f"    L_bc_bal:       {L_bc_bal:.4e}  {bc_note}")
         print(f"      divisors:     phys={div_phys:.4e}  bc={div_bc:.4e}")
-        flat_note = ("  <- near-constant field: the residual terms are "
+        flat_note = ("  <- near-constant field: both residual terms are "
                      "satisfied for free"
                      if min(spread_space, spread_time) < 0.2 else "")
         print(f"    Rollout spread: space={spread_space:.3g}x  "
               f"time={spread_time:.3g}x  of the labels'{flat_note}")
         print(f"    Train MAE:      {train_mae:.2f}°C")
-        print(f"    Test MAE:       {test_mae:.2f}°C  "
-              f"{'✓' if beats_baseline else '✗'}")
-        print(f"      baseline persistence T(t)=T(0):  {base['persistence']:.2f}°C")
-        print(f"      baseline train mean:             {base['train_mean']:.2f}°C")
-        print(f"      skill vs {best_base_name:<12s}        {skill:+.1%}  "
-              f"({'better' if skill > 0 else 'NOT better'} than trivial)")
+        print(f"    Test MAE:       {test_mae:.2f}°C  {'✓' if mae_ok else '✗ (>20°C)'}")
+        print(f"      vs. persistence T(t)=T(0):     {mae_persist:.2f}°C")
+        print(f"      vs. constant mean of train:    {mae_mean:.2f}°C")
+        beat_note = ("✓" if beats_trivial
+                     else f"✗ -- {test_mae:.2f}°C >= {mae_trivial:.2f}°C")
+        print(f"      beats the better of the two:   {beat_note}")
         print(f"    Converged:      {'✓' if converged else '✗'}")
         print(f"    Overall:        {'✓ PASS' if passed else '✗ FAIL'}")
-        for reason in reasons:
-            print(f"      FAIL: {reason}")
+        if not passed:
+            # Which check actually failed. Without this the four booleans have to
+            # be reconstructed from four separate lines above, and the guess that
+            # comes out is usually "MAE too high" -- the one bound that is hardest
+            # to fail, because it is 20 °C.
+            why = []
+            if not stable:
+                why.append("L_data/L_phys not finite")
+            if not converged:
+                why.append("L_data did not decrease over the run")
+            if not phys_balanced:
+                why.append(f"L_phys_bal={L_phys_bal:.4e} outside [0.01, 100]")
+            if not bc_balanced:
+                why.append(f"L_bc_bal={L_bc_bal:.4e} outside [0.01, 100]")
+            if not mae_ok:
+                why.append(f"Test MAE {test_mae:.2f}°C >= 20°C")
+            print(f"    FAIL reason:    {'; '.join(why)}")
+        if passed and not beats_trivial:
+            print("    NOTE:           all four checks pass, but the model does "
+                  "not beat the trivial predictor -- PASS here means 'the run is "
+                  "usable', not 'the model is good'.")
 
     # Summary
     print("\n")
     print("=" * 70)
     print("SUMMARY")
     print("=" * 70)
-    # L_bc_bal belongs in this table: it is one of the five booleans that decide
-    # PASS, and leaving it out is why a FAIL driven by the BC term was invisible
-    # in the 2026-08-28 report. Same for the skill column -- an MAE without the
-    # baseline beside it is not a result.
-    print(f"{'w_phys':>7} | {'L_data':>10} | {'L_phys_bal':>10} | {'L_bc_bal':>10} | "
-          f"{'Train MAE':>9} | {'Test MAE':>9} | {'skill':>7} | {'Status':>6}")
-    print("-" * 96)
+    # L_bc_bal belongs in this table: it is one of the two terms Check 3 tests,
+    # so a FAIL with a healthy L_phys_bal is otherwise unreadable from here.
+    print(f"{'w_phys':>8} | {'L_data':>10} | {'L_phys_bal':>10} | {'L_bc_bal':>10} | "
+          f"{'Train MAE':>10} | {'Test MAE':>10} | {'Status':>8}")
+    print("-" * 88)
     for r in results:
         status = "PASS" if r["passed"] else "FAIL"
-        print(f"{r['w_phys']:>7.3f} | {r['L_data_final']:>10.4e} | "
-              f"{r['L_phys_bal']:>10.4e} | {r['L_bc_bal']:>10.4e} | "
-              f"{r['train_mae']:>8.2f}C | {r['test_mae']:>8.2f}C | "
-              f"{r['skill']:>+6.1%} | {status:>6}")
-    print("-" * 96)
-    ref = results[0]
-    print(f"baselines on {cli.test_op}: persistence T(t)=T(0) "
-          f"{ref['baselines']['persistence']:.2f}C, "
-          f"train mean {ref['baselines']['train_mean']:.2f}C. "
-          f"skill is measured against the better of the two "
-          f"({ref['best_base_name']}); <= 0 means the model lost to a predictor "
-          f"that does no work.")
-    for r in results:
-        if r["reasons"]:
-            print(f"  w_phys={r['w_phys']:g} FAIL: {'; '.join(r['reasons'])}")
+        print(f"{r['w_phys']:>8.3f} | {r['L_data_final']:>10.4e} | {r['L_phys_bal']:>10.4e} | "
+              f"{r['L_bc_bal']:>10.4e} | {r['train_mae']:>9.2f}C | {r['test_mae']:>9.2f}C | "
+              f"{status:>8}")
+    print("-" * 88)
+
+    # The yardstick, once, on the real held-out OP. Identical across rows (it
+    # does not depend on the model), which is exactly why it belongs here and
+    # not in a per-row column.
+    if results:
+        r0 = results[0]
+        best = min(results, key=lambda r: r["test_mae"])
+        print(f"\nTrivial predictors on {cli.test_op} (no training involved):")
+        print(f"  persistence T(t)=T(0):        {r0['mae_persist']:>8.2f}C")
+        print(f"  constant mean of train labels:{r0['mae_mean']:>8.2f}C")
+        print(f"  -> the bar to beat:           {r0['mae_trivial']:>8.2f}C")
+        if best["beats_trivial"]:
+            print(f"  best run (w_phys={best['w_phys']:g}) at {best['test_mae']:.2f}C "
+                  f"beats it by {r0['mae_trivial'] - best['test_mae']:.2f}C. The model "
+                  f"has learned something.")
+        else:
+            print(f"  best run (w_phys={best['w_phys']:g}) at {best['test_mae']:.2f}C does "
+                  f"NOT beat it. Whatever else passed, the model is not yet worth "
+                  f"more than doing nothing.")
 
     if all_passed:
         print("\n✓ ALL CHECKS PASSED - Ready for full benchmark!")
@@ -561,40 +572,42 @@ def main():
     plt.close()
     print(f"\n  Saved convergence plot to {convergence_plot}")
 
-    # Save results. This file is what gets pasted back into a session or copied
-    # into a report, so it carries every number a PASS/FAIL rests on -- both
-    # balanced losses, both baselines, and the failure reasons in words. The
-    # earlier version wrote only L_data and the test MAE, which is how a report
-    # came to attribute a FAIL to a check that had passed.
+    # Save results
     out_file = ART_DIR / "smallBench_results.txt"
     with open(out_file, "w") as f:
         f.write("Small Benchmark Results\n")
         f.write(f"OPs: {cli.ops}, Test: {cli.test_op}\n")
-        f.write(f"dt: {dt_s}s, Epochs: {cli.epochs}\n")
+        f.write(f"Δt: {dt_s}s, Epochs: {cli.epochs}\n")
         f.write(f"Architecture: width={cli.width}, depth={cli.depth}\n")
         f.write(f"w_bc: {cli.w_bc}, loss_balance: {cli.loss_balance}, "
                 f"ema_decay: {cli.ema_decay}\n")
+        # Provenance travels with the numbers or it is lost. A results file that
+        # does not say it came off the smoke fixture, or off the Modulus stub,
+        # is one copy-paste away from being quoted as a measurement.
         if synthetic:
-            f.write("SYNTHETIC CACHE -- smoke fixture, absolute MAE says "
-                    "nothing about the real OPs\n")
-        ref = results[0]
-        f.write(f"\nbaselines on {cli.test_op}: "
-                f"persistence T(t)=T(0) = {ref['baselines']['persistence']:.2f}C, "
-                f"train mean = {ref['baselines']['train_mean']:.2f}C\n")
-        f.write(f"skill is measured against the better of the two "
-                f"({ref['best_base_name']} = {ref['best_base']:.2f}C)\n\n")
+            f.write("SYNTHETIC CACHE (tools/make_synthetic_cache.py) -- smoke "
+                    "fixture; absolute MAE says nothing about the real OPs\n")
+        if USE_MODULUS_STUB:
+            f.write("MODULUS STUB (tools/_modulus_stub.py) -- the real FCLayer "
+                    "was not in use\n")
+        f.write("\n")
         for r in results:
-            f.write(
-                f"w_phys={r['w_phys']}: L_data={r['L_data_final']:.4e}, "
-                f"L_phys_bal={r['L_phys_bal']:.4e}, L_bc_bal={r['L_bc_bal']:.4e}, "
-                f"train_mae={r['train_mae']:.2f}C, test_mae={r['test_mae']:.2f}C, "
-                f"skill={r['skill']:+.1%}, "
-                f"div_phys={r['div_phys']:.4e}, div_bc={r['div_bc']:.4e}, "
-                f"spread_space={r['spread_space']:.3g}, "
-                f"spread_time={r['spread_time']:.3g}, "
-                f"{'PASS' if r['passed'] else 'FAIL'}\n")
-            for reason in r["reasons"]:
-                f.write(f"    FAIL: {reason}\n")
+            f.write(f"w_phys={r['w_phys']}: L_data={r['L_data_final']:.4e}, "
+                    f"L_phys_bal={r['L_phys_bal']:.4e}, L_bc_bal={r['L_bc_bal']:.4e}, "
+                    f"div_phys={r['div_phys']:.4e}, div_bc={r['div_bc']:.4e}, "
+                    f"spread_space={r['spread_space']:.3g}, "
+                    f"spread_time={r['spread_time']:.3g}, "
+                    f"train_mae={r['train_mae']:.2f}C, test_mae={r['test_mae']:.2f}C, "
+                    f"{'PASS' if r['passed'] else 'FAIL'}\n")
+        # README_MODEL_CRITIQUE.md step A compares this file between two runs, so
+        # the yardstick has to travel with it -- otherwise the comparison is
+        # between two numbers whose scale is only known in the terminal.
+        if results:
+            r0 = results[0]
+            f.write(f"\nTrivial predictors on {cli.test_op} (no training):\n")
+            f.write(f"  persistence T(t)=T(0):         {r0['mae_persist']:.2f}C\n")
+            f.write(f"  constant mean of train labels: {r0['mae_mean']:.2f}C\n")
+            f.write(f"  bar to beat:                   {r0['mae_trivial']:.2f}C\n")
     print(f"  Saved results to {out_file}")
 
     return 0 if all_passed else 1

@@ -1,5 +1,8 @@
 # PINNmodulusTwo — Approach 2 (Modulus-as-a-tool + own recurrence)
 
+> **Neu hier? → [`FAHRPLAN.md`](FAHRPLAN.md).** Ein Einstieg, gegatterte
+> Reihenfolge, und was lokal zu tun ist. Diese Datei bleibt Nachschlagewerk.
+
 > **Update 27.08.2026 — der erste durchlaufende Test.** Bis dahin brach
 > jeder Lauf in Epoche 1 mit `L_data = nan` ab; die Ursache war
 > `residual_output`. [`README_ERSTER_TEST.md`](README_ERSTER_TEST.md) beschreibt

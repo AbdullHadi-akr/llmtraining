@@ -219,9 +219,10 @@ python3 PINNmodulusTwo/smallBench.py
    Wärmeresiduum **und** Neumann-BC exakt. Ein fallendes `L_phys` ist dann
    nicht Physik, sondern die triviale Lösung — und das sieht man in keiner
    Verlustkurve.
-7. **`skill` in der Zusammenfassung.** `smallBench.py` rechnet beide trivialen
-   Vorhersager auf dem gehaltenen OP selbst aus und misst die Test-MAE dagegen.
-   `skill <= 0` heißt: ein Vorhersager, der nichts tut, ist besser.
+7. **„Trivial predictors" am Ende der Zusammenfassung.** `smallBench.py` rechnet
+   beide trivialen Vorhersager auf dem gehaltenen OP selbst aus und sagt, ob der
+   beste Lauf die Schranke unterbietet. Tut er das nicht, ist das Modell — egal
+   was sonst auf PASS steht — noch nicht mehr wert als Nichtstun.
 8. **Die MAE-Zahlen aus `metrics.txt`** in `README_ERSTER_TEST.md` Kapitel 6
    eintragen und die dort stehenden synthetischen Zahlen ersetzen. Dabei den
    Hinweis, dass es synthetische Zahlen sind, mit entfernen.
@@ -240,14 +241,19 @@ Bündel und gelten **nicht** als Absolutwerte für die echten OPs — deshalb re
 `smallBench.py` sie inzwischen bei jedem Lauf auf dem echten Test-OP neu aus und
 druckt sie neben die MAE. Zitiere die Zahl aus dem Lauf, nie die aus dem README.
 
-**Ein FAIL nennt jetzt seinen Grund.** Die Zeile
-`w_phys=... FAIL: <Grund>; <Grund>` am Ende der Zusammenfassung und dieselben
-Gründe in `artifacts/smallBench_results.txt` sagen, welche der fünf Prüfungen
-gekippt ist. Das ist nicht kosmetisch: `passed` ist eine Und-Verknüpfung aus
-Stabilität, Konvergenz, **beiden** Balance-Prüfungen und der MAE, und die
-MAE-Prüfung war früher ein `test_mae < 20`, das kein Lauf dieses Projekts je
-gerissen hat. Ein FAIL kam damit fast immer vom Physik- oder vom BC-Term — und
-`L_bc_bal` stand in keiner Zusammenfassungstabelle.
+**Ein FAIL nennt jetzt seinen Grund.** Die Zeile `FAIL reason: ...` unter jedem
+Lauf sagt, welche der vier Prüfungen gekippt ist. Das ist nicht kosmetisch:
+`passed` ist eine Und-Verknüpfung aus Stabilität, Konvergenz, **beiden**
+Balance-Prüfungen und der MAE-Schranke, und diese Schranke ist ein
+`test_mae < 20`, das kein Lauf dieses Projekts je gerissen hat. Ein FAIL kam
+damit fast immer vom Physik- oder vom BC-Term — und `L_bc_bal` stand früher in
+keiner Zusammenfassungstabelle.
+
+**PASS heißt „der Lauf ist brauchbar", nicht „das Modell ist gut."** Die vier
+Prüfungen sind Rauchtests. Die Frage, ob sich das Training überhaupt gelohnt
+hat, beantwortet allein der Vergleich mit den trivialen Vorhersagern; ein Lauf
+kann alle vier bestehen und trotzdem gegen „Temperatur bleibt konstant"
+verlieren. Genau dann steht ein `NOTE:` darunter.
 
 ---
 

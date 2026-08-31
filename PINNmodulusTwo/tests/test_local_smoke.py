@@ -51,26 +51,27 @@ def test_baselines_are_measured_on_the_op_in_hand():
     op = SimpleNamespace(T_lab=lab)
     bundle = SimpleNamespace(T_mu=20.0)
 
-    base = smallBench._baseline_maes(op, bundle)
+    persistence, mean = smallBench._trivial_baselines(op, bundle)
 
     # persistence holds row 0: errors are 0,0 / 2,6 / 4,12 -> mean 4.0
-    assert base["persistence"] == pytest.approx(4.0)
+    assert persistence == pytest.approx(4.0)
     # train mean 20: errors 10,0 / 8,6 / 6,12 -> mean 7.0
-    assert base["train_mean"] == pytest.approx(7.0)
+    assert mean == pytest.approx(7.0)
 
 
 def test_persistence_baseline_is_zero_for_a_constant_field():
     """A field that never moves is predicted exactly by "it never moves".
 
-    This is the degenerate case that makes the skill number readable: if the
-    held-out OP were flat, beating persistence would be impossible rather than
-    merely hard, and the run should not silently report a huge skill.
+    The degenerate case behind "the bar to beat": on a flat held-out OP the bar
+    is 0 C, so beating it is impossible rather than merely hard. Worth pinning
+    down, because that is the one case where losing to the trivial predictor
+    says nothing at all about the model.
     """
     lab = np.full((5, 3), 7.5)
-    base = smallBench._baseline_maes(SimpleNamespace(T_lab=lab),
-                                     SimpleNamespace(T_mu=7.5))
-    assert base["persistence"] == pytest.approx(0.0)
-    assert base["train_mean"] == pytest.approx(0.0)
+    persistence, mean = smallBench._trivial_baselines(
+        SimpleNamespace(T_lab=lab), SimpleNamespace(T_mu=7.5))
+    assert persistence == pytest.approx(0.0)
+    assert mean == pytest.approx(0.0)
 
 
 # --------------------------------------------------------------------------
