@@ -44,6 +44,10 @@ Delete ``data_cache/`` again before touching the real data -- a synthetic
 bundle and a measured one must never be mixed in the same cache directory,
 which is why every file written here carries ``synthetic: True`` and
 ``synthetic_note`` and why ``smallBench.py`` prints a banner when it loads one.
+
+The other direction is guarded rather than documented: a target bundle without
+that marker is treated as measured and the run is refused before a single file
+is written. See ``measured_bundles``.
 """
 
 from __future__ import annotations
@@ -334,6 +338,42 @@ def ensure_material_properties(force: bool = False) -> bool:
     return True
 
 
+# --------------------------------------------------------------------------
+# overwrite guard
+# --------------------------------------------------------------------------
+# ``--out`` defaults to PREFERRED_DATA_CACHE, which on the machine that has the
+# measured data is exactly where OP01.npz ... OP16.npz live. That folder is
+# gitignored, so an overwrite there has nothing in the repository to restore
+# from -- only a rebuild from the raw CSVs through generate_cache.py, if those
+# are still around.
+#
+# ``ensure_material_properties`` has refused to touch an existing folder since
+# the first version of this script. The bundles were the hole in the same rule,
+# and they are the expensive half.
+
+
+def measured_bundles(out_dir: Path, op_ids: list[str]) -> list[Path]:
+    """The targets that already hold something other than this script's fixture.
+
+    Every bundle written here carries ``synthetic``; a measured one does not.
+    A file that cannot be read counts as measured on purpose: what this script
+    cannot parse is the last thing it should overwrite.
+    """
+    hits = []
+    for op_id in op_ids:
+        path = out_dir / f"{op_id}.npz"
+        if not path.exists():
+            continue
+        try:
+            with np.load(path, allow_pickle=True) as npz:
+                if "synthetic" in npz.files:
+                    continue
+        except Exception:
+            pass
+        hits.append(path)
+    return hits
+
+
 def main() -> int:
     p = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     p.add_argument("--ops", nargs="+",
@@ -352,6 +392,11 @@ def main() -> int:
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--force-materials", action="store_true",
                    help="overwrite an existing material_properties/ folder")
+    p.add_argument("--force", action="store_true",
+                   help="overwrite OP bundles that carry no synthetic marker. "
+                        "Refused by default: on the machine with the measured "
+                        "data those ARE the measurements, and data_cache/ is "
+                        "gitignored")
     args = p.parse_args()
 
     if args.quick:
@@ -361,10 +406,24 @@ def main() -> int:
             f"--seconds {args.seconds:g} is shorter than the 20 s rate lag needs; "
             "use at least 60")
 
+    # Before anything is written, including the material stand-in: a run that
+    # is going to be refused must not leave half a fixture behind.
+    out_dir = Path(args.out)
+    protected = measured_bundles(out_dir, args.ops)
+    if protected and not args.force:
+        listing = "\n".join(f"  {q}" for q in protected)
+        raise SystemExit(
+            f"refusing to overwrite {len(protected)} bundle(s) that carry no "
+            f"synthetic marker:\n{listing}\n"
+            f"These look like measured data. {out_dir} is gitignored, so there "
+            f"is no copy in the repository to restore from -- only a rebuild "
+            f"from the raw CSVs via generate_cache.py. Write the fixture "
+            f"somewhere else with --out, or pass --force if you are certain "
+            f"these are disposable.")
+
     wrote = ensure_material_properties(force=args.force_materials)
     print(f"material_properties/: {'written (stand-in)' if wrote else 'left as is'}")
 
-    out_dir = Path(args.out)
     n_steps = int(args.seconds / RAW_DT)
     n_layer = points_per_layer()
     n_points = n_layer * len(LAYERS)

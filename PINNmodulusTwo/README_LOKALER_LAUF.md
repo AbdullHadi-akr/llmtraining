@@ -87,6 +87,14 @@ Term ist und nicht in den Daten.
 echten OPs. Für „läuft die Pipeline und feuern die Prüfungen" ist er da — sonst
 für nichts. `data_cache/` löschen, bevor die echten Daten hineinkommen.
 
+**Die Gegenrichtung ist abgesichert.** Das voreingestellte `--out` ist das
+gemeinsame `data_cache/` — auf dem Rechner mit den Messdaten also genau der
+Ordner, in dem `OP01.npz … OP16.npz` liegen, und der ist gitignored. Findet der
+Generator dort ein Bündel **ohne** `synthetic`-Markierung, bricht er ab, bevor
+eine einzige Datei geschrieben ist, und nennt die betroffenen Pfade. Ein Bündel,
+das er nicht lesen kann, gilt dabei als Messung. Ausweg ist ein anderes `--out`;
+`--force` gibt es, ist aber genau dann falsch, wenn man es braucht.
+
 Fehlt zusätzlich Modulus (Laptop ohne CUDA-Stack), setzt `--modulus-stub` die
 init-treue Ersatzschicht aus `tools/_modulus_stub.py` ein — ebenfalls mit
 Banner, ebenfalls nie für eine zitierte Zahl.
