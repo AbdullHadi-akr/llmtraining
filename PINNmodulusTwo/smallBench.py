@@ -14,6 +14,12 @@ trivial-predictor comparison printed underneath it, computed on the same
 held-out OP -- see ``_trivial_baselines``. A run can pass all four checks and
 still lose to predicting a constant.
 
+No ``data_cache/``? ``python3 PINNmodulusTwo/tools/make_synthetic_cache.py``
+writes a synthetic one, and every command below then runs on a bare checkout --
+``--modulus-stub`` covers a machine without Modulus on top of that. Both are
+announced in a banner and recorded in the artifacts, because a number off either
+must never be quoted as a measurement.
+
 This is also "step A" of PINNmodulusTwo/README_MODEL_CRITIQUE.md: run it once as
 it stands and once as
 
@@ -46,6 +52,17 @@ import matplotlib.pyplot as plt
 
 THIS_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(THIS_DIR))
+
+# --modulus-stub has to be handled before ``model`` is imported, because that
+# import is what raises when Modulus is missing -- same ordering as
+# tools/rollout_divergence.py. It is opt-in, never a silent fallback: the stub
+# replaces the network's building block, and a benchmark that swapped that out
+# without saying so would produce numbers nobody could attribute.
+USE_MODULUS_STUB = "--modulus-stub" in sys.argv
+if USE_MODULUS_STUB:
+    sys.path.insert(0, str(THIS_DIR / "tools"))
+    import _modulus_stub
+    _modulus_stub.install(faithful=True)
 
 from data import build_op
 from device_utils import resolve_device
@@ -132,7 +149,32 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--device", default=d.get("device", "auto"),
                    help="auto | cpu | cuda | cuda:N (auto = cuda when available)")
-    return p.parse_args()
+    p.add_argument("--modulus-stub", action="store_true",
+                   help="run without a Modulus install, substituting the "
+                        "faithful-at-init FCLayer stand-in from "
+                        "tools/_modulus_stub.py. For getting a laptop to run "
+                        "the pipeline at all -- never for a quoted result")
+    p.add_argument("--quick", action="store_true",
+                   help="cut the run down for a laptop CPU: 3 epochs, 25 inner "
+                        "steps, one w_phys. Enough to see every check fire and "
+                        "the artifacts written; far too short to judge accuracy")
+    cli = p.parse_args()
+    if cli.quick:
+        # Only override what the user did not ask for explicitly, so
+        # --quick --epochs 5 still runs 5 epochs. argparse also accepts
+        # --epochs=5 as a single token, so a plain set membership test would
+        # miss it and silently overrule the value the user typed.
+        def given(flag: str) -> bool:
+            return any(a == flag or a.startswith(flag + "=")
+                       for a in sys.argv[1:])
+
+        if not given("--epochs"):
+            cli.epochs = 3
+        if not given("--inner-steps"):
+            cli.inner_steps = 25
+        if not given("--w-phys"):
+            cli.w_phys = [0.1]
+    return cli
 
 
 class Args:
@@ -233,15 +275,51 @@ def _trivial_baselines(op, bundle) -> tuple[float, float]:
     return persistence, mean
 
 
+def _cache_is_synthetic() -> bool:
+    """True when the loaded OP bundles were written by make_synthetic_cache.py.
+
+    Absolute MAE off that fixture means nothing about the real OPs, so a run on
+    it must never be quoted as a result. Cheap to check and easy to forget,
+    hence the banner rather than a line in a README.
+    """
+    try:
+        import data as _data
+        for path in sorted(Path(_data.DATA_CACHE).glob("OP*.npz")):
+            with np.load(path, allow_pickle=True) as npz:
+                # Any synthetic bundle in the cache is enough to disqualify the
+                # run: a directory holding both kinds is not a dataset, and the
+                # banner has to fire on the mixture too, not only when the file
+                # that happens to sort first is the synthetic one.
+                if "synthetic" in npz.files:
+                    return True
+    except Exception:
+        pass
+    return False
+
+
 def main():
     cli = parse_args()
     device = resolve_device(cli.device)
     cli.device = str(device)  # hand the resolved device down to fit()
     dt_s = 0.1 * cli.subsample
 
+    synthetic = _cache_is_synthetic()
+
     print("=" * 70)
     print("SMALL CONVERGENCE BENCHMARK")
     print("=" * 70)
+    if USE_MODULUS_STUB:
+        print("  *** MODULUS STUB (tools/_modulus_stub.py) ***")
+        print("  The real modulus.models.layers.FCLayer is NOT in use. The")
+        print("  stand-in matches it at initialisation, which is what rollout")
+        print("  stability depends on, but this is not a Modulus run.")
+        print("-" * 70)
+    if synthetic:
+        print("  *** SYNTHETIC CACHE (tools/make_synthetic_cache.py) ***")
+        print("  Smoke fixture. It answers 'does the pipeline run and do the")
+        print("  checks fire', not 'how accurate is the model'. Absolute MAE")
+        print("  from it says nothing about the real OPs.")
+        print("-" * 70)
     print(f"  Training OPs:  {cli.ops}")
     print(f"  Test OP:       {cli.test_op}")
     print(f"  Δt:            {dt_s:.1f}s (subsample={cli.subsample})")
@@ -249,6 +327,7 @@ def main():
     print(f"  Architecture:  width={cli.width}, depth={cli.depth}")
     print(f"  History:       mode={cli.history_mode}, rate_lags={cli.rate_lags}")
     print(f"  Physics sweep: w_phys={cli.w_phys}")
+    print(f"  BC weight:     w_bc={cli.w_bc}")
     print(f"  Grad clip:     {cli.grad_clip}")
     print("=" * 70)
     print()
@@ -298,6 +377,23 @@ def main():
         bc_balanced = (not bc_on) or 0.01 < L_bc_bal < 100
         balanced = phys_balanced and bc_balanced
 
+        # The divisors those balanced losses came out of, and how much structure
+        # the rollout still carries (train.py records both per epoch).
+        #
+        # They answer the two questions a bare L_phys_bal cannot. A value far
+        # below 1 means either the term genuinely fell or the EMA divisor is
+        # stale from an earlier regime, and those call for opposite responses --
+        # the divisor separates them. And a field constant in space and time
+        # satisfies the heat residual AND the Neumann BC exactly, so a physics
+        # loss going to zero is only good news while the spread stays up.
+        #
+        # Reported, never gated: a short smoke run is entitled to a flat-ish
+        # rollout, and turning that into a FAIL would cry wolf on every one.
+        spread_space = hist.get("spread_space", [float("nan")])[-1]
+        spread_time = hist.get("spread_time", [float("nan")])[-1]
+        div_phys = hist.get("div_phys", [float("nan")])[-1]
+        div_bc = hist.get("div_bc", [float("nan")])[-1]
+
         # Check 4: Test MAE is reasonable
         held = build_op(cli.test_op, bundle, subsample_time=cli.subsample)
         test_mae = _rollout_mae(model, held, bundle, device)
@@ -329,6 +425,10 @@ def main():
             "mae_mean": mae_mean,
             "mae_trivial": mae_trivial,
             "beats_trivial": beats_trivial,
+            "spread_space": spread_space,
+            "spread_time": spread_time,
+            "div_phys": div_phys,
+            "div_bc": div_bc,
             "stable": stable,
             "converged": converged,
             "phys_balanced": phys_balanced,
@@ -350,6 +450,12 @@ def main():
                    else "✓" if bc_balanced else "✗ (not ~O(1))")
         print(f"    L_phys_bal:     {L_phys_bal:.4e}  {phys_note}")
         print(f"    L_bc_bal:       {L_bc_bal:.4e}  {bc_note}")
+        print(f"      divisors:     phys={div_phys:.4e}  bc={div_bc:.4e}")
+        flat_note = ("  <- near-constant field: both residual terms are "
+                     "satisfied for free"
+                     if min(spread_space, spread_time) < 0.2 else "")
+        print(f"    Rollout spread: space={spread_space:.3g}x  "
+              f"time={spread_time:.3g}x  of the labels'{flat_note}")
         print(f"    Train MAE:      {train_mae:.2f}°C")
         print(f"    Test MAE:       {test_mae:.2f}°C  {'✓' if mae_ok else '✗ (>20°C)'}")
         print(f"      vs. persistence T(t)=T(0):     {mae_persist:.2f}°C")
@@ -472,10 +578,25 @@ def main():
         f.write("Small Benchmark Results\n")
         f.write(f"OPs: {cli.ops}, Test: {cli.test_op}\n")
         f.write(f"Δt: {dt_s}s, Epochs: {cli.epochs}\n")
-        f.write(f"Architecture: width={cli.width}, depth={cli.depth}\n\n")
+        f.write(f"Architecture: width={cli.width}, depth={cli.depth}\n")
+        f.write(f"w_bc: {cli.w_bc}, loss_balance: {cli.loss_balance}, "
+                f"ema_decay: {cli.ema_decay}\n")
+        # Provenance travels with the numbers or it is lost. A results file that
+        # does not say it came off the smoke fixture, or off the Modulus stub,
+        # is one copy-paste away from being quoted as a measurement.
+        if synthetic:
+            f.write("SYNTHETIC CACHE (tools/make_synthetic_cache.py) -- smoke "
+                    "fixture; absolute MAE says nothing about the real OPs\n")
+        if USE_MODULUS_STUB:
+            f.write("MODULUS STUB (tools/_modulus_stub.py) -- the real FCLayer "
+                    "was not in use\n")
+        f.write("\n")
         for r in results:
             f.write(f"w_phys={r['w_phys']}: L_data={r['L_data_final']:.4e}, "
                     f"L_phys_bal={r['L_phys_bal']:.4e}, L_bc_bal={r['L_bc_bal']:.4e}, "
+                    f"div_phys={r['div_phys']:.4e}, div_bc={r['div_bc']:.4e}, "
+                    f"spread_space={r['spread_space']:.3g}, "
+                    f"spread_time={r['spread_time']:.3g}, "
                     f"train_mae={r['train_mae']:.2f}C, test_mae={r['test_mae']:.2f}C, "
                     f"{'PASS' if r['passed'] else 'FAIL'}\n")
         # README_MODEL_CRITIQUE.md step A compares this file between two runs, so

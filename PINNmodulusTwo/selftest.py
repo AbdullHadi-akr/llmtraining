@@ -15,8 +15,21 @@ Run before any long sweep:
 from __future__ import annotations
 
 import sys
+from pathlib import Path
 
 import numpy as np
+
+# Nothing below touches a network, but ``physics`` imports ``model``, which
+# imports Modulus at module scope -- so this file could only ever run on the one
+# machine that has Modulus installed, despite testing pure arithmetic. The
+# faithful stand-in makes the import succeed; the checks themselves never build
+# a layer, so which FCLayer is in scope cannot affect a single result here.
+try:
+    import modulus  # noqa: F401
+except ModuleNotFoundError:
+    sys.path.insert(0, str(Path(__file__).resolve().parent / "tools"))
+    import _modulus_stub
+    _modulus_stub.install(faithful=True)
 
 from physics import _term_norm
 from train import _LossBalancer
