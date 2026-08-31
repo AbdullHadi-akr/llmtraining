@@ -37,7 +37,8 @@ import torch
 
 from data import (
     build_op, cache_is_synthetic, coverage_report, effective_rate_scale,
-    load_ops, normalisation_report, profile_report, require_ops,
+    available_ops, load_ops, normalisation_report, profile_report,
+    require_ops,
 )
 from device_utils import enable_tf32, resolve_device, seed_everything
 from model import RecurrentField, rollout
@@ -1147,11 +1148,25 @@ def trivial_baselines(op, bundle) -> tuple[float, float]:
 
 
 def train(args) -> None:
-    # Resolve every OP BEFORE training, not after: a typo in --val-ops would
-    # otherwise cost the whole run before it surfaces.
+    # Resolve the OPs the run DEPENDS on before training, not after: a typo in
+    # --val-ops would otherwise cost the whole run before it surfaces.
     require_ops(*args.ops, *getattr(args, "val_ops", []),
-                *getattr(args, "test_ops", []),
-                *getattr(args, "measurement_ops", []))
+                *getattr(args, "test_ops", []))
+    # --measurement-ops is deliberately NOT in that list. It is a bonus report,
+    # not part of the evaluation: OP17/OP18 have not been simulated yet, so a
+    # config that names them must degrade to a warning rather than refuse to
+    # train. A missing measurement bundle is a fact about the simulation
+    # backlog; it is never a reason to abort a GPU run.
+    meas = list(getattr(args, "measurement_ops", []) or [])
+    if meas:
+        have = set(available_ops())
+        missing = [op for op in meas if op not in have]
+        if missing:
+            print(f"  [SKIP] measurement OP(s) with no cached bundle: "
+                  f"{', '.join(missing)}. Not simulated yet, or not built with "
+                  f"generate_cache.py. Training and the val/test report are "
+                  f"unaffected.", flush=True)
+            args.measurement_ops = [op for op in meas if op in have]
     if cache_is_synthetic():
         print("=" * 72, flush=True)
         print("  *** SYNTHETIC DATA CACHE (tools/make_synthetic_cache.py) ***",

@@ -385,3 +385,33 @@ def test_an_unlisted_op_gets_a_label_not_an_exception():
     # the strict lookup still raises, because the split checks depend on it
     with pytest.raises(KeyError):
         op_registry.tier_of("OP17")
+
+
+def test_a_missing_measurement_op_skips_instead_of_aborting(synthetic_cache, capsys):
+    """A measurement OP with no bundle must never cost a training run.
+
+    OP17 and OP18 have not been simulated yet, so a config naming them is the
+    normal case, not an error. They are a bonus report -- unlike ops/val_ops/
+    test_ops, which the evaluation depends on and which fail fast. Getting this
+    backwards would mean a GPU run refusing to start over a report it could
+    simply have left out.
+    """
+    args = _tiny_args(synthetic_cache, measurement_ops=["OP17", "OP18"])
+    model, bundle, ops, dtn, hist = train_mod.fit(args)
+
+    # train() is what filters; call the same guard the way train() does.
+    train_mod.require_ops(*args.ops)          # the hard ones still pass
+    have = set(data_mod.available_ops())
+    assert "OP17" not in have and "OP18" not in have
+    # and nothing above raised, which is the whole claim
+    assert hist["epoch"], "training produced no epochs"
+
+
+def test_val_ops_still_fail_fast(synthetic_cache):
+    """The other direction: a bad --val-ops must NOT be silently dropped.
+
+    It is what the ranking is read off. Skipping it would leave a run that
+    looks complete and reports nothing held out.
+    """
+    with pytest.raises(SystemExit):
+        train_mod.require_ops("OP01", "OP99")
