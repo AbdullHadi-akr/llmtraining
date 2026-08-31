@@ -33,8 +33,9 @@ zutrifft: nicht weitermachen, sondern die genannte Datei schicken.
 - [x] **1** Code holen — 31.08.
 - [x] **2** Läuft der Code? (keine Daten nötig) — 31.08., grün
 - [x] **3** Cache bauen, alle sechzehn — 31.08.
-- [~] **4** Stimmen die Daten? — 31.08., **ein MISMATCH auf OP15** (Test-OP)
-- [ ] **5** Die Latte ← das entscheidende Tor
+- [x] **4** Stimmen die Daten? — 31.08., ein MISMATCH auf OP15 (Test-OP, unkritisch)
+- [~] **5** Die Latte — 31.08. gelaufen, aber **der Lauf war nicht aussagekraeftig** (§9.3)
+- [ ] **5b** Kurzlauf bei der ECHTEN Konfiguration ← **neu, vor 6**
 - [ ] **6** Erster ernsthafter Lauf (GPU)
 
 ## Stand
@@ -53,8 +54,12 @@ Wird beim Abhaken ausgefüllt. Leer = noch nicht gemessen.
 | 4 | `dTdt_scale` | **3.534** | 31.08. |
 | 4 | `T_sigma` / `T_span_ref` | 9.616 C / 1604 s | 31.08. |
 | 4 | `phys_scale` / `Qsrc_scale` | 3.535 / 0.0241 | 31.08. |
-| 5 | OP06 `beats` / `LOSES TO` | | |
-| 5 | OP09 `beats` / `LOSES TO` | | |
+| 5 | OP06 | `LOSES TO` (12.96 vs 10.82 C) — **nicht aussagekraeftig, §9.3** | 31.08. |
+| 5 | OP09 | `LOSES TO` (8.71 vs 7.78 C) — dito | 31.08. |
+| 5 | `[SATURATED]` | **ja, beide Epochen: 99 % / 94 % einer Trajektorie** | 31.08. |
+| 5 | `spread s/t` | **4.9 / 4.2** — Rollout streut 5x so weit wie die Labels | 31.08. |
+| 5b | `[SATURATED]` bei subsample 2 | | |
+| 5b | `A` bei subsample 2 | | |
 | 6 | `[SATURATED]` letzte Epoche | | |
 | 6 | MAE OP06 / OP09 | | |
 | 6 | MAE OP13 / OP15 / OP16 | | |
@@ -203,15 +208,68 @@ schlägt das Modell „nichts tun"?
 Nach zwei Epochen darf da noch `LOSES TO` stehen. Wichtig ist, dass die Zahlen
 überhaupt da sind und der Lauf durchläuft.
 
+> ⚠️ **Am 31.08. gelaufen — und die Zahlen taugen nicht als Latte.** `--subsample
+> 40` bedeutet dt = 4 s und verletzt die CFL-Grenze (0.241 s) um Faktor 16.6,
+> und `--delta-grid 0.2s` degeneriert unter einem 4-s-Gitter. Dieser Schritt
+> zeigt also, **ob** der Lauf durchläuft, nicht **wie gut** er ist. Die echte
+> Latte kommt aus 5b. Siehe §9.3.
+
 **Stopp wenn:** `[ABORT]` — dann ist `A` zu groß, und Schritt 6 wäre
 verschwendete Zeit. → `05_latte.txt` schicken, ich sage dir den Wert für
 `--max-rate-amp`.
 
 ---
 
+### - [ ] Schritt 5b — Kurzlauf bei der ECHTEN Konfiguration (~15 min je Lauf)
+
+**Der Schritt, der entscheidet, ob Schritt 6 seine Stunden wert ist.**
+
+Schritt 5 lief bei dt = 4 s; das Training läuft bei dt = 0.2 s. Zwei der drei
+Probleme aus §9.3 verschwinden dadurch von selbst — die CFL-Verletzung und der
+degenerierte Anker. Das dritte, der **weglaufende Rollout**, verschwindet nicht
+automatisch. Genau das wird hier gemessen, und zwar mit **einer** Variablen
+zwischen den beiden Läufen:
+
+```bash
+# 5b-1: die echte Konfiguration, nur kurz
+python3 PINNmodulusTwo/train.py --epochs 3 2>&1 | tee 5b1_echt.txt
+
+# 5b-2: dasselbe OHNE Physik- und BC-Term
+python3 PINNmodulusTwo/train.py --epochs 3 --w-phys 0 --w-bc 0 \
+        2>&1 | tee 5b2_ohne_physik.txt
+```
+
+Der zweite Lauf ist keine Spielerei: `README.md` sagt, der Clamp sei erst mit
+`w_phys > 0` tragend — *„the physics gradient walks the weights out of the stable
+region faster"*. Bei dt = 4 s war der Physik-Gradient nachweislich Rauschen; ob
+er es bei dt = 0.2 s immer noch ist, trennen diese zwei Läufe.
+
+**Zu notieren, aus beiden Läufen:**
+
+| Zeile | warum |
+|---|---|
+| `A = 1/(lag_n * rate_scale) per lag: …` | bei dt = 0.2 s, das ist der **maßgebliche** Wert. Bei dt = 4 s waren es 90.8 / 22.7 |
+| `[CFL …]` | muss jetzt `CFL OK` sagen |
+| `[SATURATED]` je Epoche | **die Zahl, um die es geht** |
+| `spread s/t` | bei 4.9/4.2 in Schritt 5; nahe 1 wäre gesund |
+
+**Die Entscheidung danach:**
+
+| 5b-1 | 5b-2 | heißt | dann |
+|---|---|---|---|
+| kein `[SATURATED]` | — | dt war das Problem | **Schritt 6 starten** |
+| saturiert | sauber | der Physik-Gradient treibt es | `--w-phys 0.01`, oder `phys_scale` prüfen — **nicht** 60 Epochen |
+| saturiert | saturiert | die Rekurrenz selbst | `--max-rate-amp 50`, dann `--history-mode raw` — **nicht** 60 Epochen |
+
+**Stopp wenn:** beide saturieren. → beide Dateien schicken.
+
+---
+
 ### - [ ] Schritt 6 — Der erste ernsthafte Lauf (Stunden, jetzt GPU)
 
-Erst wenn 4 und 5 grün sind.
+**Erst wenn 5b grün ist** — also `[SATURATED]` verschwunden. Sechzig Epochen auf
+einem Rollout, der zu 99 % im Clamp hängt, ranken das Clamp-Verhalten und nicht
+das Modell.
 
 ```bash
 python3 PINNmodulusTwo/train.py --epochs 60 2>&1 | tee 06_lauf.txt
@@ -577,7 +635,75 @@ Nach dem Aufräumen: **10 Python-Dateien, 4 Dokumente.**
 
 ---
 
-## 9. Offene Befunde aus Schritt 4 (31.08.)
+## 9. Offene Befunde (31.08.)
+
+### 9.3 Schritt 5 hat die Frage NICHT beantwortet — und warum
+
+Der Lauf sagt auf beiden val-OPs `LOSES TO`. **Diese Zahl zaehlt nicht**, aus
+drei Gruenden, und der dritte ist der eigentliche Befund.
+
+**(a) `--subsample 40` verletzt die CFL-Grenze um Faktor 16.6.**
+
+```
+[CFL WARN] Δt=4.000s, Δt_max≈0.241s -> POTENTIALLY UNSTABLE
+```
+
+Bei dt = 4 s ist die Zeitableitung im Physik-Residuum Unsinn, also ist auch ihr
+Gradient Rauschen. Das Training laeuft mit `subsample_time: 2`, dt = 0.2 s, und
+damit innerhalb der Grenze. **Der Schritt-5-Lauf trainiert also eine andere
+Konfiguration als der, den er freigeben soll.** Das ist ein Fehler in diesem
+Fahrplan gewesen, nicht im Code.
+
+**(b) `--delta-grid 0.2s` ist kleiner als der Datenschritt 4 s.**
+
+```
+[WARN] the anchor cannot resolve finer than the grid and will effectively act as 4s
+```
+
+Der Anker der hybriden History degeneriert. Faellt bei subsample 2 ebenfalls weg.
+
+**(c) Der Rollout laeuft weg — und das faellt nicht automatisch weg.**
+
+```
+[SATURATED] epoch 1: OP05 365/369 steps   (98.9 %)
+[SATURATED] epoch 2: OP12 376/402 steps   (93.5 %)
+```
+
+Fast die ganze Trajektorie haengt im Clamp. `train.py` sagt dazu selbst: *„it is
+not a prediction, and a run that only survives because of this is not trained."*
+Der Befund ist nicht ein schlechter OP, sondern das Modell: die Saettigung
+**wandert** von OP05 nach OP12.
+
+Bestaetigt von `spread s/t = 4.92/4.19`: der Rollout streut fuenfmal so weit wie
+die Labels. Das ist das Gegenteil des `[FLAT]`-Falls — kein kollabiertes, sondern
+ein explodierendes Feld.
+
+**Nebenbefund:** bei 2 Epochen und einem EMA-Horizont von 10 Epochen sind die
+Loss-Divisoren praktisch die aus Epoche 1 eingefrorenen —
+`L_data/L_data_bal = 29696`, gesetzt vom saturierten Rollout der ersten Epoche.
+Die Balance hat in diesem Lauf nie gearbeitet. Auch das verschwindet erst bei
+laengeren Laeufen.
+
+**Was der Lauf trotzdem gezeigt hat, und das ist viel:** die Pipeline laeuft von
+Ende zu Ende auf echten Daten durch — 11 Trainings-OPs, 2 val, 3 test, OP19 als
+Messvergleich, alle Metriken, alle Baselines, Checkpoint geschrieben. Und
+`L_data` faellt von 94 auf 16, das Modell lernt also durchaus etwas.
+
+> **Deshalb steht jetzt ein Schritt 5b vor Schritt 6.** Sechzig Epochen auf einem
+> Rollout, der zu 99 % im Clamp haengt, ranken das Clamp-Verhalten und nicht das
+> Modell — das sind verlorene Stunden.
+
+### 9.4 OP19: die Latte ist dort fast unschlagbar
+
+`persistence = 1.375 C`. Die Trajektorie bewegt sich kaum, „das Feld aendert sich
+nie" ist also schon fast richtig. Dazu kommt: `tn` laeuft bis 2.18 (3496 s gegen
+`T_span_ref` 1604 s), `c_rate` geht auf **-3.42** (Entladung, nie trainiert), und
+`cell_current` wird negativ. `LOSES TO` ist dort erwartbar und sagt bis auf
+Weiteres nichts ueber das Modell.
+
+---
+
+## 9a. Offene Befunde aus Schritt 4 (31.08.)
 
 Beide kommen aus den Daten, nicht aus dem Code, und beide sind **nicht** durch
 einen Codefix zu erledigen.
@@ -647,15 +773,22 @@ Ehrlichkeitsklausel — wann der Plan selbst falsch ist:
 
 ---
 
-**Zuletzt fortgeschrieben:** 2026-08-31 — Schritt 1–3 gruen, Schritt 4 mit
-einem offenen Befund (OP15). **Zum ersten Mal stehen echte Zahlen in der
-Stand-Tabelle**, und eine Vorhersage dieses Dokuments ist dabei widerlegt
-worden (`A` faellt, statt zu steigen) und oben ersetzt.
+**Zuletzt fortgeschrieben:** 2026-08-31, nach Schritt 5. Schritt 1–4 gruen,
+Schritt 5 gelaufen aber **nicht aussagekraeftig** — und das hat den Plan
+geaendert: es gibt jetzt einen **Schritt 5b** vor Schritt 6.
 
-**Offene Befunde aus Schritt 4** — siehe §9:
-1. OP15: `cell_current` fehlt im Buendel, obwohl das Plansheet CC-CV nennt.
-2. OP12 (**Training**) und OP15: das `fluid_inlet_temp`-Profil endet bei 1440 s,
-   die Trajektorie laeuft bis 1604 s. Die letzten ~10 % werden flach gehalten.
+Die Pipeline laeuft von Ende zu Ende auf echten Daten durch, und `L_data` faellt
+von 94 auf 16 — das Modell lernt. Aber der Rollout haengt zu 99 % im Clamp, und
+Schritt 5 lief ausserdem bei dt = 4 s statt der 0.2 s, mit denen trainiert wird.
+Beides in §9.3.
+
+**Offene Befunde** — §9:
+1. §9.3 Der Rollout laeuft weg (`[SATURATED]` in beiden Epochen). **Das ist die
+   Frage, an der jetzt alles haengt.**
+2. §9.4 OP19s Latte ist mit persistence = 1.375 C fast unschlagbar.
+3. §9a.1 OP15: `cell_current` fehlt im Buendel, obwohl das Plansheet CC-CV nennt.
+4. §9a.2 OP12 (**Training**) und OP15: das `fluid_inlet_temp`-Profil endet bei
+   1440 s, die Trajektorie laeuft bis 1604 s; die letzten ~10 % sind flach.
 
 **Ausgeführt:** Testsuite (110 grün) und Ende-zu-Ende-`train.py`-Läufe gegen ein
 synthetisches Bündel — Banner, Training, val/test, `op_metrics`, Coverage-Report,
