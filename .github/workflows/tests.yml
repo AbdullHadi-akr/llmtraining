@@ -58,17 +58,11 @@ jobs:
           import sys
           sys.path.insert(0, 'tests'); import conftest
           import model, physics, data, materials, device_utils, train
-          import generate_cache, selftest
+          import op_registry, op_metrics, generate_cache, selftest
           print('all modules import')"
 
-      - name: import check (profile extension)
-        # Same failure mode, for the extension. It imports the base project
-        # through _paths, so this also catches a base-project rename that the
-        # extension still refers to by the old name.
-        working-directory: PINNmodulusTwoExtProfiles
-        run: |
-          python -c "
-          import sys
-          sys.path.insert(0, '../PINNmodulusTwo/tests'); import conftest
-          import _paths, data, op_registry, op_metrics, train
-          print('extension modules import')"
+      - name: op_registry consistency
+        # The plan sheet and the split live in the same file and can drift apart:
+        # an OP in two roles, or in none. Runs without any data.
+        working-directory: PINNmodulusTwo
+        run: python op_registry.py

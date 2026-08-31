@@ -416,7 +416,7 @@ Die Messung oben ist in der echten Geometrie gemacht (`A = 119/30`), sie
 überträgt sich also für OP01–05 direkt. Was **nicht** übertragbar ist:
 
 * Die absoluten MAE-Werte. Die Trajektorie ist synthetisch.
-* Die Zahlen für `PINNmodulusTwoExtProfiles`: das Pooling über OP01–OP16
+* Die Zahlen nach dem Merge: das Pooling über OP01–OP16
   vergrössert `T_sigma`, verkleinert `dTdt_scale` und **erhöht damit `A`** über
   die 119 hinaus. Dort ist die Lag-Wahl ungetestet.
 
@@ -547,7 +547,7 @@ x-benachbarte Gitterpunkte (`data._measure_bc_scale`), nicht mehr das frühere
 ### 4.1 Materialkonstanten, Divergenzform und Materialgrenzen — offener Befund
 
 > **Status: dokumentiert, nicht behoben.** Bewusst so: erst Schritt A aus
-> [`README_MODEL_CRITIQUE.md`](README_MODEL_CRITIQUE.md) laufen lassen, bevor am
+> [`FAHRPLAN.md`](FAHRPLAN.md) Phase 2/3 laufen lassen, bevor am
 > Physik-Term geschraubt wird. Eine Änderung hier wäre sonst eine zweite
 > unabhängige Variable in einem A/B, das ohnehin noch aussteht.
 
@@ -751,7 +751,7 @@ Trajektorie. Hunderte sind richtig, Zehntausende nicht.
 Das zweite OP sieht dabei bereits die Gewichte, die das erste aktualisiert hat —
 die OP-Reihenfolge ist hier die Listenreihenfolge aus `ops` und wird nicht
 gemischt. (Die Profil-Erweiterung mischt sie, weil ihre OPs über 0 C bis 4 C
-weit heterogener sind; siehe `PINNmodulusTwoExtProfiles/README.md`.)
+weit heterogener sind -- das ist seit dem Merge der Normalfall.)
 
 ### 6.1 Warum überhaupt balanciert wird
 
@@ -858,7 +858,7 @@ Gemessene Ersparnis: **~3 %**. Der Rollout dominiert, nicht das Residuum.
 
 > **Die häufigste Falle in diesem Projekt** ist die vorletzte Zeile, und sie hat
 > schon zweimal zugeschlagen: `smallBench` reichte `delta_grid` nicht durch (bei
-> `subsample=2` zufällig identisch, sonst nicht), und `PINNmodulusTwoExtProfiles`
+> `subsample=2` zufällig identisch, sonst nicht), und die Profil-Erweiterung
 > reichte `residual_output` nie durch und lief deshalb still mit dem alten
 > Modell-Default `True` — einem Integrator ohne Leck. Seit dem 31.08. gibt es nur
 > noch **zwei** Orte für einen Default (`train.parse_args` und `config.yaml`)

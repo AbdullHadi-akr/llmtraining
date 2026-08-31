@@ -3,35 +3,37 @@
 > **Neu hier? → [`FAHRPLAN.md`](FAHRPLAN.md).** Ein Einstieg, gegatterte
 > Reihenfolge, und was lokal zu tun ist. Diese Datei bleibt Nachschlagewerk.
 
-> **Update 31.08.2026 — die Benchmarks sind gelöscht.** `smallBench.py`,
-> `bench_common.py`, `benchmark_balance.py`, `benchmark_arch.py` und
-> `benchmark_wphys_wbc.py` gibt es nicht mehr; sie werden Schritt für Schritt neu
-> aufgebaut, sobald feststeht, was gemessen werden soll. Was sie an Nützlichem
-> konnten, kann `train.py` jetzt selbst: `--val-ops` / `--test-ops` rollen
-> ausgehaltene OPs mit der Normierung des Trainings-Bundles aus, und jede
-> Held-out-MAE wird neben den beiden trivialen Vorhersagern gedruckt. Warum, und
-> in welcher Reihenfolge sie zurückkommen: [`FAHRPLAN.md`](FAHRPLAN.md) §0 und §4.
-
-> **Update 27.08.2026 — der erste durchlaufende Test.** Bis dahin brach
-> jeder Lauf in Epoche 1 mit `L_data = nan` ab; die Ursache war
-> `residual_output`. [`README_ERSTER_TEST.md`](README_ERSTER_TEST.md) beschreibt
-> Modell, Architektur, Training, Daten, Loss und Ergebnisse vollständig, dazu die
-> Ursache und den gemessenen Vergleich der `rate_lags` und von `hybrid` gegen
-> `raw`.
+> **Update 31.08.2026 — ein Projekt, ein Datensatz, keine Benchmarks.**
 >
-> **Nächster Schritt: der erste Lauf auf echten Daten.** Bis heute ist nichts
-> davon auf OP01–OP07 verifiziert — `data_cache/` und `material_properties/`
-> sind gitignored und liegen nur lokal, alle bisherigen MAE-Zahlen sind
-> synthetisch. [`README_LOKALER_LAUF.md`](README_LOKALER_LAUF.md) ist die
-> Anleitung dafür: wohin die Daten gehören, der Sekunden-Test vorweg
-> (`tools/data_probe.py`), der eigentliche Lauf und worauf dabei zu achten ist.
+> * `PINNmodulusTwoExtProfiles/` ist hier aufgegangen. Die Profil-Pipeline ist
+>   eine echte Obermenge der konstanten — ein konstanter Treiber ist ein Profil,
+>   das sich nicht bewegt — also gibt es keinen Grund für zwei Projekte.
+>   Trainiert wird auf dem ganzen Plansheet **OP01–OP16**.
+> * Die acht Benchmark-Skripte sind gelöscht und werden Schritt für Schritt neu
+>   aufgebaut. Was sie an Nützlichem konnten, kann `train.py` selbst: `--val-ops`
+>   / `--test-ops`, per-OP-Metriken je Tier, Coverage-Report und die beiden
+>   trivialen Vorhersager neben jeder Zeile.
+> * `train.py` schreibt jetzt `artifacts/model.pt` — vorher lag die einzige
+>   `torch.save` im gelöschten `bench_common.py`.
+>
+> Warum, und in welcher Reihenfolge die Messungen zurückkommen:
+> [`FAHRPLAN.md`](FAHRPLAN.md) §0 und §3.
 
 Implementation of **method #2** from the Notion page *"Battery Model with NVIDIA
 MODULUS"*: use Modulus as much as practical, but bring our **own recurrence** in
 PyTorch. Roughly a 50:50 Modulus / PyTorch split. **Temperature only** — `bc_V`
-is deliberately out of scope. Trains on **OP01–OP05**, validates on **OP06**
-(`--val-ops`: what a tuning decision may look at) and reports **OP07**
-(`--test-ops`: read once, never selected on).
+is deliberately out of scope.
+
+Trains on eleven of the sixteen plan-sheet OPs, validates on **OP06 + OP09**
+(`--val-ops`: what a tuning decision may look at) and reports **OP13, OP15,
+OP16** (`--test-ops`: the extrapolation tier, read once, never selected on).
+`op_registry.py` holds that split and argues for it; run it, it needs no data.
+
+**OP17–OP19 are not part of this.** They are the mini-module *measurement*
+comparison — measured data rather than simulation, partly discharge where
+OP01–OP16 are all charge — and of the three only OP19 exists in this pipeline at
+all. `--measurement-ops OP19` rolls it out and reports it, never trains or
+selects on it.
 
 ## What comes from Modulus vs. PyTorch
 
@@ -47,8 +49,18 @@ is deliberately out of scope. Trains on **OP01–OP05**, validates on **OP06**
 
 - `data.py` — loads the OPs from the cached `.npz` (JR1 heat = `q_source[:,0]`),
   pooled z-score for temperature, shared `L_ref`/`T_span_ref` non-dimensionalisation,
-  anisotropic Fourier tensor, and a per-timestep **config feature block** that
-  already supports time-varying **profiles**.
+  anisotropic Fourier tensor, and the per-timestep **config feature block**.
+  Owns everything the profiles force: anti-aliased driver resampling
+  (`--resample mean`), causal driver-rate channels (`--driver-rate-lags`), and
+  the three reports — `normalisation_report`, `profile_report` (what the bundles
+  actually contain, against what the plan sheet claims) and `coverage_report`
+  (which held-out driver leaves the trained range, and by how many sigmas).
+- `op_registry.py` — the plan sheet in code: OP01–OP16, which OP carries which
+  profile, the tiers, and the split. **Runs without data.**
+- `op_metrics.py` — per-OP rollout metrics. Not just a mean: a CC-CV OP spends
+  most of its samples in the easy CC phase and a short window in the CV taper,
+  so `mae_transient` / `mae_quiescent`, `peak_err` (the number an aging model
+  consumes) and `late_mae` are reported alongside `mae`/`rmse`.
 - `model.py` — `LearnableSwish`, `ModulusMLP` (Modulus `FCLayer`s), and
   `RecurrentField`. The recurrence is deliberately **not** adaptive: `δ`, `k`,
   `delta_grid`, `rate_lags` and the lag gates are all fixed hyperparameters —
@@ -65,13 +77,12 @@ is deliberately out of scope. Trains on **OP01–OP05**, validates on **OP06**
   rollout per OP per epoch, then `--inner-steps` minibatch updates against it.
 - `selftest.py` — seconds-long arithmetic checks on the loss balancing and the
   residual scaling. No data, no GPU.
+- `tests/` — rollout stability, the history fast path (bit-exactness against the
+  general path), the checkpoint round-trip, and the loss bookkeeping. Needs
+  neither Modulus nor the data cache; runs in seconds.
 - `config.yaml` — hyperparameters. Since the benchmark scripts are gone this is
   the ONLY place a default lives (CLI overrides available).
-- [`README_MODEL_CRITIQUE.md`](README_MODEL_CRITIQUE.md) — what was wrong with the
-  model, what is fixed, what is still open, and **what you have to see in which
-  test to know which step comes next**. Everything in it is so far verified
-  mathematically only, not measured on real data; it names the run that settles
-  that. Read it before committing GPU days to anything.
+
 
 ## Why recurrence (profiles)
 
@@ -177,7 +188,7 @@ reason rather than switched off:
   mode. `--residual-norm legacy` restores only the old *overall* divisor
   `sqrt(phys_scale)`; it does not bring back dividing `dTdt`, `aniso` and `Qsrc`
   by three different numbers, which changed the equation rather than scaling it
-  (see `README_MODEL_CRITIQUE.md` §1.3).
+  (see `physics.heat_residual` and `ARCHITECTURE.md` 1.3).
 
 `config.yaml` holds the defaults and `train.py` is the only entry point, so
 there is no longer a second configuration that some other script would run.
@@ -188,6 +199,9 @@ there is no longer a second configuration that some other script would run.
 source .venv/bin/activate
 python3 PINNmodulusTwo/train.py --epochs 60
 ```
+
+Everything — the OP set, the split, the preprocessing — comes from
+`config.yaml`. A bare run trains on OP01–OP16 and reports val and test.
 
 Everything not passed comes from `config.yaml`, which is the single source of
 defaults. Add `--val-ops OP06 --test-ops OP07` (they are already the config
