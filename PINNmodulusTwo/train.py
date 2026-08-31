@@ -200,6 +200,32 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--batch-data", type=int, default=d.get("batch_data", 2048))
     p.add_argument("--batch-phys", type=int, default=d.get("batch_phys", 256))
     p.add_argument("--batch-bc", type=int, default=d.get("batch_bc", 128))
+    # These four were in config.yaml, documented, and unreachable: fit() called
+    # load_ops(op_ids, subsample_time) and nothing else, and zero_weight_terms
+    # was read with getattr() off an attribute no argparse entry created. Every
+    # default below equals what load_ops / the getattr fell back to, so wiring
+    # them changes no result -- it only makes the knobs work.
+    p.add_argument("--subsample-mode", choices=["stride", "mean"],
+                   default=d.get("subsample_mode", "stride"),
+                   help="stride = plain decimation. mean = block average, a "
+                        "crude anti-alias filter that CHANGES THE DATA -- the "
+                        "drivers are then means over the interval, not samples")
+    p.add_argument("--forcing-energy", action=argparse.BooleanOptionalAction,
+                   default=d.get("forcing_energy", False),
+                   help="append the cumulative injected heat as a 2nd forcing "
+                        "channel. Widens the network input, so measure it")
+    p.add_argument("--config-rates", action=argparse.BooleanOptionalAction,
+                   default=d.get("config_rates", False),
+                   help="append d(config)/dt for the config channels that are "
+                        "genuine time profiles. Same: measure, do not assume")
+    p.add_argument("--zero-weight-terms", choices=["skip", "compute"],
+                   default=d.get("zero_weight_terms", "skip"),
+                   help="skip = a term with weight 0 costs no forward pass and "
+                        "is logged as NaN (an absent measurement, not a "
+                        "measurement of zero); compute = evaluate it anyway")
+    p.add_argument("--train-frac", type=float, default=d.get("train_frac", 0.8),
+                   help="fraction of each OP's timeline used for the pooled "
+                        "statistics and for split_t")
     p.add_argument("--use-static", action="store_true", default=d.get("use_static", False))
     p.add_argument("--use-forcing", action="store_true", default=d.get("use_forcing", False))
     p.add_argument("--seed", type=int, default=d.get("seed", 0))
@@ -350,7 +376,13 @@ def fit(args):
     device = resolve_device(args.device)
     enable_tf32(getattr(args, "tf32", False))
 
-    bundle = load_ops(op_ids=args.ops, subsample_time=args.subsample)
+    bundle = load_ops(
+        op_ids=args.ops, subsample_time=args.subsample,
+        train_frac=float(getattr(args, "train_frac", 0.8)),
+        subsample_mode=str(getattr(args, "subsample_mode", "stride")),
+        forcing_energy=bool(getattr(args, "forcing_energy", False)),
+        config_rates=bool(getattr(args, "config_rates", False)),
+    )
     ops = _to_tensor_ops(bundle, device)
     _check_finite_inputs(ops)
     # Optional extra input features (default OFF: the richer features empirically
