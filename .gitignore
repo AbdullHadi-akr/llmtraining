@@ -23,6 +23,8 @@
 # called README_*, so the allowlist above does not catch it.
 !FAHRPLAN.md
 !**/FAHRPLAN.md
+!FAHRPLAN_*.md
+!**/FAHRPLAN_*.md
 
 # Keep the CI workflow tracked (the allowlist above is .py/.md only)
 !.github/workflows/*.yml

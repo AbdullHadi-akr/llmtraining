@@ -151,6 +151,34 @@ def test_a_cache_without_the_marker_is_not_flagged(tmp_path, monkeypatch):
 
 
 # --------------------------------------------------------------------------
+# the overwrite guard
+# --------------------------------------------------------------------------
+
+def test_measured_bundles_are_left_alone(tmp_path):
+    """A bundle without the synthetic marker is off limits.
+
+    ``--out`` defaults to the shared ``data_cache/``, which on the machine that
+    has the measured data is where OP01.npz ... OP16.npz live. That folder is
+    gitignored, so an overwrite there has nothing to restore from.
+    """
+    # measured: no marker. Ours: the marker write_op stores.
+    np.savez_compressed(tmp_path / "OP01.npz", T=np.zeros((2, 2)))
+    np.savez_compressed(tmp_path / "OP02.npz", T=np.zeros((2, 2)),
+                        synthetic=np.array(True))
+
+    # OP03 is not on disk at all and must not be reported as an obstacle.
+    hits = msc.measured_bundles(tmp_path, ["OP01", "OP02", "OP03"])
+
+    assert hits == [tmp_path / "OP01.npz"]
+
+
+def test_an_unreadable_bundle_counts_as_measured(tmp_path):
+    """Fail closed: what this script cannot parse, it must not overwrite."""
+    (tmp_path / "OP01.npz").write_bytes(b"not an npz at all")
+    assert msc.measured_bundles(tmp_path, ["OP01"]) == [tmp_path / "OP01.npz"]
+
+
+# --------------------------------------------------------------------------
 # history bookkeeping
 # --------------------------------------------------------------------------
 
