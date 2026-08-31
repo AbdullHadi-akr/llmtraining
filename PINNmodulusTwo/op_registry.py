@@ -175,6 +175,28 @@ def tier_of(op_id: str) -> str:
     return spec(op_id).tier
 
 
+TIER_UNKNOWN = "T?-unlisted"
+
+
+def tier_or_unknown(op_id: str) -> str:
+    """``tier_of``, but a label instead of an exception for an unlisted OP.
+
+    The plan sheet in this file covers OP01-OP16. The DATA path does not depend
+    on it at all -- ``data.build_op`` reads any bundle that exists and detects
+    which channels are profiles from the bundle itself -- so an OP that is not
+    in the table is perfectly trainable and reportable. What is missing is only
+    its TIER, i.e. how hard it is meant to be.
+
+    ``tier_of`` raising is right where the answer has to be trustworthy (the
+    split checks). It is wrong at the end of a finished training run, where it
+    would throw away hours over a label. Hence two functions.
+    """
+    try:
+        return spec(op_id).tier
+    except KeyError:
+        return TIER_UNKNOWN
+
+
 def profiles_of(op_id: str) -> tuple:
     return spec(op_id).profiles
 

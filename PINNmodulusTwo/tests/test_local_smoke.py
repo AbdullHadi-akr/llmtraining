@@ -325,3 +325,63 @@ def test_trivial_baselines_are_what_evaluate_compares_against(synthetic_cache):
         float(np.abs(held.T_lab - held.T_lab[0][None, :]).mean()))
     assert mean == pytest.approx(float(np.abs(held.T_lab - bundle.T_mu).mean()))
     assert persistence > 0 and mean > 0
+
+
+# --------------------------------------------------------------------------
+# device selection
+# --------------------------------------------------------------------------
+
+def test_ask_never_blocks_without_a_terminal(monkeypatch, capsys):
+    """``--device ask`` must fall back, not hang, when nobody can answer.
+
+    It is the default, so every CI job, every ``nohup``ed run and every piped
+    invocation goes through this branch. A training script that blocks on a
+    prompt no one can see is strictly worse than one that picks a default and
+    says which.
+    """
+    import device_utils
+
+    monkeypatch.setattr(device_utils.sys.stdin, "isatty", lambda: False)
+    # input() must never be reached; make it loud if it is.
+    monkeypatch.setattr("builtins.input", lambda *a: pytest.fail("ask blocked"))
+
+    dev = device_utils.resolve_device("ask")
+
+    assert dev.type in {"cpu", "cuda"}
+    assert "not an interactive terminal" in capsys.readouterr().out
+
+
+def test_ask_accepts_an_index_or_the_spec(monkeypatch):
+    """A prompt that only takes '2' is worse than one that also takes 'cuda:0'."""
+    import device_utils
+
+    monkeypatch.setattr(device_utils.sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr(device_utils, "available_devices",
+                        lambda: [("cpu", "CPU"), ("cuda:0", "fake"), ("cuda:1", "fake")])
+
+    monkeypatch.setattr("builtins.input", lambda *a: "3")
+    assert device_utils._prompt_for_device() == "cuda:1"
+    monkeypatch.setattr("builtins.input", lambda *a: "cuda:1")
+    assert device_utils._prompt_for_device() == "cuda:1"
+    monkeypatch.setattr("builtins.input", lambda *a: "")      # Enter = default
+    assert device_utils._prompt_for_device() == "cuda:0"
+    monkeypatch.setattr("builtins.input", lambda *a: (_ for _ in ()).throw(EOFError))
+    assert device_utils._prompt_for_device() == "cuda:0"
+
+
+def test_an_unlisted_op_gets_a_label_not_an_exception():
+    """A bundle outside the plan sheet must not cost a finished training run.
+
+    The DATA path already accepts one: ``build_op`` reads any bundle that
+    exists and detects which channels are profiles from the bundle itself,
+    never from the table. Only the TIER is unknown, and ``evaluate`` runs after
+    training -- raising there would throw away hours over a label.
+    """
+    import op_registry
+
+    assert op_registry.tier_of("OP06") == op_registry.TIER_INTERP
+    assert op_registry.tier_or_unknown("OP06") == op_registry.TIER_INTERP
+    assert op_registry.tier_or_unknown("OP17") == op_registry.TIER_UNKNOWN
+    # the strict lookup still raises, because the split checks depend on it
+    with pytest.raises(KeyError):
+        op_registry.tier_of("OP17")

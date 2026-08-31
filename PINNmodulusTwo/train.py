@@ -44,7 +44,7 @@ from model import RecurrentField, rollout
 from op_metrics import format_op_metrics, op_metrics, rollout_phys
 from op_registry import (
     DEFAULT_TEST_OPS, DEFAULT_TRAIN_OPS, DEFAULT_VAL_OPS, MEASUREMENT_OPS,
-    TIER_IN, split_summary, tier_of,
+    TIER_IN, split_summary, tier_or_unknown,
 )
 from physics import heat_residual, boundary_condition_loss
 
@@ -271,8 +271,13 @@ def parse_args() -> argparse.Namespace:
                         "taper, and dropping it removes the hardest part of the "
                         "trajectory from training")
     p.add_argument("--seed", type=int, default=d.get("seed", 0))
-    p.add_argument("--device", default=d.get("device", "auto"),
-                   help="auto | cpu | cuda | cuda:N (auto = cuda when available)")
+    p.add_argument("--device", default=d.get("device", "ask"),
+                   help="ask | auto | cpu | cuda | cuda:N. 'ask' lists what this "
+                        "machine has and prompts; it falls back to 'auto' "
+                        "without blocking when there is no terminal (CI, nohup, "
+                        "a pipe). 'auto' = cuda when available. An explicit "
+                        "'cuda' FAILS if the card is not there rather than "
+                        "silently running on the CPU")
     p.add_argument("--tf32", action="store_true", default=d.get("tf32", False),
                    help="allow TF32 matmuls on Ampere+ GPUs; off by default because "
                         "the physics residual needs precise second derivatives")
@@ -1282,10 +1287,14 @@ def evaluate(model, bundle, ops, dtn, device, history, args) -> None:
         for op_id in op_ids:
             op_data = build_op(op_id, bundle, subsample_time=subsample)
             held.append(op_data)
+            # tier_of raises for an OP outside the plan sheet. The DATA path
+            # accepts one happily -- profiles are detected from the bundle, not
+            # looked up -- so a new OP is a label problem, never a reason to
+            # lose a finished training run.
             # Held out entirely, so the late window is genuinely unseen whatever
             # --holdout-tail was set to.
-            _report_op(model, bundle, device, op_data, tier_of(op_id), role,
-                       late_is_holdout=True, lines=lines, rows=rows,
+            _report_op(model, bundle, device, op_data, tier_or_unknown(op_id),
+                       role, late_is_holdout=True, lines=lines, rows=rows,
                        with_coverage=True)
 
     meas = list(getattr(args, "measurement_ops", []) or [])

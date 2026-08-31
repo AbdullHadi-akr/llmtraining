@@ -16,8 +16,18 @@
 # epoch 1 versus one that trains.
 
 # ---- hardware ---------------------------------------------------------------
-# auto | cpu | cuda | cuda:N   ("auto" = CUDA when available, otherwise CPU)
-device: auto
+# ask | auto | cpu | cuda | cuda:N
+#
+# "ask" lists what this machine has and prompts for one. That is the default
+# because the same checkout is run on a laptop CPU and on a GPU server, and the
+# wrong choice is a wasted afternoon in either direction -- a run that quietly
+# takes the CPU on a GPU box, or one that fails hours in because the card was
+# not really visible.
+#
+# It never blocks a script: with no terminal to ask (CI, nohup, a pipe) it falls
+# back to "auto" and says so. Set this to cpu / cuda / auto to skip the prompt
+# permanently on a given machine, or pass --device on the command line.
+device: ask
 # TF32 matmuls on Ampere+ GPUs. Off on purpose: the physics residual
 # differentiates the network twice and TF32 degrades second derivatives.
 tf32: false
