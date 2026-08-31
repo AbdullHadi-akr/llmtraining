@@ -58,7 +58,8 @@ Aus `PINNmodulusTwo/FAHRPLAN.md` §1, plus dem, was seither dazugekommen ist:
 | Grenzflächenanteil gemessen | ❌ nie gelaufen | `ARCHITECTURE.md` 4.1 |
 | Modell speicherbar | ❌ **nicht implementiert** | kein `torch.save` in `train.py` |
 | Erweiterung OP01–OP16 | ❌ kein einziges Ergebnis gemessen | `PINNmodulusTwoExtProfiles/README.md` |
-| PR #18 (Diagnostik) | 🟡 offen, CI grün, ungemergt | siehe E0.1 |
+| PR #18 (Diagnostik) | ✅ gemergt 31.08. | siehe E0.1 |
+| Überschreibschutz für den Synthetik-Cache | 🟡 offen in PR #19 | siehe E0.2 |
 
 Die Zeile mit dem Fragezeichen ist weiterhin die wichtigste. **Alles andere zu
 optimieren, bevor sie beantwortet ist, ist Blindflug.**
@@ -98,10 +99,10 @@ repariert, nicht die nächste Etappe gestartet.
 **Warum zuerst:** drei Dinge, die später teuer sind und jetzt eine Stunde
 kosten. Punkt E0.2 ist der einzige im ganzen Plan, der Daten vernichten kann.
 
-### E0.1 — PR #18 mergen, aber nicht vorher
+### E0.1 — ✅ Die Diagnostik ist in `main`
 
-[PR #18](https://github.com/AbdullHadi-akr/llmtraining/pull/18) bringt genau die
-Diagnostik, die E3 und E4 brauchen:
+[PR #18](https://github.com/AbdullHadi-akr/llmtraining/pull/18) ist am 31.08.
+gemergt und bringt genau die Diagnostik, die E3 und E4 brauchen:
 
 * **`spread_space` / `spread_time` + `[FLAT]`-Zeile** — ein in Raum und Zeit
   konstantes Feld erfüllt Wärmeresiduum **und** Neumann-BC exakt. Erst damit ist
@@ -116,7 +117,7 @@ Diagnostik, die E3 und E4 brauchen:
 * **Modulus-Stub in `selftest.py`** — ohne das kann E1 auf keiner Maschine ohne
   Modulus laufen, obwohl es reine Arithmetik prüft.
 
-### E0.2 — ⚠️ Den Überschreibschutz einbauen, **bevor** #18 lokal ausgecheckt wird
+### E0.2 — ⚠️ Der Überschreibschutz, **bevor** `main` lokal ausgecheckt wird
 
 `tools/make_synthetic_cache.py:266-268` schreibt mit `np.savez_compressed`
 **ungeprüft** in `--out`, und der Default ist das oberste `data_cache/` — genau
@@ -134,14 +135,16 @@ den du auf dem Rechner **mit** den Daten ausführen würdest.
    ```bash
    cp -r data_cache ~/data_cache_backup_2026-08-31
    ```
-2. ✅ **Erledigt** ([PR #18](https://github.com/AbdullHadi-akr/llmtraining/pull/18),
-   Commit `60e6e65`): `measured_bundles()` prüft alle Ziele, **bevor** irgendetwas
+2. ✅ **Umgesetzt**, hängt in [PR #19](https://github.com/AbdullHadi-akr/llmtraining/pull/19):
+   `measured_bundles()` prüft alle Ziele, **bevor** irgendetwas
    geschrieben wird — auch vor dem Material-Ersatz, damit ein abgelehnter Lauf
    keine halbe Fixture hinterlässt. Ein Bündel ohne `synthetic`-Markierung gilt
    als Messung, ein unlesbares ebenfalls (fail closed). Abbruch statt
    Überspringen: eine Cache-Verzeichnis aus beidem ist laut Docstring des
    Werkzeugs selbst kein Datensatz. Ausweg ist ein anderes `--out`.
-3. Erst dann mergen.
+3. Erst danach `make_synthetic_cache.py` auf dem Rechner mit den Daten anfassen.
+   **`main` trägt das Werkzeug seit #18, den Guard aber erst mit #19** — in dem
+   Fenster dazwischen ist der Default-Aufruf scharf.
 
 > Du hast die echten Daten lokal. Für dich ist `make_synthetic_cache.py` ein
 > Werkzeug, das du **nie brauchst** — es existiert für Maschinen ohne Daten. Der
@@ -165,8 +168,8 @@ Parallel, blockiert nichts, wird aber in E6 gebraucht. Eine Zahl in °C.
 
 **Tor G0:**
 - [ ] Backup von `data_cache/` liegt außerhalb des Repos
-- [x] Guard in `make_synthetic_cache.py` — [PR #18](https://github.com/AbdullHadi-akr/llmtraining/pull/18)
-- [ ] PR #18 gemergt
+- [x] PR #18 gemergt — die Diagnostik ist in `main`
+- [ ] Guard in `make_synthetic_cache.py` gemergt ([PR #19](https://github.com/AbdullHadi-akr/llmtraining/pull/19))
 - [ ] `train.py` schreibt einen Checkpoint mit Config und Commit
 - [ ] Anfrage zur Zielgenauigkeit raus
 
