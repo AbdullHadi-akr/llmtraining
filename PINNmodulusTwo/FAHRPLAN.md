@@ -32,8 +32,8 @@ zutrifft: nicht weitermachen, sondern die genannte Datei schicken.
 
 - [x] **1** Code holen — 31.08.
 - [x] **2** Läuft der Code? (keine Daten nötig) — 31.08., grün
-- [ ] **3** Cache bauen, alle sechzehn
-- [ ] **4** Stimmen die Daten? ← erstes echtes Tor
+- [x] **3** Cache bauen, alle sechzehn — 31.08.
+- [~] **4** Stimmen die Daten? — 31.08., **ein MISMATCH auf OP15** (Test-OP)
 - [ ] **5** Die Latte ← das entscheidende Tor
 - [ ] **6** Erster ernsthafter Lauf (GPU)
 
@@ -46,11 +46,13 @@ Wird beim Abhaken ausgefüllt. Leer = noch nicht gemessen.
 | 2 | `selftest.py` | **all checks passed** | 31.08. |
 | 2 | `pytest` | **112 passed, 1 skipped** (83 s) | 31.08. |
 | 2 | `op_registry.py` | 11 train / 2 val / 3 test, keine Warnung | 31.08. |
-| 3 | 16 OPs gebaut (+ OP19?) | | |
-| 4 | `MISMATCH`-Zeilen | | |
-| 4 | `bc_pairs` > 0 | | |
-| 4 | **`A` je Lag** | | |
-| 4 | `dTdt_scale` | | |
+| 3 | 16 OPs gebaut | ja (OP19 offen) | 31.08. |
+| 4 | `MISMATCH`-Zeilen | **1 — OP15, `cell_current` fehlt** | 31.08. |
+| 4 | `bc_pairs` > 0 | **242** — gemessen, kein Fallback | 31.08. |
+| 4 | **`A` je Lag** | **90.8 / 22.7** (bei dt = 4 s) | 31.08. |
+| 4 | `dTdt_scale` | **3.534** | 31.08. |
+| 4 | `T_sigma` / `T_span_ref` | 9.616 C / 1604 s | 31.08. |
+| 4 | `phys_scale` / `Qsrc_scale` | 3.535 / 0.0241 | 31.08. |
 | 5 | OP06 `beats` / `LOSES TO` | | |
 | 5 | OP09 `beats` / `LOSES TO` | | |
 | 6 | `[SATURATED]` letzte Epoche | | |
@@ -150,11 +152,31 @@ Drei Zeilen zählen, und zwar in dieser Reihenfolge:
 | `bc_scale=… (from N x-neighbour pairs)` | `N > 0` | `[FALLBACK 1/L_ref]`. Dann ist `w_bc` bedeutungslos |
 | `A = 1/(lag_n * rate_scale) per lag: …` | **notieren, egal welcher Wert** | — |
 
-Zu `A`: das alte Projekt maß 119/30 auf OP01–OP05. Über OP01–OP16 gepoolt wird
-`T_sigma` breiter, `dTdt_scale` kleiner und `A` damit **größer**. Wie viel
-größer, weiß niemand — das ist die Zahl, die ich als Nächstes brauche.
+**Gemessen am 31.08. — und die Vorhersage hier war falsch.** Es stand:
+„`T_sigma` wird breiter, `dTdt_scale` kleiner, `A` damit **größer** als die
+119/30 aus OP01–OP05." Gemessen ist `A` **kleiner**:
 
-**Stopp wenn:** `MISMATCH` oder `FALLBACK`. → `04_daten.txt` schicken.
+| | OP01–OP05 (alt) | OP01–OP16 (gemessen) |
+|---|---|---|
+| `T_span_ref` | 1474 s | **1604 s** |
+| `dTdt_scale` | 2.479 | **3.534** |
+| `A` bei 5 s / 20 s | 119 / 30 | **90.8 / 22.7** |
+
+`T_sigma` ist tatsächlich breiter geworden (9.6 statt ~4.2), aber `dTdt_scale`
+ist trotzdem **gestiegen**, nicht gefallen: die Profil-OPs bewegen sich schneller
+als die konstanten, und das schlägt die Verbreiterung. Weniger Verstärkung heißt
+weniger Abbruchrisiko in Epoche 1 — die gute Richtung.
+
+> ⚠️ **`A` hängt am `--subsample`.** `dTdt_scale` ist die RMS einer zentralen
+> Differenz **auf dem subgesampelten Gitter**: ein grobes Gitter glättet die
+> Ableitung, ein feines nicht. Die 90.8/22.7 sind bei `--subsample 40`
+> (dt = 4 s) gemessen, das Training läuft aber mit `subsample_time: 2`
+> (dt = 0.2 s). Die maßgebliche Zahl druckt `train.py` beim Start — die aus
+> Schritt 4 ist die Größenordnung, nicht der Wert.
+
+**Stopp wenn:** ein `MISMATCH` auf einem **Trainings- oder val-OP**, oder
+`FALLBACK` bei `bc_scale`. Ein `MISMATCH` auf einem **Test-OP** stoppt nicht —
+er entwertet dessen Bericht, nicht das Training. → `04_daten.txt` schicken.
 
 ---
 
@@ -555,6 +577,60 @@ Nach dem Aufräumen: **10 Python-Dateien, 4 Dokumente.**
 
 ---
 
+## 9. Offene Befunde aus Schritt 4 (31.08.)
+
+Beide kommen aus den Daten, nicht aus dem Code, und beide sind **nicht** durch
+einen Codefix zu erledigen.
+
+### 9.1 OP15: `cell_current` fehlt im Bündel
+
+```
+OP15 [held out] detected=fluid_inlet_temp,fluid_mass_flow
+                sheet=cell_current,fluid_inlet_temp,fluid_mass_flow   <-- MISMATCH
+```
+
+Das Plansheet nennt OP15 „CC mit Fluidtemperaturprofil und Volumenstromprofil
+**und CC-CV**". Im Bündel variiert `cell_current` nicht — der CC-CV-Auslauf ist
+nicht drin.
+
+**Blockiert nichts.** OP15 ist ein reiner Berichts-OP (`test_ops`), kein
+Trainings- und kein Auswahl-OP. Was verloren geht, ist die Aussagekraft **dieses
+einen** Berichts: OP15 sollte den ungesehenen Volumenstrom-Profiltyp testen, und
+das tut er weiterhin — nur eben ohne den CC-CV-Anteil, den das Blatt verspricht.
+
+**Nächster Schritt:** `python3 PINNmodulusTwo/data.py` erneut laufen lassen. Seit
+dem 31.08. druckt der Bericht bei einem MISMATCH zusätzlich, was die
+Upstream-Assembly für dieses Bündel als Profil *markiert* hat, und das trennt die
+beiden möglichen Ursachen:
+
+* **markiert, aber konstant** → die Profildatei fehlte oder war leer, der Kanal
+  ist still auf seinen Skalar zurückgefallen. Rohexport von OP15 prüfen, OP15 neu
+  bauen.
+* **nie markiert** → das Blatt stimmt für OP15 nicht, oder OP15 wurde ohne dieses
+  Profil exportiert.
+
+### 9.2 Profile enden vor der Trajektorie — auch auf einem **Trainings**-OP
+
+```
+OP12 [train   ] ! fluid_inlet_temp covers 0.0..1440.0 s but the OP runs 0.1..1604.1 s
+OP15 [held out] ! fluid_inlet_temp und fluid_mass_flow, dasselbe
+```
+
+Die letzten ~164 s (rund **10 %**) werden mit dem letzten Profilwert flach
+gehalten. Auf OP15 ist das ein Berichtsproblem; **auf OP12 ist es
+Trainingsdaten**: das Modell lernt dort 10 % lang einen Treiber, der so nie
+simuliert wurde, und die Temperatur, die es dazu sehen soll, gehört zu einem
+Treiber, den es nicht sieht.
+
+Zu klären ist, ob der Simulationslauf wirklich länger war als das Profil (dann
+ist das Bündel richtig und die Flachhaltung die einzig mögliche Annahme), oder
+ob der Profilexport abgeschnitten wurde (dann ist er nachzuliefern).
+
+**Bis das geklärt ist:** kein Grund, Schritt 5 aufzuhalten. Aber wenn OP12 später
+auffällig schlechter ist als die anderen Trainings-OPs, steht hier, warum.
+
+---
+
 ## 7. Abbruchkriterien
 
 Ehrlichkeitsklausel — wann der Plan selbst falsch ist:
@@ -571,9 +647,15 @@ Ehrlichkeitsklausel — wann der Plan selbst falsch ist:
 
 ---
 
-**Zuletzt fortgeschrieben:** 2026-08-31 — **Schritt 1 und 2 sind gruen**
-(112 passed). Damit steht zum ersten Mal etwas Gemessenes in der Stand-Tabelle.
-Als Naechstes Schritt 3, der Cache.
+**Zuletzt fortgeschrieben:** 2026-08-31 — Schritt 1–3 gruen, Schritt 4 mit
+einem offenen Befund (OP15). **Zum ersten Mal stehen echte Zahlen in der
+Stand-Tabelle**, und eine Vorhersage dieses Dokuments ist dabei widerlegt
+worden (`A` faellt, statt zu steigen) und oben ersetzt.
+
+**Offene Befunde aus Schritt 4** — siehe §9:
+1. OP15: `cell_current` fehlt im Buendel, obwohl das Plansheet CC-CV nennt.
+2. OP12 (**Training**) und OP15: das `fluid_inlet_temp`-Profil endet bei 1440 s,
+   die Trajektorie laeuft bis 1604 s. Die letzten ~10 % werden flach gehalten.
 
 **Ausgeführt:** Testsuite (110 grün) und Ende-zu-Ende-`train.py`-Läufe gegen ein
 synthetisches Bündel — Banner, Training, val/test, `op_metrics`, Coverage-Report,
