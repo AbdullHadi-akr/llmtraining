@@ -134,9 +134,13 @@ den du auf dem Rechner **mit** den Daten ausführen würdest.
    ```bash
    cp -r data_cache ~/data_cache_backup_2026-08-31
    ```
-2. Guard in `write_op()`: vorhandene `OP*.npz` **ohne** `synthetic`-Flag
-   überspringen statt überschreiben, `--force` als bewusster Ausweg — analog zu
-   `--force-materials`. ~15 Zeilen.
+2. ✅ **Erledigt** ([PR #18](https://github.com/AbdullHadi-akr/llmtraining/pull/18),
+   Commit `60e6e65`): `measured_bundles()` prüft alle Ziele, **bevor** irgendetwas
+   geschrieben wird — auch vor dem Material-Ersatz, damit ein abgelehnter Lauf
+   keine halbe Fixture hinterlässt. Ein Bündel ohne `synthetic`-Markierung gilt
+   als Messung, ein unlesbares ebenfalls (fail closed). Abbruch statt
+   Überspringen: eine Cache-Verzeichnis aus beidem ist laut Docstring des
+   Werkzeugs selbst kein Datensatz. Ausweg ist ein anderes `--out`.
 3. Erst dann mergen.
 
 > Du hast die echten Daten lokal. Für dich ist `make_synthetic_cache.py` ein
@@ -161,7 +165,8 @@ Parallel, blockiert nichts, wird aber in E6 gebraucht. Eine Zahl in °C.
 
 **Tor G0:**
 - [ ] Backup von `data_cache/` liegt außerhalb des Repos
-- [ ] Guard in `make_synthetic_cache.py`, PR #18 gemergt
+- [x] Guard in `make_synthetic_cache.py` — [PR #18](https://github.com/AbdullHadi-akr/llmtraining/pull/18)
+- [ ] PR #18 gemergt
 - [ ] `train.py` schreibt einen Checkpoint mit Config und Commit
 - [ ] Anfrage zur Zielgenauigkeit raus
 
