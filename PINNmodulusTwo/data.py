@@ -107,9 +107,31 @@ def _resolve_data_cache() -> Path:
 
 DATA_CACHE = _resolve_data_cache()
 
-# JR1 volume + Gleichverteilung factor (matches the base project).
+# Volume of the heated JR1 region, in m^3. The cached heat column
+# ``q_source[:, 0]`` (upstream name ``jr1_w``) is a TOTAL POWER in watts for
+# that region, so the volumetric source density the PDE needs is
+#
+#     q [W/m^3] = P_total [W] / V_JR1 [m^3]
+#
+# and nothing else. Until 31.08.2026 this line also divided by the NUMBER OF
+# JR1 GRID POINTS (121), which is a category error: "each point's share of the
+# total power" and "the power density at a point" are different quantities, and
+# only the second one belongs in ``dTn/dtn = Fo : grad^2 Tn + Qsrc``. Every
+# point in the heated region carries the SAME W/m^3.
+#
+# The consequence was a source 121x too small, i.e. a residual describing a cell
+# heated by almost nothing. It was invisible everywhere it could have been
+# caught: the EMA loss balancer divides a uniform factor straight back out,
+# L_phys still lands at O(1), and ``phys_scale``/``Qsrc_scale`` are built from
+# the same understated numbers, so they agreed with it.
+#
+# What found it was an energy argument (``energy_balance_report``): on OP07 and
+# OP14 the coolant flow is ZERO, so almost nothing can be carried away and
+# <dTn/dtn> ~ <Qsrc> has to hold. Measured, it was short by 110x and 107x --
+# against a bug factor of 121. Removing the division lands both at 0.91 and
+# 0.88, just under 1 as they must be (a little heat still reaches the housing),
+# and every cooled OP between 0.45 and 0.63, ordered by its flow rate.
 V_JR1 = 4.394793e-04
-N_JR1_POINTS = 121
 
 # Order of the 7 config scalars in ``sim_config_scalar`` (unchanged).
 CONFIG_ORDER = [
@@ -400,7 +422,9 @@ def _read_raw(op_id: str, subsample_time: int, resample: str) -> dict:
 
     # Drivers: window-reduced (see _backward_window_mean).
     jr1_full = np.asarray(npz["q_source"], dtype=np.float64)[:, 0]
-    q_dot_full = jr1_full / (V_JR1 * N_JR1_POINTS)     # W/m^3, Gleichverteilung
+    # Total watts over the JR1 region -> volumetric source density. See V_JR1
+    # for why there is no point-count factor here any more.
+    q_dot_full = jr1_full / V_JR1                      # W/m^3
     q_dot = _resample_driver(q_dot_full, subsample_time, keep, resample)
 
     cfg_full, profiles, coverage = _config_timeseries_full(npz, t_full, config)
@@ -1024,21 +1048,23 @@ def energy_balance_report(bundle: NormBundle) -> List[str]:
     has to hold to within the cooling that is left. That makes it a real test of
     the SOURCE, and it needs no model at all -- only the bundle.
 
-    Why it is worth testing: ``Qsrc`` is built as
+    This check is why the source bug was found at all, so it is worth keeping
+    even now that the bug is fixed. A UNIFORM error in ``Qsrc`` is invisible
+    everywhere else: the EMA loss balancer divides it straight back out,
+    ``L_phys`` still lands at O(1), and ``phys_scale``/``Qsrc_scale`` are built
+    from the same wrong numbers, so they agree with it. Only an energy argument
+    sees it, and only a no-flow OP makes the argument airtight.
 
-        q_dot * q_mask * T_span_ref / (rho * Cp * T_sigma)
+    What it caught on 31.08.2026: ``_read_raw`` divided the total JR1 power by
+    ``V_JR1 * N_JR1_POINTS``, i.e. by the grid-point count as well as the
+    volume. Measured shortfall 110x on OP07 and 107x on OP14, against a bug
+    factor of 121; removing the point count lands them at 0.91 and 0.88, just
+    under 1 as they must be, and every cooled OP between 0.45 and 0.63 ordered
+    by its flow rate.
 
-    with ``q_mask`` a plain 0/1 indicator of the JR1 region. That treats
-    ``q_dot`` as a VOLUMETRIC source, W/m^3. If the cached column is instead a
-    total power in watts -- the upstream name is ``jr1_w`` -- then a division by
-    the JR1 volume is missing and every ``Qsrc`` is wrong by that volume,
-    uniformly. A uniform factor is invisible in the loss (the EMA balancer
-    divides it straight back out) and invisible in ``L_phys`` (which lands at
-    O(1) either way). It is only visible here.
-
-    The consequence if the factor is real: the residual reduces to
-    ``dTdt = Fo : grad^2 Tn``, i.e. the physics term tells the network the cell
-    is heated by nothing at all and must reach its temperature by conduction
+    What it would mean if it fires again: the residual reduces towards
+    ``dTdt = Fo : grad^2 Tn``, i.e. the physics term telling the network the
+    cell is heated by nothing and must reach its temperature by conduction
     alone. That is a different PDE from the one the data obeys, and no weight on
     it can be right.
 
@@ -1100,13 +1126,17 @@ def energy_balance_report(bundle: NormBundle) -> List[str]:
             f"  [ENERGY] the source is short by a factor of ~{ref:.0f} {basis}.",
             "  The heated region rises far faster than Qsrc can drive it, so Qsrc",
             "  is too SMALL rather than the temperature too large.",
-            "  The first thing to check is the unit of the cached heat column: it is",
-            "  read as q_source[:, 0], the upstream name is 'jr1_w', and data.py",
-            "  uses it as W/m^3 with a 0/1 region mask and no volume division. If it",
-            "  is a total power in watts, dividing by the JR1 volume is the missing",
-            "  step and would move the ratio by exactly that volume.",
-            "  Until this is settled, w_phys is not tunable: the residual describes a",
-            "  cell heated by ~nothing, which is not the cell the data came from.",
+            "",
+            "  NOTE: the known cause of exactly this symptom is already fixed. Until",
+            "  31.08.2026 _read_raw divided the total JR1 power by V_JR1 *and* by the",
+            "  grid-point count (121), which put the source 121x low. If this warning",
+            "  is still firing, it is something ELSE -- do not re-apply a point-count",
+            "  or volume factor on top.",
+            "  Worth checking next: the unit of q_source[:, 0] as exported, the value",
+            "  of V_JR1 against the real geometry, and whether rho*Cp for the heated",
+            "  region is right.",
+            "  Until it is settled, w_phys is not tunable: the residual would describe",
+            "  a cell heated by ~nothing, which is not the cell the data came from.",
         ]
     elif ref:
         lines.append(f"  balance holds to within {ref:.1f}x on the binding OP.")

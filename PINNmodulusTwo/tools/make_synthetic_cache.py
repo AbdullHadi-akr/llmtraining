@@ -66,11 +66,17 @@ PROJECT_ROOT = PKG_DIR.parent
 if str(PKG_DIR) not in sys.path:
     sys.path.insert(0, str(PKG_DIR))
 
-from data import CONFIG_ORDER, N_JR1_POINTS, PREFERRED_DATA_CACHE  # noqa: E402
+from data import CONFIG_ORDER, PREFERRED_DATA_CACHE  # noqa: E402
 
 # Three x planes, one per layer: 121 points each by default, which is the split
-# materials.py demonstrates in its own __main__ and the JR1 count data.py
-# hardcodes as N_JR1_POINTS.
+# materials.py demonstrates in its own __main__.
+#
+# This lives here rather than in data.py on purpose. data.py used to export it
+# as N_JR1_POINTS and divide the heat source by it, which was a bug (see V_JR1
+# there): a point COUNT has no place in a volumetric source density. It is a
+# property of this fixture's grid, not of the physics, so it stays in the
+# fixture.
+DEFAULT_JR1_POINTS = 121
 #
 # The count is a DEFAULT, not a constant. materials.py reads one value per point
 # out of the per-layer CSVs and assigns it into a mask of that many points, so a
@@ -428,7 +434,7 @@ def main() -> int:
     n_layer = points_per_layer()
     n_points = n_layer * len(LAYERS)
     print(f"grid: {n_points} points ({n_layer} per layer, "
-          f"JR1={n_layer} vs data.N_JR1_POINTS={N_JR1_POINTS})")
+          f"JR1={n_layer} vs this fixture's default {DEFAULT_JR1_POINTS})")
     print(f"time: {n_steps} raw steps at {RAW_DT:g}s = {args.seconds:g}s")
     for op_id in args.ops:
         path = write_op(op_id, out_dir, args.seconds, args.seed)

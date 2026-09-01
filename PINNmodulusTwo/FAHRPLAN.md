@@ -22,6 +22,43 @@ eine Datei liest, dann diese.
 
 ---
 
+# Für die nächste Session: was in den Code muss
+
+Kurzfassung ganz oben, Details in den §§. **Nichts davon ist spekulativ** — jede
+Zeile folgt aus einer Messung vom 31.08.
+
+## Erledigt am 31.08. (steht schon im Code)
+
+| | was | wo |
+|---|---|---|
+| ✅ | **Wärmequelle war 121x zu klein.** `_read_raw` teilte die JR1-Gesamtleistung durch `V_JR1 * N_JR1_POINTS`; eine Punktzahl gehört nicht in eine Quelldichte. Entfernt | `data.py` `V_JR1`, §11.1 |
+| ✅ | `energy_balance_report()` — der Test, der es gefunden hat. Läuft in `python3 data.py` mit | `data.py`, §11.1 |
+| ✅ | `--delta-phys` als Knopf (vorher hartverdrahtet 1.0 s) + CFL-Prüfung sieht jetzt **beide** Schritte an | `train.py`, §11.2 |
+| ✅ | `env_check.py` — sagt „venv fehlt" statt `No module named pandas` | §Schritt 2 |
+| ✅ | `history.csv` je Epoche + Checkpoint alle 10 Epochen | `train.py` |
+| ✅ | MISMATCH-Aufschlüsselung: Blatt vs. Bündel vs. Upstream-Flag | `data.py`, §9a.1 |
+
+## Als Nächstes in den Code — in dieser Reihenfolge
+
+| # | was | warum jetzt | Aufwand |
+|---|---|---|---|
+| **C1** | **Nichts.** Erst `python3 data.py` neu laufen lassen und prüfen, dass `[ENERGY]` verschwunden ist und die Verhältnisse bei 0.4–0.95 liegen | Der Fix ist ungeprüft auf echten Daten. Alles Weitere hängt daran | 2 min |
+| **C2** | Dann Schritt 5b, **beide Läufe** | `phys_scale` hat sich geändert, also ist auch das Saettigungsverhalten neu zu messen. Die alten `[SATURATED]`-Zahlen gelten nicht mehr | 2 × 15 min |
+| **C3** | `sweep.py` — Seed-Schleife, ~80 Zeilen, eine CSV | Sobald zwei Konfigurationen verglichen werden. Siehe §10 | ich, 1 Session |
+| **C4** | Erste Achse: `--delta-phys` (1.0 → 0.2 → 0.05 s) | Im hybriden Modus isoliert; speist **nur** `L_phys`. §11.2 | nach C3 |
+| **C5** | Zweite Achse: `w_phys`. **Nicht früher** | Erst mit korrigierter Quelle bedeutet ein Gewicht überhaupt etwas | nach C4 |
+
+## Offene Fragen an die Simulationsseite (kein Code)
+
+| # | Frage |
+|---|---|
+| **Q1** | **OP15**: Plansheet sagt CC-CV, die Assembly hat `cell_current` nie als Profil markiert. Blatt falsch oder Export ohne CC-CV? (§9a.1) |
+| **Q2** | **OP12** (Training) und OP15: `fluid_inlet_temp` endet bei 1440 s, Trajektorie läuft bis 1604 s. War der Lauf länger als das Profil, oder ist der Export abgeschnitten? (§9a.2) |
+| **Q3** | **OP17/OP18** sind noch nicht simuliert. Kommen sie? |
+| **Q4** | `V_JR1 = 4.394793e-04 m³` gegen ein Zellvolumen von 4.53e-04 m³ — der Wickel wäre damit 97 % der Zelle. Stimmt das? Es geht direkt in die Quelldichte |
+
+---
+
 # Offene Punkte für die nächste Session
 
 Zuerst lesen. Was hier steht, ist das, was beim Abbruch der letzten Sitzung
@@ -31,11 +68,11 @@ offen war — nicht neu abzuleiten.
 |---|---|---|
 | **O1** | **Es liegen Schritt-6-Ergebnisse bis Epoche 30 vor, die noch niemand ausgewertet hat.** `artifacts/metrics.txt` und (neu) `artifacts/history.csv` einschicken → Stand-Tabelle füllen | du schickst, ich werte |
 | **O2** | Schritt 5b ist nie gelaufen. Falls O1 zeigt, dass `[SATURATED]` bis Epoche 30 verschwunden ist, ist 5b **hinfällig** — dann direkt Schritt 6 auswerten | ich entscheide aus O1 |
-| **O3** | §9a.1 OP15: `cell_current` fehlt im Bündel. `python3 data.py` erneut laufen lassen — der Bericht sagt seit 31.08., welche der zwei Ursachen es ist | du, 2 min |
+| **O3** | ✅ **beantwortet.** OP15: die Assembly hat `cell_current` **nie** als Profil markiert → das Plansheet ist für OP15 falsch, oder OP15 wurde ohne CC-CV exportiert. Nur ein Berichts-OP, blockiert nichts. Rückfrage an die Simulationsseite | Rückfrage offen |
 | **O4** | §9a.2 OP12 (**Training**): Profil endet bei 1440 s, Trajektorie bis 1604 s | Rückfrage an die Simulationsseite |
 | **O5** | **Tote Eingangskanäle.** `soc_start` ist über alle OPs konstant 10 % (`DEAD -> forced to 0`), und die Rate-Kanäle von `c_rate` und `fluid_mass_flow` sind im Training tot — werden aber auf OP15/OP16/OP19 lebendig. Das Modell soll dort einen Kanal deuten, den es nie gesehen hat | zu entscheiden, siehe §10 |
 | **O6** | Nichts an **Gewichten** ist auf Basis der Messungen geändert worden — bewusst, siehe §10a | offen bis 5b/6 |
-| **O7** | **⚠️ Die Energiebilanz geht um ~147x nicht auf.** `python3 data.py` zeigt es jetzt selbst. Wahrscheinlich wird `q_source[:,0]` (`jr1_w`, Watt) als W/m³ benutzt — eine fehlende Volumendivision. **Solange das offen ist, ist `w_phys` nicht einstellbar.** §11 | du, 2 min + Rückfrage |
+| **O7** | ✅ **GELÖST.** Die Energiebilanz ging um 110x nicht auf, weil `_read_raw` die JR1-Gesamtleistung durch `V_JR1 * 121` teilte — die Punktzahl gehört nicht in eine Quelldichte. Behoben. **`phys_scale`, `Qsrc_scale` und damit jedes `w_phys` von vorher sind hinfällig.** §11.1 | erledigt 31.08. |
 | **O8** | Der BDF-Stencil in `L_phys` nutzt δ = 1.0 s gegen eine Diffusions-Zeitskala von ~0.24 s. Jetzt ein Knopf (`--delta-phys`) und mit `[CFL WARN]` versehen. §11.2 | erste Sweep-Achse |
 
 ---
@@ -781,49 +818,69 @@ Zwei Befunde, die aus den Zahlen von Schritt 4/5 folgen und beide den
 **Physik-Term** betreffen. Beide sind jetzt im Code sichtbar gemacht; keiner ist
 blind repariert worden.
 
-### 11.1 Die Energiebilanz geht um Faktor ~147 nicht auf ← **der wichtigste Befund**
+### 11.1 ✅ GELÖST — die Quelle war 121x zu klein
+
+**Gemessen** (`python3 data.py`, 31.08., echte Bündel):
 
 ```
-dTdt_scale = 3.534        Qsrc_scale = 0.0241        Verhaeltnis 147x
+OP07  <|dTn/dtn|>=4.744  <|Qsrc|>=0.04307  ratio=110.2x  flow=0   <- KEIN Durchfluss
+OP14  <|dTn/dtn|>=5.551  <|Qsrc|>=0.05190  ratio=107.0x  flow=0   <- KEIN Durchfluss
+OP01 … OP12                                ratio= 55 … 82x  (mit Durchfluss)
 ```
 
-In physikalischen Einheiten: das beheizte Gebiet steigt um **~34 K** über den
-Lauf, die Quelle kann davon **0.23 K** erklären.
+Entscheidend ist, dass die **Null-Durchfluss-OPs die höchsten** Verhältnisse
+haben. Wäre Kühlung die Erklärung, müssten gerade sie aufgehen. Sie sind die
+schlechtesten — also fehlt Energie in der Quelle, und Kühlung ist es nicht.
 
-Die nichtdimensionale Gleichung ist `dTn/dtn = Fo : ∇²Tn + Qsrc`. Über die Zelle
-gemittelt integriert sich der Diffusionsterm zum Randfluss — bei **OP07 und
-OP14, die beide Volumenstrom 0 haben**, kann also fast nichts abfließen, und
-`<dTn/dtn> ≈ <Qsrc>` muss gelten. Tut es um zwei Größenordnungen nicht.
-
-**Der wahrscheinliche Grund** steht in `data.py`:
+**Die Ursache stand in `data.py`:**
 
 ```python
-Qsrc = q_dot * q_mask * T_span_ref / (rho * Cp * T_sigma)
-q_mask = (region == 1)          # 0/1, KEINE Volumendivision
+V_JR1 = 4.394793e-04
+N_JR1_POINTS = 121
+q_dot_full = jr1_full / (V_JR1 * N_JR1_POINTS)     # <- der Fehler
 ```
 
-`q_dot` ist `q_source[:, 0]`, und die Spalte heißt stromaufwärts **`jr1_w`** —
-Watt, nicht W/m³. Wird eine Gesamtleistung als volumetrische Quelle eingesetzt,
-fehlt die Division durch das JR1-Volumen, und zwar **uniform**.
+`jr1_full` ist die **Gesamtleistung** über das JR1-Gebiet. Die volumetrische
+Quelldichte ist `P / V` — und sonst nichts. Die zusätzliche Division durch die
+**Punktzahl** ist ein Kategorienfehler: „der Anteil eines Punktes an der
+Gesamtleistung" und „die Leistungsdichte an einem Punkt" sind verschiedene
+Größen, und nur die zweite steht in `dTn/dtn = Fo : ∇²Tn + Qsrc`. Jeder Punkt im
+beheizten Gebiet trägt **dieselben** W/m³.
 
-**Warum das bisher niemand sehen konnte:** ein uniformer Faktor ist unsichtbar.
-Die EMA-Balance teilt ihn direkt wieder heraus, `L_phys` landet trotzdem bei
-O(1), und `phys_scale` wird aus denselben verfälschten Zahlen gebaut. Nur ein
-Energieargument sieht ihn — und genau das druckt `data.py` jetzt
-(`energy_balance_report`).
+**Die Gegenprobe schließt den Fall:**
 
-**Die Konsequenz, wenn es sich bestätigt:** das Residuum reduziert sich auf
-`dTdt = Fo : ∇²Tn`. Der Physik-Term sagt dem Netz dann, die Zelle werde von
-**nichts** geheizt und müsse ihre Temperatur allein durch Leitung erreichen. Das
-ist eine andere PDE als die, der die Daten gehorchen, und **kein `w_phys` kann
-darauf richtig sein.**
+| OP | gemessen | ÷ 121 | Durchfluss |
+|---|---|---|---|
+| OP07 | 110.2 | **0.91** | 0 |
+| OP14 | 107.0 | **0.88** | 0 |
+| OP01 | 74.5 | 0.62 | 0.0013 |
+| OP04 | 66.4 | 0.55 | 0.0026 |
+| OP12 | 54.9 | 0.45 | 0.0013 |
 
-> **Deshalb ist O7 vor jedem Gewichts-Sweep zu klären.** Ein Balance-Sweep auf
-> einem falschen Residuum misst, wie schnell man den Physik-Term abschaltet.
+Ohne Durchfluss landet es bei 0.91 und 0.88 — **knapp unter 1**, genau wie es
+sein muss, denn auch dort geht noch etwas ans Gehäuse. Mit Durchfluss 0.45–0.63,
+und mehr Durchfluss heißt kleiner. Vollständig stimmig.
 
-**Nächster Schritt:** `python3 PINNmodulusTwo/data.py` — die neue
-`[ENERGY]`-Zeile nennt den Faktor je OP. Dann beim Simulations-Export nachfragen,
-welche Einheit `jr1_w` wirklich trägt.
+Und die Größenordnung stimmt unabhängig: korrigiert ist die Quelle
+`543.7 × 121 ≈ 65.800 W/m³`; aus dem gemessenen `dT/dt` und `ρCp` folgen
+71.000–83.000 W/m³, also ~21–25 W über die Wickel — das ist genau ein I²R einer
+2C-Ladung.
+
+> **Eine Hypothese von mir war dabei falsch und ist widerlegt worden:** ich hatte
+> vermutet, `q_source[:,0]` sei in Watt und eine Volumendivision fehle ganz. Die
+> Division war da. Und um 110x über das Volumen zu schließen, hätte `V_JR1`
+> 9.1 Liter sein müssen — bei einem Zellvolumen von 0.45 Liter, also das
+> Zwanzigfache der ganzen Zelle. Erst das hat auf die Punktzahl gezeigt.
+
+**Warum es niemand sehen konnte:** ein uniformer Faktor ist überall sonst
+unsichtbar. Die EMA-Balance teilt ihn direkt wieder heraus, `L_phys` landet
+trotzdem bei O(1), und `phys_scale`/`Qsrc_scale` werden aus denselben zu kleinen
+Zahlen gebaut — sie stimmen dem Fehler zu. Nur ein Energieargument sieht ihn, und
+nur ein Null-Durchfluss-OP macht das Argument dicht.
+
+**⚠️ Folge für alles Bisherige:** `Qsrc_scale` und `phys_scale` ändern sich, also
+bedeutet `w_phys` jetzt etwas anderes. **Jede Gewichtsüberlegung von vor dem
+31.08. ist hinfällig** — was kein Verlust ist, weil keine gemessen war.
 
 ### 11.2 Der Physik-Stencil ist 4x zu grob — und wurde nie geprüft
 
@@ -971,7 +1028,12 @@ Ehrlichkeitsklausel — wann der Plan selbst falsch ist:
 
 ---
 
-**Zuletzt fortgeschrieben:** 2026-08-31, Sitzungsende. Offene Punkte stehen ganz
+**Zuletzt fortgeschrieben:** 2026-08-31, Sitzungsende — mit dem Fund, auf den es
+ankam: **die Wärmequelle war um Faktor 121 zu klein** (§11.1). Das erklärt, warum
+der Physik-Term nichts beitragen konnte, und macht jede Gewichtsüberlegung von
+vorher gegenstandslos. Was als Nächstes in den Code muss, steht ganz oben.
+
+**Sitzungsende-Stand.** Offene Punkte stehen ganz
 oben; §10 beantwortet, wann aus diesem Fahrplan ein Benchmark wird, und §10a,
 was aus den Messungen bewusst NICHT in den Code gewandert ist.
 

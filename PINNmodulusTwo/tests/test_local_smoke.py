@@ -559,3 +559,34 @@ def test_delta_phys_reaches_the_model(synthetic_cache):
     args = _tiny_args(synthetic_cache, delta_phys=0.25)
     model, bundle, _packed, _dtn, _hist = train_mod.fit(args)
     assert float(model.delta) == pytest.approx(0.25 / bundle.T_span_ref, rel=1e-6)
+
+
+def test_the_heat_source_is_a_density_not_a_per_point_share(synthetic_cache):
+    """Qsrc must be P_total / V_JR1 -- no division by the grid-point count.
+
+    Until 31.08.2026 ``_read_raw`` computed ``P / (V_JR1 * N_JR1_POINTS)``.
+    "Each point's share of the total power" and "the power density at a point"
+    are different quantities and only the second belongs in
+    ``dTn/dtn = Fo : grad^2 Tn + Qsrc``: every point in the heated region
+    carries the SAME W/m^3, so the source was 121x too small.
+
+    The factor was invisible to every check that existed -- the EMA balancer
+    divides a uniform factor straight back out, L_phys still lands at O(1), and
+    phys_scale/Qsrc_scale are built from the same understated numbers. This test
+    pins the identity directly against the bundle rather than against a scale.
+    """
+    bundle = data_mod.load_ops(op_ids=["OP01"], subsample_time=40)
+    op = bundle.ops[0]
+    jr1 = np.asarray(bundle.q_mask) > 0.5
+    assert jr1.any()
+
+    # Qsrc = q_dot * T_span_ref / (rho * Cp * T_sigma) on the heated points,
+    # so recovering q_dot from it must give back P_total / V_JR1 exactly.
+    rc = np.asarray(bundle.rho)[jr1] * np.asarray(bundle.Cp)[jr1]
+    q_back = (np.asarray(op.Qsrc)[:, jr1] * rc[None, :] * bundle.T_sigma
+              / bundle.T_span_ref)
+    # every heated point carries the SAME density at a given time
+    assert np.allclose(q_back, q_back[:, :1], rtol=1e-4), \
+        "the source density must not vary across the heated region"
+    # and it is the stored total divided by the volume alone
+    assert np.allclose(q_back[:, 0], np.asarray(op.q_dot), rtol=1e-4)
