@@ -29,14 +29,14 @@ offen war — nicht neu abzuleiten.
 
 | # | offen | wer |
 |---|---|---|
-| **O1** | **Es liegen Schritt-6-Ergebnisse bis Epoche 30 vor, die noch niemand ausgewertet hat.** `artifacts/metrics.txt` und (neu) `artifacts/history.csv` einschicken → Stand-Tabelle füllen | du schickst, ich werte |
-| **O2** | Schritt 5b ist nie gelaufen. Falls O1 zeigt, dass `[SATURATED]` bis Epoche 30 verschwunden ist, ist 5b **hinfällig** — dann direkt Schritt 6 auswerten | ich entscheide aus O1 |
+| **O1** | **Es liegen Schritt-6-Ergebnisse bis Epoche 30 vor, die noch niemand ausgewertet hat.** `artifacts/metrics.txt` und `artifacts/history.csv` einschicken. **Achtung: auch dieser Lauf hatte die 121x zu kleine Quelle (O7).** Er sagt weiter etwas über den Rollout und die Baselines, aber nichts über `w_phys` oder den Physik-Term | du schickst, ich werte |
+| **O2** | Schritt 5b ist nie gelaufen — und ist seit O7 **nicht mehr hinfällig zu machen**: 5b-2 (`--w-phys 0 --w-bc 0`) trennt jetzt zum ersten Mal zwei Läufe, die sich im Physik-Term wirklich unterscheiden. Vorher waren beide praktisch quellenfrei | zu laufen, nach Schritt 4 |
 | **O3** | §9a.1 OP15: `cell_current` fehlt im Bündel. `python3 data.py` erneut laufen lassen — der Bericht sagt seit 31.08., welche der zwei Ursachen es ist | du, 2 min |
 | **O4** | §9a.2 OP12 (**Training**): Profil endet bei 1440 s, Trajektorie bis 1604 s | Rückfrage an die Simulationsseite |
-| **O5** | **Tote Eingangskanäle.** `soc_start` ist über alle OPs konstant 10 % (`DEAD -> forced to 0`), und die Rate-Kanäle von `c_rate` und `fluid_mass_flow` sind im Training tot — werden aber auf OP15/OP16/OP19 lebendig. Das Modell soll dort einen Kanal deuten, den es nie gesehen hat | zu entscheiden, siehe §10 |
+| **O5** | **Tote Eingangskanäle.** `soc_start` ist über alle OPs konstant 10 % (`DEAD -> forced to 0`), und die Rate-Kanäle von `c_rate` und `fluid_mass_flow` sind im Training tot — werden aber auf OP15/OP16/OP19 lebendig. Das Modell soll dort einen Kanal deuten, den es nie gesehen hat. **Am 01.09. sichtbar gemacht:** `coverage_report` übersprang tote Skalar-Kanäle bisher **komplett** — ausgerechnet den Fall, in dem der Umschlag ein einziger Punkt ist. Jetzt bekommt jeder tote Kanal, den ein Berichts-OP bewegt, eine eigene Zeile. Die **Entscheidung** (Kanal streichen? Envelope erweitern?) bleibt offen | zu entscheiden, siehe §10 |
 | **O6** | Nichts an **Gewichten** ist auf Basis der Messungen geändert worden — bewusst, siehe §10a | offen bis 5b/6 |
-| **O7** | **⚠️ Die Energiebilanz geht um ~147x nicht auf.** `python3 data.py` zeigt es jetzt selbst. Wahrscheinlich wird `q_source[:,0]` (`jr1_w`, Watt) als W/m³ benutzt — eine fehlende Volumendivision. **Solange das offen ist, ist `w_phys` nicht einstellbar.** §11 | du, 2 min + Rückfrage |
-| **O8** | Der BDF-Stencil in `L_phys` nutzt δ = 1.0 s gegen eine Diffusions-Zeitskala von ~0.24 s. Jetzt ein Knopf (`--delta-phys`) und mit `[CFL WARN]` versehen. §11.2 | erste Sweep-Achse |
+| **O7** | **ERLEDIGT am 01.09. — es war ein Codefehler, keine Rückfrage.** Die Umrechnung teilte `jr1_w` durch `V_JR1 * N_JR1_POINTS`; die 121 Gitterpunkte waren doppelt gezählt, jedes `Qsrc` war 121x zu klein. Behoben, mit Test. **Folge: `Qsrc_scale`, `phys_scale` und jede Zahl aus Schritt 5 sind ungültig — Schritt 4 und 5b müssen neu laufen.** §11.1 | erledigt |
+| **O8** | Der BDF-Stencil in `L_phys` nutzt δ = 1.0 s gegen eine Diffusions-Zeitskala von ~0.24 s. Ein Knopf (`--delta-phys`) und mit `[CFL WARN]` versehen. **Seit O7 erledigt ist, ist diese Achse frei** — sie war ausdrücklich hinter 11.1 eingereiht. Default bleibt 1.0, bis gemessen ist. §11.2 | erste Sweep-Achse |
 
 ---
 
@@ -50,10 +50,13 @@ zutrifft: nicht weitermachen, sondern die genannte Datei schicken.
 
 - [x] **1** Code holen — 31.08.
 - [x] **2** Läuft der Code? (keine Daten nötig) — 31.08., grün
-- [x] **3** Cache bauen, alle sechzehn — 31.08.
-- [x] **4** Stimmen die Daten? — 31.08., ein MISMATCH auf OP15 (Test-OP, unkritisch)
-- [~] **5** Die Latte — 31.08. gelaufen, aber **der Lauf war nicht aussagekraeftig** (§9.3)
-- [ ] **5b** Kurzlauf bei der ECHTEN Konfiguration ← **neu, vor 6**
+- [x] **3** Cache bauen, alle sechzehn — 31.08. (Bündel unberührt, gilt weiter)
+- [~] **4** Stimmen die Daten? — 31.08. gelaufen, aber **die Quellzahlen sind
+  ungültig**: der 121er-Fehler aus O7 steckte in `q_dot`. **Neu laufen lassen**,
+  es kostet 2 min und liefert die Zahlen, auf denen alles Weitere steht
+- [~] **5** Die Latte — 31.08. gelaufen, **nicht aussagekraeftig** (§9.3) und
+  zusätzlich mit dem falschen `Qsrc` gerechnet
+- [ ] **5b** Kurzlauf bei der ECHTEN Konfiguration ← **das ist jetzt der Schritt**
 - [ ] **6** Erster ernsthafter Lauf (GPU)
 
 ## Stand
@@ -63,19 +66,21 @@ Wird beim Abhaken ausgefüllt. Leer = noch nicht gemessen.
 | Schritt | Kriterium | gemessen | Datum |
 |---|---|---|---|
 | 2 | `selftest.py` | **all checks passed** | 31.08. |
-| 2 | `pytest` | **112 passed, 1 skipped** (83 s) | 31.08. |
+| 2 | `pytest` | **123 passed, 1 skipped** | 01.09. |
 | 2 | `op_registry.py` | 11 train / 2 val / 3 test, keine Warnung | 31.08. |
 | 3 | 16 OPs gebaut | ja (OP19 offen) | 31.08. |
 | 4 | `MISMATCH`-Zeilen | **1 — OP15, `cell_current` fehlt** | 31.08. |
+| 4 | `[ENERGY]`-Zeile | war **~147x**; muss nach dem Fix verschwinden bzw. nahe 1 liegen | neu |
 | 4 | `bc_pairs` > 0 | **242** — gemessen, kein Fallback | 31.08. |
 | 4 | **`A` je Lag** | **90.8 / 22.7** (bei dt = 4 s) | 31.08. |
 | 4 | `dTdt_scale` | **3.534** | 31.08. |
 | 4 | `T_sigma` / `T_span_ref` | 9.616 C / 1604 s | 31.08. |
-| 4 | `phys_scale` / `Qsrc_scale` | 3.535 / 0.0241 | 31.08. |
+| 4 | `phys_scale` / `Qsrc_scale` | ~~3.535 / 0.0241~~ **ungültig (O7: `Qsrc` war 121x zu klein)**. Erwartung nach dem Fix: `Qsrc_scale` ≈ 2.9, `phys_scale` ≈ 4.6 — **zu messen, nicht zu glauben** | neu |
 | 5 | OP06 | `LOSES TO` (12.96 vs 10.82 C) — **nicht aussagekraeftig, §9.3** | 31.08. |
 | 5 | OP09 | `LOSES TO` (8.71 vs 7.78 C) — dito | 31.08. |
 | 5 | `[SATURATED]` | **ja, beide Epochen: 99 % / 94 % einer Trajektorie** | 31.08. |
 | 5 | `spread s/t` | **4.9 / 4.2** — Rollout streut 5x so weit wie die Labels | 31.08. |
+| — | alle Schritt-5-Zahlen | **mit `Qsrc` 121x zu klein gerechnet.** Der Physik-Term war praktisch abgeschaltet; was §9.3 zeigt, ist ein Rollout ohne Quelle | 01.09. |
 | 5b | `[SATURATED]` bei subsample 2 | | |
 | 5b | `A` bei subsample 2 | | |
 | 6 | `[SATURATED]` letzte Epoche | | |
@@ -137,7 +142,7 @@ und die Tabelle mit 11 train / 2 val / 3 test OPs ohne Warnung. ✅
 
 ---
 
-### - [ ] Schritt 3 — Cache bauen, alle sechzehn (10–30 min)
+### - [x] Schritt 3 — Cache bauen, alle sechzehn (10–30 min)
 
 Der Cache muss neu, weil bisher nur OP01–OP07 gebraucht wurden:
 
@@ -161,19 +166,26 @@ und sonst nichts — ein Messvergleich darf einen Trainingslauf nie blockieren.
 
 ---
 
-### - [ ] Schritt 4 — Stimmen die Daten? (2 min) ← **das erste echte Tor**
+### - [~] Schritt 4 — Stimmen die Daten? (2 min) ← **noch einmal laufen lassen**
+
+> **Warum noch einmal:** der 121er-Fehler aus §11.1 saß in `q_dot`, also in
+> jeder Zahl, die aus der Quelle folgt — `Qsrc_scale`, `phys_scale`, die
+> `[ENERGY]`-Zeile. `dTdt_scale`, `A`, `bc_scale` und die MISMATCH-Zeilen sind
+> unberührt und sollten sich **nicht** bewegen; wenn doch, ist das der Befund.
+> Ein Lauf, zwei Minuten, und er erledigt O3 gleich mit.
 
 ```bash
 python3 PINNmodulusTwo/data.py 2>&1 | tee 04_daten.txt
 ```
 
-Drei Zeilen zählen, und zwar in dieser Reihenfolge:
+Vier Zeilen zählen, und zwar in dieser Reihenfolge:
 
 | worauf schauen | gut | schlecht |
 |---|---|---|
 | `profile_report` | keine Zeile mit `MISMATCH` | jede `MISMATCH`-Zeile. Das Plansheet ist eine Abschrift — **glaub den Bündeln, nicht der Tabelle** |
 | `bc_scale=… (from N x-neighbour pairs)` | `N > 0` | `[FALLBACK 1/L_ref]`. Dann ist `w_bc` bedeutungslos |
 | `A = 1/(lag_n * rate_scale) per lag: …` | **notieren, egal welcher Wert** | — |
+| `[ENERGY]`-Zeile | **fehlt**, oder „balance holds to within …x" mit einem kleinen x | jede `[ENERGY]`-Zeile. Dann ist die Quelle immer noch falsch und `w_phys` weiterhin nicht einstellbar (§11.1) |
 
 **Gemessen am 31.08. — und die Vorhersage hier war falsch.** Es stand:
 „`T_sigma` wird breiter, `dTdt_scale` kleiner, `A` damit **größer** als die
@@ -203,7 +215,11 @@ er entwertet dessen Bericht, nicht das Training. → `04_daten.txt` schicken.
 
 ---
 
-### - [ ] Schritt 5 — Die Latte (5–10 min, CPU reicht) ← **das entscheidende Tor**
+### - [~] Schritt 5 — Die Latte (5–10 min, CPU reicht) ← **erledigt und überholt**
+
+> **Zweimal überholt.** Erstens lief er bei dt = 4 s statt 0.2 s (§9.3),
+> zweitens mit `Qsrc` 121x zu klein (§11.1). Nicht wiederholen — **5b ersetzt
+> ihn**, und 5b läuft bei der echten Konfiguration.
 
 ```bash
 python3 PINNmodulusTwo/train.py --epochs 2 --subsample 40 --device cpu \
@@ -246,7 +262,14 @@ Schritt 5 lief bei dt = 4 s; das Training läuft bei dt = 0.2 s. Zwei der drei
 Probleme aus §9.3 verschwinden dadurch von selbst — die CFL-Verletzung und der
 degenerierte Anker. Das dritte, der **weglaufende Rollout**, verschwindet nicht
 automatisch. Genau das wird hier gemessen, und zwar mit **einer** Variablen
-zwischen den beiden Läufen:
+zwischen den beiden Läufen.
+
+> **Seit 01.09. misst 5b außerdem etwas anderes als geplant.** Der Physik-Term
+> hatte bis dahin eine 121x zu kleine Quelle (§11.1), war also fast nur
+> Diffusion. Der Vergleich unten — mit gegen ohne Physik — trennt zum ersten Mal
+> zwei Läufe, deren Physik-Term wirklich die Gleichung enthält, der die Daten
+> gehorchen. Und `phys_scale` ist gestiegen (Erwartung: 3.5 → ~4.6), das
+> Residuum wird also **anders** normiert als in jedem bisherigen Lauf.
 
 ```bash
 # 5b-1: die echte Konfiguration, nur kurz
@@ -270,13 +293,14 @@ er es bei dt = 0.2 s immer noch ist, trennen diese zwei Läufe.
 | `[CFL …]` | muss jetzt `CFL OK` sagen |
 | `[SATURATED]` je Epoche | **die Zahl, um die es geht** |
 | `spread s/t` | bei 4.9/4.2 in Schritt 5; nahe 1 wäre gesund |
+| `Qsrc_scale` / `phys_scale` | aus Schritt 4 wiederholen — sie sind seit dem 121er-Fix neue Zahlen |
 
 **Die Entscheidung danach:**
 
 | 5b-1 | 5b-2 | heißt | dann |
 |---|---|---|---|
 | kein `[SATURATED]` | — | dt war das Problem | **Schritt 6 starten** |
-| saturiert | sauber | der Physik-Gradient treibt es | `--w-phys 0.01`, oder `phys_scale` prüfen — **nicht** 60 Epochen |
+| saturiert | sauber | der Physik-Gradient treibt es | `--w-phys 0.01`, oder `phys_scale` prüfen — **nicht** 60 Epochen. Anders als am 31.08. ist das jetzt eine Aussage über die Physik und nicht über einen abgeschalteten Term |
 | saturiert | saturiert | die Rekurrenz selbst | `--max-rate-amp 50`, dann `--history-mode raw` — **nicht** 60 Epochen |
 
 **Stopp wenn:** beide saturieren. → beide Dateien schicken.
@@ -334,6 +358,27 @@ zu raten.
 Danach entscheidet sich, was zuerst gebaut wird: die Seed-Schleife (§3 Phase 4),
 eine Achse, oder — falls `LOSES TO` bleibt — etwas ganz anderes als ein
 Benchmark.
+
+---
+
+## 0a. Was sich am 01.09. geändert hat
+
+**Ein Fehler, gefunden und behoben; zwei Berichte, die ihn künftig sehen.**
+
+| | |
+|---|---|
+| **Quelle war 121x zu klein** | `data._read_raw` teilte `jr1_w` durch `V_JR1 * N_JR1_POINTS`. Die 121 JR1-Gitterpunkte waren doppelt gezählt. Jetzt `jr1_w / V_JR1`. §11.1 |
+| **Zwei Tests dazu** | die Umrechnung selbst (`q_dot * V_JR1 == jr1_w`, exakt) und die Empfindlichkeit des Energieberichts. Zu beidem gab es vorher keinen Test — deshalb konnte ein Faktor 121 still sein |
+| **`coverage_report` meldet tote Kanäle** | er übersprang sie. Ein Kanal ohne Trainings-Varianz ist der Fall, in dem ein abweichender Wert am wenigsten interpolierbar und zugleich unsichtbar ist (`_normalise_config` zwingt ihn auf 0). O5 |
+
+**Was das für die Zahlen vom 31.08. heißt:** `Qsrc_scale`, `phys_scale` und
+sämtliche Schritt-5-Ergebnisse sind mit einem praktisch abgeschalteten
+Physik-Term entstanden. Sie sind in der Stand-Tabelle als ungültig markiert und
+nicht zu vergleichen. Schritt 3 (die Bündel) ist unberührt.
+
+**Nicht geändert:** kein Gewicht, kein Default, keine Loss-Balance. `delta_phys`
+steht weiter auf 1.0. Der 121er war ein Einheitenfehler mit einer eindeutigen
+richtigen Antwort; alles andere in §11 bleibt eine Achse, die gemessen wird.
 
 ---
 
@@ -778,52 +823,79 @@ auffällig schlechter ist als die anderen Trainings-OPs, steht hier, warum.
 ## 11. Was die Messung über das MODELL sagt (31.08.)
 
 Zwei Befunde, die aus den Zahlen von Schritt 4/5 folgen und beide den
-**Physik-Term** betreffen. Beide sind jetzt im Code sichtbar gemacht; keiner ist
-blind repariert worden.
+**Physik-Term** betreffen. Am 31.08. wurden beide nur sichtbar gemacht, keiner
+blind repariert. Am 01.09. hat sich der erste (11.1) als **Codefehler mit
+eindeutiger Ursache** herausgestellt und ist behoben; der zweite (11.2) bleibt
+eine Achse, die gemessen und nicht geraten wird.
 
-### 11.1 Die Energiebilanz geht um Faktor ~147 nicht auf ← **der wichtigste Befund**
+### 11.1 Die Energiebilanz ging um Faktor ~147 nicht auf — GEFUNDEN, 01.09.
 
 ```
 dTdt_scale = 3.534        Qsrc_scale = 0.0241        Verhaeltnis 147x
 ```
 
 In physikalischen Einheiten: das beheizte Gebiet steigt um **~34 K** über den
-Lauf, die Quelle kann davon **0.23 K** erklären.
+Lauf, die Quelle konnte davon **0.23 K** erklären.
 
 Die nichtdimensionale Gleichung ist `dTn/dtn = Fo : ∇²Tn + Qsrc`. Über die Zelle
 gemittelt integriert sich der Diffusionsterm zum Randfluss — bei **OP07 und
 OP14, die beide Volumenstrom 0 haben**, kann also fast nichts abfließen, und
-`<dTn/dtn> ≈ <Qsrc>` muss gelten. Tut es um zwei Größenordnungen nicht.
+`<dTn/dtn> ≈ <Qsrc>` muss gelten. Es tat es um zwei Größenordnungen nicht.
 
-**Der wahrscheinliche Grund** steht in `data.py`:
+**Es war eine doppelt gezählte 121, und sie stand in `data.py`:**
 
 ```python
-Qsrc = q_dot * q_mask * T_span_ref / (rho * Cp * T_sigma)
-q_mask = (region == 1)          # 0/1, KEINE Volumendivision
+q_dot_full = jr1_full / (V_JR1 * N_JR1_POINTS)     # <- der Fehler
+q_dot_full = jr1_full / V_JR1                      # <- richtig, seit 01.09.
 ```
 
-`q_dot` ist `q_source[:, 0]`, und die Spalte heißt stromaufwärts **`jr1_w`** —
-Watt, nicht W/m³. Wird eine Gesamtleistung als volumetrische Quelle eingesetzt,
-fehlt die Division durch das JR1-Volumen, und zwar **uniform**.
+Die Vermutung vom 31.08. — „eine **fehlende** Volumendivision" — war falsch: die
+Division stand da. Zu viel war die zusätzliche durch die **121 JR1-Gitterpunkte**,
+übernommen aus `pinn/data/load_op01.py` des Basisprojekts, wo sie mit einer
+„Gleichverteilung"-Lesart begründet ist. Diese Lesart zählt doppelt: die
+Gesamtleistung gleichmäßig über die 121 Punkte zu verteilen ist **genau das, was
+eine uniforme volumetrische Quelle über `V_JR1` schon tut**. Die Einheit von
+`jr1_w` musste dafür niemand erfragen — sie steht im Bündelvertrag des
+Vorgängerprojekts (`docs/opbundle_contract.md`: `q_source … | W |`), und der
+README des Basis-PINN schreibt die richtige Formel sogar aus:
+`q̇(t) = heatSourceJr1(t) / V_JR1`.
 
-**Warum das bisher niemand sehen konnte:** ein uniformer Faktor ist unsichtbar.
-Die EMA-Balance teilt ihn direkt wieder heraus, `L_phys` landet trotzdem bei
-O(1), und `phys_scale` wird aus denselben verfälschten Zahlen gebaut. Nur ein
-Energieargument sieht ihn — und genau das druckt `data.py` jetzt
-(`energy_balance_report`).
+**Die Zahl passt:** 147 gemessen gegen 121 aus der Formel. Der Rest ist genau
+das, was übrig bleiben muss — was tatsächlich über den Rand abfließt. Nach dem
+Fix erklärt die Quelle rund 28 K der ~34 K, also Bilanz auf ~1.2x statt ~147x.
+Auf dem synthetischen Bündel geht die `[ENERGY]`-Zeile von 296x auf 2.4x, exakt
+Faktor 121.
 
-**Die Konsequenz, wenn es sich bestätigt:** das Residuum reduziert sich auf
-`dTdt = Fo : ∇²Tn`. Der Physik-Term sagt dem Netz dann, die Zelle werde von
-**nichts** geheizt und müsse ihre Temperatur allein durch Leitung erreichen. Das
-ist eine andere PDE als die, der die Daten gehorchen, und **kein `w_phys` kann
-darauf richtig sein.**
+**Warum das keiner sehen konnte:** ein uniformer Faktor ist unsichtbar. Die
+EMA-Balance teilt ihn direkt wieder heraus, `L_phys` landet trotzdem bei O(1),
+und `phys_scale` wird aus denselben verfälschten Zahlen gebaut. Nur ein
+Energieargument sieht ihn — und genau dafür wurde `energy_balance_report` am
+31.08. gebaut. Es hat beim ersten Lauf funktioniert.
 
-> **Deshalb ist O7 vor jedem Gewichts-Sweep zu klären.** Ein Balance-Sweep auf
-> einem falschen Residuum misst, wie schnell man den Physik-Term abschaltet.
+**Was das für die vorhandenen Messungen heißt:** das Residuum war
+`dTdt = Fo : ∇²Tn` mit einer um 121 kleingerechneten Quelle, also praktisch
+**ohne Quelle**. Der Physik-Term sagte dem Netz, die Zelle werde von nichts
+geheizt und müsse ihre Temperatur allein durch Leitung erreichen. Das ist eine
+andere PDE als die, der die Daten gehorchen, und kein `w_phys` konnte darauf
+richtig sein. Deshalb sind `Qsrc_scale`, `phys_scale` und **jede Zahl aus
+Schritt 5** — auch das `[SATURATED]` und der `spread` — mit dem falschen
+Residuum entstanden und nicht weiterzuverwenden. Schritt 4 und 5b laufen neu.
 
-**Nächster Schritt:** `python3 PINNmodulusTwo/data.py` — die neue
-`[ENERGY]`-Zeile nennt den Faktor je OP. Dann beim Simulations-Export nachfragen,
-welche Einheit `jr1_w` wirklich trägt.
+> **O7 war vor jedem Gewichts-Sweep zu klären** — ein Balance-Sweep auf einem
+> falschen Residuum misst, wie schnell man den Physik-Term abschaltet. Seit
+> 01.09. ist das erledigt; die Sperre für O8 und den ersten Sweep ist damit weg,
+> die Sperre „erst messen" (§10a) nicht.
+
+**Abgesichert:** `test_q_dot_is_the_jr1_power_spread_over_the_jr1_volume` pinnt
+die Umrechnung (`q_dot * V_JR1 == jr1_w`, exakt), und
+`test_energy_balance_report_flags_a_shrunken_source` pinnt, dass der Bericht
+einen uniformen Faktor überhaupt sehen kann — sonst bewacht der erste Test einen
+Detektor, der nichts meldet. Vorher gab es zu beidem keinen Test; deshalb war ein
+Vorzeichen dieser Größe still.
+
+**Nächster Schritt:** `python3 PINNmodulusTwo/data.py` auf den echten Bündeln.
+Die `[ENERGY]`-Zeile muss verschwinden oder nahe 1 stehen; `Qsrc_scale` und
+`phys_scale` sind die neuen maßgeblichen Zahlen.
 
 ### 11.2 Der Physik-Stencil ist 4x zu grob — und wurde nie geprüft
 
@@ -846,6 +918,12 @@ Im **hybriden** History-Modus — dem Default — speist `δ` **ausschließlich*
 `L_phys`; die History des Netzes hängt an `--delta-grid` und `--rate-lags`. Das
 macht `δ` zu einer sauber isolierten Achse und damit zum **besten ersten
 Sweep-Kandidaten**, sobald 11.1 geklärt ist.
+
+**11.1 ist seit 01.09. geklärt, die Achse ist also frei** — und sie ist jetzt
+erst sinnvoll: solange `Qsrc` 121x zu klein war, hätte ein δ-Sweep gemessen, wie
+gut ein zu grober Stencil eine Gleichung ohne Quelle auflöst. Der Default bleibt
+bei 1.0, weil er zu **messen** ist und nicht zu setzen (§10a); der erste Punkt
+neben 1.0 ist 0.2, das Datengitter selbst.
 
 ---
 
@@ -935,6 +1013,13 @@ hat (§9.3). Ein Gewicht auf dieser Grundlage zu setzen wäre geraten und würde
 danach wie gemessen aussehen — genau die Sorte Zahl, wegen der die alten
 Benchmarks gelöscht wurden.
 
+**Am 01.09. kam ein fünfter Grund dazu, und er ist der härteste:** in diesem Lauf
+war `Qsrc` um Faktor 121 zu klein (§11.1). Ein `w_phys`, das auf diesen Zahlen
+gefunden worden wäre, hätte die Größe kompensiert, mit der der Fehler den
+Physik-Term kleingerechnet hat — und wäre nach dem Fix um zwei Größenordnungen
+falsch. Genau deshalb war „nichts an Gewichten ändern, bevor gemessen ist" hier
+richtig und nicht bloß vorsichtig.
+
 **Drei Dinge, die die Daten aber schon nahelegen**, festgehalten damit sie nicht
 verlorengehen:
 
@@ -942,7 +1027,11 @@ verlorengehen:
    Faktor 2.3 auseinanderliegt** (OP05 0.0158 … OP11 0.0370). `w_phys` bedeutet
    damit auf OP05 etwas anderes als auf OP11. Ein per-OP-Divisor wäre denkbar —
    ändert aber die Gleichung pro OP und muss gemessen, nicht angenommen werden.
-2. **Tote Kanäle (O5).** `soc_start` ist über alle sechzehn OPs konstant 10 %,
+2. **Tote Kanäle (O5).** Seit 01.09. meldet `coverage_report` auch tote
+   Skalar-Kanäle — vorher übersprang er sie, ausgerechnet den Fall, in dem der
+   trainierte Umschlag ein einziger Punkt ist und `_normalise_config` den Wert
+   unabhängig davon auf 0 zwingt. Die Entscheidung selbst bleibt offen.
+   `soc_start` ist über alle sechzehn OPs konstant 10 %,
    trägt also null Information und kostet eine Eingangsdimension. Schlimmer: die
    Rate-Kanäle von `c_rate` und `fluid_mass_flow` sind im Training tot und auf
    OP15/OP16/OP19 lebendig — das Modell soll dort einen Kanal deuten, für den es
@@ -971,33 +1060,44 @@ Ehrlichkeitsklausel — wann der Plan selbst falsch ist:
 
 ---
 
-**Zuletzt fortgeschrieben:** 2026-08-31, Sitzungsende. Offene Punkte stehen ganz
-oben; §10 beantwortet, wann aus diesem Fahrplan ein Benchmark wird, und §10a,
-was aus den Messungen bewusst NICHT in den Code gewandert ist.
+**Zuletzt fortgeschrieben:** 2026-09-01. Offene Punkte stehen ganz oben; §0a
+sagt, was sich an diesem Tag geändert hat, §10 beantwortet, wann aus diesem
+Fahrplan ein Benchmark wird, und §10a, was aus den Messungen bewusst NICHT in den
+Code gewandert ist.
 
-**Stand nach Schritt 5.** Schritt 1–4 gruen,
-Schritt 5 gelaufen aber **nicht aussagekraeftig** — und das hat den Plan
-geaendert: es gibt jetzt einen **Schritt 5b** vor Schritt 6.
+**Stand: der Physik-Term war 121x zu klein, und das ist behoben.** Der
+Energiebericht vom 31.08. hat beim ersten Lauf getan, wofür er gebaut wurde: die
+~147x, die er meldete, waren eine doppelt gezählte Division durch die 121
+JR1-Gitterpunkte in `data._read_raw`. §11.1 hat die Rechnung, `data.py` den Fix,
+`tests/test_local_smoke.py` zwei Tests dazu.
 
-Die Pipeline laeuft von Ende zu Ende auf echten Daten durch, und `L_data` faellt
-von 94 auf 16 — das Modell lernt. Aber der Rollout haengt zu 99 % im Clamp, und
-Schritt 5 lief ausserdem bei dt = 4 s statt der 0.2 s, mit denen trainiert wird.
-Beides in §9.3.
+**Die Konsequenz ist unbequem und steht trotzdem hier:** jede Zahl aus Schritt 5
+ist mit einer praktisch abgeschalteten Quelle entstanden — `[SATURATED]`,
+`spread`, `LOSES TO`, `Qsrc_scale`, `phys_scale`. Sie sind in der Stand-Tabelle
+als ungültig markiert. Was §9.3 beschreibt (der weglaufende Rollout), ist damit
+nicht widerlegt, aber auch nicht bestätigt: es wurde an einer anderen PDE
+gemessen als der, die jetzt im Code steht. Schritt 4 und 5b entscheiden das neu,
+und beide kosten zusammen unter einer halben Stunde.
+
+Die Bündel aus Schritt 3 sind unberührt — der Fehler saß im Laden, nicht im
+Bauen. Neu zu bauen ist nichts.
 
 **Offene Befunde** — §9:
-1. §9.3 Der Rollout laeuft weg (`[SATURATED]` in beiden Epochen). **Das ist die
-   Frage, an der jetzt alles haengt.**
+1. §9.3 Der Rollout laeuft weg (`[SATURATED]` in beiden Epochen). **Neu zu
+   messen**, siehe oben: der Lauf hatte keine Quelle.
 2. §9.4 OP19s Latte ist mit persistence = 1.375 C fast unschlagbar.
 3. §9a.1 OP15: `cell_current` fehlt im Buendel, obwohl das Plansheet CC-CV nennt.
 4. §9a.2 OP12 (**Training**) und OP15: das `fluid_inlet_temp`-Profil endet bei
    1440 s, die Trajektorie laeuft bis 1604 s; die letzten ~10 % sind flach.
 
-**Ausgeführt:** Testsuite (110 grün) und Ende-zu-Ende-`train.py`-Läufe gegen ein
-synthetisches Bündel — Banner, Training, val/test, `op_metrics`, Coverage-Report,
-Baselines, Checkpoint-Roundtrip, und ein nicht gelisteter OP als
-`--measurement-ops`.
+**Ausgeführt am 01.09.:** `pytest` (123 grün, 1 skipped), `selftest.py`
+(all checks passed), `op_registry.py`, der Importcheck und ein
+Ende-zu-Ende-`train.py`-Lauf gegen ein synthetisches Bündel — alles auf CPU,
+mit CPU-torch aus PyPI.
 
 **Nicht ausgeführt:** alles auf echten Daten. `data_cache/` und
-`material_properties/` liegen nur auf der Arbeitsmaschine. Die Tabelle „Stand"
-ganz oben ist deshalb leer — sie ist die einzige Stelle, an der eine gemessene
-Zahl in dieser Datei steht.
+`material_properties/` liegen nur auf der Arbeitsmaschine. Der 121er ist deshalb
+zwar bewiesen (die Einheit steht im Bündelvertrag, die Formel im README des
+Basisprojekts, und der Faktor stimmt mit den 147 überein), aber die neuen
+`Qsrc_scale`/`phys_scale` sind **Erwartungen**, keine Messungen, bis Schritt 4
+gelaufen ist.

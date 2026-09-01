@@ -47,14 +47,19 @@ selects on it.
 
 ## Files
 
-- `data.py` — loads the OPs from the cached `.npz` (JR1 heat = `q_source[:,0]`),
+- `data.py` — loads the OPs from the cached `.npz` (JR1 heat = `q_source[:,0]`,
+  a total power in W, made volumetric by one division: `q_dot = jr1_w / V_JR1`),
   pooled z-score for temperature, shared `L_ref`/`T_span_ref` non-dimensionalisation,
   anisotropic Fourier tensor, and the per-timestep **config feature block**.
   Owns everything the profiles force: anti-aliased driver resampling
   (`--resample mean`), causal driver-rate channels (`--driver-rate-lags`), and
-  the three reports — `normalisation_report`, `profile_report` (what the bundles
-  actually contain, against what the plan sheet claims) and `coverage_report`
-  (which held-out driver leaves the trained range, and by how many sigmas).
+  the four reports — `normalisation_report`, `profile_report` (what the bundles
+  actually contain, against what the plan sheet claims), `coverage_report`
+  (which held-out driver leaves the trained range, and by how many sigmas —
+  including channels with NO training variance, where the value is forced to 0
+  and the network is never told it differs) and `energy_balance_report` (can the
+  source account for the temperature rise? It is the only check that can see a
+  uniform factor on `Qsrc`, and on 31.08.2026 it found one: 121x).
 - `op_registry.py` — the plan sheet in code: OP01–OP16, which OP carries which
   profile, the tiers, and the split. **Runs without data.**
 - `op_metrics.py` — per-OP rollout metrics. Not just a mean: a CC-CV OP spends
