@@ -36,18 +36,91 @@ offen war — nicht neu abzuleiten.
 | **O5** | **Tote Eingangskanäle.** `soc_start` ist über alle OPs konstant 10 % (`DEAD -> forced to 0`), und die Rate-Kanäle von `c_rate` und `fluid_mass_flow` sind im Training tot — werden aber auf OP15/OP16/OP19 lebendig. Das Modell soll dort einen Kanal deuten, den es nie gesehen hat. **Am 01.09. sichtbar gemacht:** `coverage_report` übersprang tote Skalar-Kanäle bisher **komplett** — ausgerechnet den Fall, in dem der Umschlag ein einziger Punkt ist. Jetzt bekommt jeder tote Kanal, den ein Berichts-OP bewegt, eine eigene Zeile. Die **Entscheidung** (Kanal streichen? Envelope erweitern?) bleibt offen | zu entscheiden, siehe §10 |
 | **O6** | Nichts an **Gewichten** ist auf Basis der Messungen geändert worden — bewusst, siehe §10a | offen bis 5b/6 |
 | **O7** | **ERLEDIGT und auf ECHTEN DATEN bestätigt (01.09.).** `[ENERGY]` ist weg, Bilanz 0.9x auf den bindenden No-Flow-OPs. Die Umrechnung teilte `jr1_w` durch `V_JR1 * N_JR1_POINTS`; die 121 Gitterpunkte waren doppelt gezählt, jedes `Qsrc` war 121x zu klein. Behoben, mit Test. **Folge: `Qsrc_scale`, `phys_scale` und jede Zahl aus Schritt 5 sind ungültig — Schritt 4 und 5b müssen neu laufen.** §11.1 | erledigt |
-| **O9** | **NEU 01.09.** Mit Physik-Term ist `spread s/t` = 0.339/0.201, ohne = 2.15/1.03. Der Physik-Term dämpft den Rollout an der gesunden 1 vorbei ins Überdämpfte — trotzdem ist seine MAE besser. Was von beidem zählt, entscheidet sich erst über mehr Epochen und mehrere Seeds | erste Sweep-Frage |
+| **O9** | **NEU 01.09. — die offene Frage, die Schritt 6 entscheidet.** Mit Physik-Term `spread s/t` = 0.339/**0.201**, ohne = 2.15/1.03. Die `[FLAT]`-Warnung löst bei 0.2 aus: es fehlten **0.5 %**. Verdacht: die MAE-Verbesserung ist Varianzreduktion, keine bessere Dynamik. §11.3 hat die Analyse | **Schritt 6 beantwortet es** |
 | **O8** | Der BDF-Stencil in `L_phys` nutzt δ = 1.0 s gegen eine Diffusions-Zeitskala von ~0.24 s. Ein Knopf (`--delta-phys`) und mit `[CFL WARN]` versehen. **Seit O7 erledigt ist, ist diese Achse frei** — sie war ausdrücklich hinter 11.1 eingereiht. Default bleibt 1.0, bis gemessen ist. §11.2 | erste Sweep-Achse |
 
 ---
 
-# JETZT: was du als Nächstes machst
+# Fragen an den lokalen Bot (er sieht die Rohdaten, ich nicht)
 
-Sechs Schritte, chronologisch. Schritt 1–5 brauchen **kein GPU** und dauern
-zusammen unter einer Stunde. Erst Schritt 6 kostet etwas.
+Drei Stück. **Q1 und Q2 können O3 und O4 schließen**, die bisher als
+„Rückfrage an die Simulationsseite" geführt werden — ein Bot mit Zugriff auf den
+Rohexport kann sie womöglich direkt beantworten, ohne dass jemand wartet.
 
-**Nach jedem Schritt steht, was dich stoppen muss.** Wenn ein Stopp-Kriterium
-zutrifft: nicht weitermachen, sondern die genannte Datei schicken.
+**Q1 — schließt O4.** In `OP12.npz` deckt das `fluid_inlet_temp`-Profil
+0.0…1440.0 s ab, die Trajektorie läuft aber 0.1…1605.3 s. Die letzten ~165 s
+(10 %) werden mit dem letzten Profilwert flach gehalten, und OP12 ist ein
+**Trainings**-OP. Frage: Steht im Rohexport von OP12 ein Profil, das bis 1605 s
+reicht — oder endet die Quelle wirklich bei 1440 s? Anders gefragt: ist die
+Flachhaltung die einzig mögliche Annahme, oder ist ein Stück Profil beim Export
+verlorengegangen? Dasselbe für OP15.
+
+**Q2 — schließt O3.** Das Plansheet nennt OP15 „CC mit Fluidtemperaturprofil und
+Volumenstromprofil **und CC-CV**". Im Bündel variiert `cell_current` nicht, und
+die Upstream-Assembly hat den Kanal **nie als Profil markiert** (sie markiert
+`fluid_inlet_temp` und `fluid_mass_flow`). Frage: Gibt es im Rohexport von OP15
+eine `cell_current`-Zeitreihe? Wenn ja, ist die Assembly schuld; wenn nein,
+stimmt das Plansheet für OP15 nicht.
+
+**Q3 — offen, kleiner.** Die Trainings-Temperaturspanne beginnt bei exakt
+`-0.0 C` (`T_mu=33 C, T_sigma=9.602 C, train range -0.0 .. 55.9 C`). Bei
+`fluid_initial_temp` = 21.55 ± 10.34 °C und einem Ladevorgang ist ein exakter
+Nullwert verdächtig — das sieht nach Füllwert aus, nicht nach Messung. Frage:
+Kommt die 0.0 in einem konkreten OP und an einer konkreten Stelle im Feld vor
+(welcher OP, welche Punkte, welcher Zeitschritt), und ist sie physikalisch
+plausibel? Falls Füllwert: sie geht in `T_mu`/`T_sigma` ein und verzerrt jede
+Normierung.
+
+---
+
+# JETZT: genau eine Sache — Schritt 6
+
+Schritt 1 bis 5b sind durch. **Es steht nur noch ein Kommando aus:**
+
+```bash
+cd /mnt/c/Users/M0245635/batterysurrogatemodell
+source modulus_env/bin/activate
+git pull origin claude/fahrplan-issues-nx1nqp     # falls noch nicht geschehen
+
+python3 PINNmodulusTwo/train.py --epochs 60 2>&1 | tee 06_lauf.txt
+```
+
+CPU misst ~110 s/Epoche → ~2 h. Auf GPU deutlich weniger; `--device` fragt nach.
+
+## Worauf du in `06_lauf.txt` schaust — in dieser Reihenfolge
+
+| # | Signal | gut | schlecht → was dann |
+|---|---|---|---|
+| 1 | `[ABORT]` | kommt nicht | Loss nicht-endlich → zurück zu 5b, `--max-rate-amp 50` |
+| 2 | `[SATURATED]` in der **letzten** Epoche | keine Zeile | Rollout weggelaufen → mehr Epochen, dann `lr` runter |
+| 3 | **`spread s/t`** über die Epochen | **steigt Richtung 1** | **bleibt bei ~0.3 oder fällt → O9 bestätigt**, siehe unten |
+| 4 | `[FLAT]` | kommt nicht | dasselbe wie 3, nur lauter |
+| 5 | `LOSES TO` auf OP06/OP09 | kommt nicht | schlechter als „nichts tun" → das Problem sind Daten/Modellklasse, nicht Gewichte |
+
+**Signal 3 ist das neue und das wichtigste.** In 5b stand `spread_time` bei
+**0.201** — die `[FLAT]`-Warnung löst bei 0.2 aus, es fehlten also 0.5 %. Ob das
+Untertrainiertheit war oder ein Artefakt des Physik-Terms, entscheidet **dieser**
+Lauf und sonst nichts:
+
+* `spread` steigt Richtung 1 **und** MAE fällt → der Physik-Term trägt wirklich.
+  Weiter mit der Seed-Schleife (§10).
+* `spread` bleibt bei ~0.3 **und** MAE fällt trotzdem → **O9 bestätigt**: die
+  MAE-Verbesserung ist Varianzreduktion, keine bessere Dynamik. Dann **nicht**
+  mehr Epochen, sondern `--w-phys 0.01` gegen `0.1` messen.
+
+## Was du danach schickst
+
+```
+06_lauf.txt   +   PINNmodulusTwo/artifacts/metrics.txt
+              +   PINNmodulusTwo/artifacts/history.csv    <- wegen spread je Epoche
+```
+
+`history.csv` ist diesmal die wichtigere Datei: die `spread`-Spalten über 60
+Epochen sind das, was 5b nicht beantworten konnte.
+
+---
+
+## Der Weg dahin (alles erledigt)
 
 - [x] **1** Code holen — 31.08.
 - [x] **2** Läuft der Code? (keine Daten nötig) — 31.08., grün
@@ -55,8 +128,8 @@ zutrifft: nicht weitermachen, sondern die genannte Datei schicken.
 - [x] **4** Stimmen die Daten? — **01.09. neu gelaufen, grün.** `[ENERGY]` weg,
   `Qsrc_scale` 2.916 / `phys_scale` 4.582 wie vorhergesagt, alles andere
   unverändert. O3 dabei entschieden
-- [~] **5** Die Latte — 31.08. gelaufen, **nicht aussagekraeftig** (§9.3) und
-  zusätzlich mit dem falschen `Qsrc` gerechnet
+- [x] **5** Die Latte — 31.08. gelaufen, **nicht aussagekraeftig** (§9.3) und
+  mit dem falschen `Qsrc` gerechnet. **Von 5b ersetzt, nicht zu wiederholen**
 - [x] **5b** Kurzlauf bei der ECHTEN Konfiguration — **01.09., GRÜN.** `[SATURATED]` in Epoche 3 weg, und beide val-OPs schlagen zum ersten Mal die trivialen Vorhersager — **nur mit Physik-Term**
 - [ ] **6** Erster ernsthafter Lauf (GPU) ← **freigegeben durch 5b**
 
@@ -225,7 +298,7 @@ er entwertet dessen Bericht, nicht das Training. → `04_daten.txt` schicken.
 
 ---
 
-### - [~] Schritt 5 — Die Latte (5–10 min, CPU reicht) ← **erledigt und überholt**
+### - [x] Schritt 5 — Die Latte ← **erledigt, überholt, nicht wiederholen**
 
 > **Zweimal überholt.** Erstens lief er bei dt = 4 s statt 0.2 s (§9.3),
 > zweitens mit `Qsrc` 121x zu klein (§11.1). Nicht wiederholen — **5b ersetzt
@@ -375,6 +448,7 @@ Vier Signale im Log, in dieser Rangfolge:
 | `[ABORT]` | Loss nicht-endlich | zurück zu Schritt 5 |
 | `[SATURATED]` in der **letzten** Epoche | Rollout weggelaufen und festgehalten — **keine Vorhersage** | mehr Epochen → `lr` runter → längere `--rate-lags` |
 | `[FLAT]` | Feld konstant; ein fallendes `L_phys` ist dann die triviale Lösung, nicht Physik | `--w-phys` / `--w-bc` senken |
+| **`spread` bleibt bei ~0.3** | **O9: die MAE-Verbesserung ist Varianzreduktion, keine Dynamik.** In 5b stand er bei 0.201, die `[FLAT]`-Schwelle ist 0.2 | `--w-phys 0.01` gegen `0.1` messen — **nicht** mehr Epochen. §11.3 |
 | `LOSES TO` auf OP06/OP09 | schlechter als „nichts tun" | **das** ist das Problem, nicht die Gewichte |
 
 ---
@@ -997,6 +1071,56 @@ Vorzeichen dieser Größe still.
 Die `[ENERGY]`-Zeile muss verschwinden oder nahe 1 stehen; `Qsrc_scale` und
 `phys_scale` sind die neuen maßgeblichen Zahlen.
 
+### 11.3 Der Physik-Term dämpft — Artefakt oder Untertrainiertheit? (O9, 01.09.)
+
+Aus 5b, drei Epochen, ein Seed:
+
+| | mit Physik | ohne (`--w-phys 0 --w-bc 0`) |
+|---|---|---|
+| val-MAE OP06 / OP09 | **10.54 / 7.49** beats | 11.59 / 8.50 LOSES TO |
+| `spread` räumlich / zeitlich | 0.339 / **0.201** | 2.15 / **1.03** |
+| `L_data` Epoche 3 | 0.831 | **0.298** |
+
+Drei Dinge stehen da, und sie widersprechen sich.
+
+**(a) Der `[FLAT]`-Detektor hat um 0.5 % nicht ausgelöst.** `train.py` warnt bei
+`spread < 0.2`; gemessen sind 0.201. Der Code sagt an dieser Stelle selbst: *„ein
+fallendes `L_phys` ist dann die triviale Lösung, nicht Physik."* Das ist der
+stärkste Einzelbeleg für den Verdacht — stärker als die MAE-Differenz.
+
+**(b) Die naheliegende Erklärung ist durch den 121er-Fix entfallen.** „Flach
+vorhersagen löst `L_phys`" war **vorher** richtig und ist es nicht mehr. Ein
+flaches Feld hat `dTdt = 0` und `∇²T = 0`, es bleibt `residual = −Qsrc`:
+
+| | `Qsrc_scale` | `phys_scale` | `L_phys` bei flachem Feld |
+|---|---|---|---|
+| alt (`/121`) | 0.0241 | 3.535 | **0.00005** — flach war gratis |
+| neu | 2.924 | 4.596 | **0.40** — flach kostet O(1) |
+
+Das Overdamping tritt **trotzdem** auf. Der Mechanismus ist also offen, und die
+bequeme Antwort ist ausgeschlossen.
+
+**(c) `L_data` und MAE ranken wieder gegeneinander.** Der physikfreie Lauf hat
+die **bessere** `L_data` (0.298 gegen 0.831) und die **schlechtere** MAE. §10s
+Regel „Kriterium ist MAE, nie `L_data`" ist damit erneut belegt.
+
+**Was NICHT gemacht wird**, obwohl es naheliegt: kein `L_spread`-Term (das ist
+Anpassen an die Metrik, mit der man hinterher bewertet), kein Gradient-Balancing
+statt EMA, kein adaptives `w_phys`. Drei Epochen und ein Seed tragen keinen
+Umbau der Loss-Architektur — genau der Fehler, für den die acht Benchmark-Skripte
+gelöscht wurden. Zwei Behauptungen, die dabei im Raum standen, halten für diese
+Konfiguration ohnehin nicht: der Physik-Term dominiert nicht (`ratio phys/bc =
+0.0402`, also ~4 % des Datenterms), und es gibt keinen Überhang an
+Kollokationspunkten (`batch_data 2048 : batch_phys 256` = 8:1 zugunsten der
+Daten).
+
+**Entschieden wird es in Schritt 6, ohne eine Zeile Codeänderung:** steigt
+`spread` über 60 Epochen Richtung 1, war 0.2 Untertrainiertheit. Bleibt er bei
+~0.3 während die MAE fällt, ist es das Artefakt — dann `--w-phys 0.01` gegen
+`0.1` messen statt mehr Epochen.
+
+---
+
 ### 11.2 Der Physik-Stencil ist 4x zu grob — und wurde nie geprüft
 
 `Fo` erreicht im **Aluminiumgehäuse** ~200 (Jelly Roll: ~0.1), die schnellste
@@ -1084,7 +1208,15 @@ sind das Einzige daraus, was übernommen wird:
   nur eines davon. Jede Einzel-MAE mitschleppen.
 * **Nach Tier getrennt berichten.** Eine gemittelte Test-MAE über OP13/OP15/OP16
   mischt C-Raten-Extrapolation, ungesehenen Profiltyp und dreifachen Volumenstrom.
-* **Kriterium ist MAE, nie `L_data`.** Die beiden ranken nachweislich verschieden.
+* **Kriterium ist MAE, nie `L_data`.** Die beiden ranken nachweislich
+  verschieden — am 01.09. erneut belegt: der physikfreie 5b-Lauf hat die bessere
+  `L_data` (0.298 gegen 0.831) und die schlechtere MAE.
+* **`spread` ist eine Nebenbedingung, kein Ziel** (neu, 01.09.). Eine
+  Konfiguration mit besserer MAE bei `spread = 0.2` hat nicht gewonnen, sie hat
+  aufgehört vorherzusagen — `train.py` nennt das selbst die triviale Lösung.
+  Auswahl also: **MAE minimieren unter `spread ∈ [0.7, 1.3]`**. Nicht als
+  kombinierte Formel (die verschleiert, welche der beiden Zahlen entschieden
+  hat), sondern als Tor davor. Siehe §11.3.
 * **Seed-Rausch-Urteil.** Spanne zwischen Konfigurationen < Spanne zwischen Seeds
   → keine Rangfolge.
 
@@ -1160,62 +1292,58 @@ Ehrlichkeitsklausel — wann der Plan selbst falsch ist:
 
 ---
 
-**Zuletzt fortgeschrieben:** 2026-09-01. Offene Punkte stehen ganz oben; §0a
-sagt, was sich an diesem Tag geändert hat, §10 beantwortet, wann aus diesem
-Fahrplan ein Benchmark wird, und §10a, was aus den Messungen bewusst NICHT in den
-Code gewandert ist.
+**Zuletzt fortgeschrieben:** 2026-09-01, Sitzungsende.
 
-**Stand: 5b ist grün, Schritt 6 ist frei — und der Physik-Term trägt.**
+# Wo du stehst — in drei Sätzen
 
-Zwei Ergebnisse am 01.09., beide auf echten Daten:
+**Schritt 1–5b sind durch, Schritt 6 ist freigegeben und noch nicht gelaufen.**
+Der Physik-Term hatte eine 121x zu kleine Quelle; das ist behoben und auf echten
+Daten bestätigt. Seitdem schlagen beide val-OPs zum ersten Mal die trivialen
+Vorhersager — aber nur mit Physik-Term, und der Rollout ist dabei verdächtig
+stark gedämpft (O9).
 
-1. **Der 121er ist behoben und bestätigt.** `[ENERGY]` weg, Bilanz 0.9x auf den
-   No-Flow-OPs, und sie folgt monoton dem Volumenstrom. §11.1.
-2. **Beide val-OPs schlagen erstmals die trivialen Vorhersager** — OP06 10.540 C
-   gegen persistence 16.679 / train-mean 10.801, OP09 7.494 gegen 18.549 /
-   7.762. **Ohne** Physik-Term verlieren beide. Das ist der erste Beleg, dass der
-   Physik-Term in diesem Projekt etwas beiträgt, und er war vor dem Fix nicht zu
-   haben.
+**Dein nächstes Kommando steht ganz oben unter „JETZT".** Es ist eines.
 
-Damit ist auch die Bedingung aus §10 erfüllt („einmal Schritt 5b oder 6
-auswerten"): ab hier wird die Seed-Schleife gebaut, denn ein Seed und drei
-Epochen tragen keine Rangfolge zwischen Konfigurationen.
+## Was am 01.09. gemessen wurde
 
-**Der alte Stand, zur Nachvollziehbarkeit:** Schritt 4 lief am 01.09. neu: `[ENERGY]` weg, Bilanz 0.9x auf
-den No-Flow-OPs, und die Bilanz folgt jetzt monoton dem Volumenstrom — ein
-Beleg, für den nichts angepasst wurde. Der nächste Schritt ist **5b**. Der
-Energiebericht vom 31.08. hat beim ersten Lauf getan, wofür er gebaut wurde: die
-~147x, die er meldete, waren eine doppelt gezählte Division durch die 121
-JR1-Gitterpunkte in `data._read_raw`. §11.1 hat die Rechnung, `data.py` den Fix,
-`tests/test_local_smoke.py` zwei Tests dazu.
+| | |
+|---|---|
+| **Schritt 4** | `[ENERGY]` weg (war ~147x). `Qsrc_scale` 0.0241 → **2.916**, `phys_scale` 3.535 → **4.582**, beide exakt wie vorhergesagt. Alles andere unverändert. Die Bilanz folgt monoton dem Volumenstrom: V̇=0 → 0.9x, V̇=0.0026 → 0.5x |
+| **Schritt 5b** | `[SATURATED]` in Epoche 3 **weg** — der weglaufende Rollout aus §9.3 war `dt`. val OP06 **10.540 C beats**, OP09 **7.494 C beats**; ohne Physik-Term verlieren beide |
+| **offen daraus** | `spread` = 0.339/**0.201** mit Physik gegen 2.15/1.03 ohne. `[FLAT]` löst bei 0.2 aus. §11.3, O9 |
 
-**Die Konsequenz ist unbequem und steht trotzdem hier:** jede Zahl aus Schritt 5
-ist mit einer praktisch abgeschalteten Quelle entstanden — `[SATURATED]`,
-`spread`, `LOSES TO`, `Qsrc_scale`, `phys_scale`. Sie sind in der Stand-Tabelle
-als ungültig markiert. Was §9.3 beschreibt (der weglaufende Rollout), ist damit
-nicht widerlegt, aber auch nicht bestätigt: es wurde an einer anderen PDE
-gemessen als der, die jetzt im Code steht. Schritt 4 und 5b entscheiden das neu,
-und beide kosten zusammen unter einer halben Stunde.
+## Offene Punkte, sortiert
 
-Die Bündel aus Schritt 3 sind unberührt — der Fehler saß im Laden, nicht im
-Bauen. Neu zu bauen ist nichts.
+| | | wer |
+|---|---|---|
+| **O9** | dämpft der Physik-Term nur, statt Dynamik zu lernen? | **Schritt 6 beantwortet es** |
+| **O8** | δ = 1.0 s gegen Δt_max 0.24 s. Seit O7 frei, erste Sweep-Achse | nach Schritt 6 |
+| **O5** | tote Kanäle. OP19 fährt `soc_start` 77 % gegen trainierte 10 %, unsichtbar fürs Netz | zu entscheiden |
+| **O6** | kein Gewicht auf Basis von Messungen gesetzt — weiterhin bewusst | nach Schritt 6 |
+| **O4** | OP12-Profil endet bei 1440 s, Trajektorie 1605 s | **Q1 an den lokalen Bot** |
+| **O3** | OP15 `cell_current` nie markiert | **Q2 an den lokalen Bot** |
 
-**Offene Befunde** — §9:
-1. §9.3 Der Rollout laeuft weg (`[SATURATED]` in beiden Epochen). **Neu zu
-   messen**, siehe oben: der Lauf hatte keine Quelle.
-2. §9.4 OP19s Latte ist mit persistence = 1.375 C fast unschlagbar.
-3. §9a.1 OP15: `cell_current` fehlt im Buendel, obwohl das Plansheet CC-CV nennt.
-4. §9a.2 OP12 (**Training**) und OP15: das `fluid_inlet_temp`-Profil endet bei
-   1440 s, die Trajektorie laeuft bis 1604 s; die letzten ~10 % sind flach.
+**Erledigt in dieser Sitzung:** O1, O2, O7 — und Schritt 4, 5, 5b abgehakt.
 
-**Ausgeführt am 01.09.:** `pytest` (123 grün, 1 skipped), `selftest.py`
-(all checks passed), `op_registry.py`, der Importcheck und ein
-Ende-zu-Ende-`train.py`-Lauf gegen ein synthetisches Bündel — alles auf CPU,
-mit CPU-torch aus PyPI.
+## Was danach gebaut wird
 
-**Nicht ausgeführt:** alles auf echten Daten. `data_cache/` und
-`material_properties/` liegen nur auf der Arbeitsmaschine. Der 121er ist deshalb
-zwar bewiesen (die Einheit steht im Bündelvertrag, die Formel im README des
-Basisprojekts, und der Faktor stimmt mit den 147 überein), aber die neuen
-`Qsrc_scale`/`phys_scale` sind **Erwartungen**, keine Messungen, bis Schritt 4
-gelaufen ist.
+Die Bedingung aus §10 („einmal 5b oder 6 auswerten") ist erfüllt. Nach Schritt 6
+kommt `sweep.py`, die Seed-Schleife, ~80 Zeilen. Vorher nicht: ein Seed und drei
+Epochen tragen keine Rangfolge zwischen Konfigurationen, und genau deshalb ist in
+dieser Sitzung **kein Gewicht, kein Default und keine Loss-Balance** geändert
+worden. Der 121er war ein Einheitenfehler mit einer eindeutigen richtigen
+Antwort — das ist die einzige Sorte Änderung, die ohne Messung zulässig war.
+
+## Was der Code in dieser Sitzung gelernt hat
+
+* `q_dot = jr1_w / V_JR1`, und `q_dot = 0` außerhalb JR1 (von der
+  Simulationsseite bestätigt, im Code gegen ein „Zurückreparieren" am
+  Basis-README abgesichert).
+* Drei neue Tests: die Umrechnung selbst, die Empfindlichkeit des
+  Energieberichts, tote Kanäle im Coverage-Report.
+* `coverage_report` meldet jetzt tote Skalar-Kanäle — hat auf echten Daten
+  sofort OP19s `soc_start` gefunden.
+
+**Ausgeführt am 01.09.:** `pytest` 123 passed / 1 skipped · `selftest.py` all
+checks passed · `op_registry.py` · Importcheck · Schritt 4 und 5b auf echten
+Daten auf der Arbeitsmaschine.
