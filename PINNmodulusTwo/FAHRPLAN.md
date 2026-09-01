@@ -6,6 +6,9 @@
 > Stand-Tabelle in Teil III. Der Kern in einer Zeile: **`spread` steigt auf
 > 0.968 und beide val-OPs schlagen die trivialen Vorhersager um 42 % bzw. 54 %.**
 >
+> **Wie gut das Ergebnis wirklich ist — was in-sample zählt, was nicht, und
+> warum der Volumenstrom die eigentliche Schwierigkeitsachse ist: §11.5.**
+>
 > Damit ist die Bedingung aus §10 erfüllt und die nächste Sache ist **kein Lauf,
 > sondern Code**: ~80 Zeilen, die `train.fit()` über mehrere Seeds schleifen und
 > eine Zeile je (Konfiguration, Seed) nach `artifacts/sweep.csv` schreiben.
@@ -80,11 +83,23 @@ Schritt 6 hat dafür gerade das Lehrstück geliefert: nach drei Epochen stand
 
 ## Die Achsen danach, in dieser Reihenfolge
 
-| # | Achse | warum zuerst |
+| # | Achse | warum in dieser Reihenfolge |
 |---|---|---|
-| 1 | **δ (`--delta-phys`)**, O8 | sauber isoliert (speist im Hybrid-Modus nur `L_phys`), und der `[CFL WARN]` steht bei jedem Lauf: 1.0 s gegen Δt_max 0.24 s. Punkte: 1.0 (Default), 0.2 (= Datengitter) |
+| **0** | **`--w-phys 0 --w-bc 0` über 60 Epochen** — ein Lauf, kein Sweep | **Die Überschrift dieser Sitzung steht auf drei Epochen.** „Der Physik-Term trägt" kommt aus 5b, und derselbe 5b-Lauf sagte auch „der `spread` kollabiert" — das war falsch (§11.3). Bis das A/B bei 60 Epochen wiederholt ist, ist die Kernaussage ungeprüft. Zwei Stunden, und sie entscheidet, ob die Achsen 1–3 überhaupt die richtigen sind |
+| 1 | **δ (`--delta-phys`)**, O8 | sauber isoliert (speist im Hybrid-Modus nur `L_phys`), und der `[CFL WARN]` steht bei jedem Lauf: 1.0 s gegen Δt_max 0.24 s. Punkte: 1.0 (Default), 0.2 (= Datengitter). **Der einzige bekannt falsche Parameter** |
 | 2 | **`w_bc`**, O12 | der BC-Term ist auf `ratio 0.0178` gefallen. Tut er überhaupt etwas? Dazu `--batch-bc` auf 121 statt 128 |
 | 3 | **`w_phys`**, O6 | erst wenn 1 und 2 stehen — sonst misst man δ mit dem Gewicht |
+
+> **Achse 0 braucht `sweep.py` nicht** und kann sofort laufen:
+>
+> ```bash
+> python3 PINNmodulusTwo/train.py --epochs 60 --w-phys 0 --w-bc 0 2>&1 | tee 06b_ohne_physik.txt
+> ```
+>
+> Kommt dort eine val-MAE nahe 6.270 / 3.585 C heraus, war der Physik-Term nie
+> der Grund — und O8, O12 und der halbe Sweep zielen daneben. Kommt sie bei
+> ~11.6 / 8.5 C heraus wie in 5b, ist die Aussage bestätigt und der Rest steht
+> auf festem Grund.
 
 ## Die Auswahlregeln stehen fest
 
@@ -99,6 +114,7 @@ Was hier steht, ist offen. Alles Erledigte ist in Teil III.
 
 | # | offen | wer / wann |
 |---|---|---|
+| **O14** | **NEU 01.09. Volumenstrom ist die Schwierigkeitsachse, nicht der Tier.** V̇=0 im Mittel 5.374 C gegen 2.928 C mit Kühlung; alle drei No-Flow-OPs unter den letzten vier. Das Extrapolations-Tier (OP13/16) **schlägt** den Interpolations-OP OP06 — weil OP06 der einzige ausgehaltene OP ohne Kühlung ist. Nur 2 von 11 Trainings-OPs haben V̇=0, und beide sind Temperatur-Extremfälle: das Regime „keine Kühlung bei mittlerer Starttemperatur" wird nie trainiert. §11.5 | Envelope-Frage, mit O5 |
 | **O11** | **NEU 01.09. OP19 wird schlechter, je besser das Modell wird.** 5b: 10.334 C sind 88 % **schlechter** als die 5.507 C nach drei Epochen — während jeder andere OP sich verbessert hat. Erwartbar bei 16.7 σ Extrapolation, aber es heißt: die Simulations-MAE sagt über den Prüfstand nichts, sie sagt es sogar mit wachsender Überzeugung falsch. §11.4 | vor jedem Messvergleich klären |
 | **O12** | **NEU 01.09. Der BC-Term trägt fast nichts.** `ratio bc` fällt über den Lauf auf **0.0178** — knapp 2 % der Größe des Datenterms. Dazu die stehende Warnung: 121 BC-Punkte gegen `--batch-bc 128`. Ob `w_bc` überhaupt etwas tut, ist eine Sweep-Frage | erste Sweep-Achsen |
 | **O13** | **NEU 01.09. Der Fehler sitzt am Ende der Trajektorie.** OP06: MAE 6.270 C, aber `late(held out)` = **13.248 C** — doppelt. Gleiches Muster auf OP03 (3.341 / 7.371) und OP16 (3.476 / 6.959). Der Rollout driftet spät, obwohl `spread` gesund ist | zu untersuchen |
@@ -1254,6 +1270,82 @@ Daten).
 
 ---
 
+### 11.5 Wie gut ist das Ergebnis wirklich? (01.09.)
+
+Die Frage ist berechtigt, weil „alle sechzehn OPs schlagen die trivialen
+Vorhersager" mehr klingt, als es ist — und weil einzelne Zahlen wie OP01 mit
+**1.000 C** besser klingen, als sie belegen. Beides aufgedröselt.
+
+#### Was in-sample ist und was nicht
+
+Elf der sechzehn sind `T0-in-time`: **Trainings-OPs, auf ihrer eigenen Zeitachse
+bewertet.** OP01s 1.000 C und OP10s 1.373 C sagen, dass das Modell seine
+Trainingsdaten kann — nicht, dass es verallgemeinert. Als Beleg zählen die
+**fünf ausgehaltenen**:
+
+| OP | MAE | Tier | V̇ |
+|---|---|---|---|
+| OP16 | **3.476 C** | T3-extrap (6.42 σ über dem trainierten Fluss) | 90 l/min |
+| OP09 | **3.585 C** | T1/T2, val | 15 l/min |
+| OP13 | **4.097 C** | T3-extrap (`c_rate` 4 gegen trainierte 2–3) | 15 l/min |
+| OP15 | **4.809 C** | T3-extrap (ungesehener Profiltyp) | Profil |
+| OP06 | **6.270 C** | T1-interp, val | **0 l/min** |
+
+#### Der Befund darin: **Volumenstrom ist die Schwierigkeitsachse, nicht der Tier**
+
+| | Mittel-MAE | n |
+|---|---|---|
+| **V̇ = 0** (OP06, OP07, OP14) | **5.374 C** | 3 |
+| V̇ > 0 (alle übrigen) | **2.928 C** | 13 |
+
+Alle drei No-Flow-OPs liegen unter den letzten vier. Und das
+**Extrapolations-Tier schlägt den Interpolations-OP**: OP16 und OP13 sind besser
+als OP06, obwohl OP06 der einfache Fall sein sollte. Der Grund ist nicht der
+Tier, sondern dass OP06 **der einzige ausgehaltene OP ohne Kühlung** ist.
+
+Das ist eine Envelope-Aussage, keine Modellaussage: nur **2 von 11**
+Trainings-OPs haben V̇ = 0 (OP07, OP14), und beide sind Extremfälle (T0 = 10 °C
+bzw. 0 °C). Das Regime „keine Kühlung bei mittlerer Starttemperatur" kommt im
+Training schlicht nicht vor — OP06 ist genau das. Neu als **O14**.
+
+> Nebenbei erklärt das OP14s vermeintlich schlechte 5.656 C, über O10 hinaus:
+> kältester Start **und** kein Fluss, in einem Regime mit zwei Beispielen.
+
+#### Die absolute Größenordnung
+
+`T_sigma = 9.602 C`, der beheizte Bereich steigt über den Lauf um ~34 K. Ein
+ausgehaltener Fehler von 3.5–4.8 C ist damit rund ein Drittel bis die Hälfte der
+Datenstreuung, und er schlägt `persistence` um Faktor 2.5 bis 5.
+
+**Für ein Surrogat, das eine Simulation ersetzen soll, ist das noch nicht genug**
+— dort will man ~1 K. Als **erster untunierter Lauf** ist es viel: `w_phys`,
+`w_bc`, `delta_phys`, Breite und Tiefe stehen alle auf ihren `config.yaml`-
+Defaults, es ist nie ein Gewicht gesetzt worden (O6), und `delta_phys` ist
+**nachweislich 4.1x zu grob** (O8, `[CFL WARN]` bei jedem Lauf). Es gibt also
+Luft, die noch niemand angefasst hat, und mindestens eine davon ist bekannt
+falsch.
+
+#### Was die Zahl nicht hergeben kann
+
+* **Ein Seed.** Und die 5b-Erfahrung sitzt: derselbe Lauf, der „der Physik-Term
+  trägt" sagte, sagte auch „der `spread` kollabiert" — und das war falsch. Der
+  `--w-phys 0`-Vergleich ist **nie über 60 Epochen** gelaufen. Bis er es ist,
+  steht die Überschrift dieser Sitzung auf drei Epochen. Siehe die Achsen in
+  Teil I.
+* **O13:** der Fehler wächst zum Trajektorienende (OP06 6.270 C im Mittel,
+  13.248 C spät). Bei einem Ladezyklus ist das Ende der Teil, der zählt.
+* **O11:** der Messvergleich wird schlechter, nicht besser. §11.4.
+
+#### Unterm Strich
+
+Fünf ausgehaltene OPs, darunter drei im Extrapolations-Tier, schlagen beide
+trivialen Vorhersager deutlich — nach **einem** Lauf ohne jede Abstimmung, in
+einem Projekt, das bis zum 31.08. nie einen davon geschlagen hatte. Das ist ein
+gutes Ergebnis. Es ist der Punkt, an dem das Modell auf dem Platz steht, nicht
+der, an dem es gewinnt.
+
+---
+
 ### 11.4 OP19 wird schlechter, je besser das Modell wird (O11, 01.09.)
 
 | | 5b (3 Epochen) | Schritt 6 (60 Epochen) |
@@ -1529,9 +1621,15 @@ Was `train.py` dadurch selbst kann, ohne dass ein Benchmark existieren muss:
 
 ## Sitzungsende 01.09. — Lagebericht
 
-**Schritt 1 bis 6 sind durch. Das Modell schlägt auf allen sechzehn
-Simulations-OPs die trivialen Vorhersager.** Das ist die Zahl, auf die dieses
-Projekt seit Monaten gewartet hat.
+**Schritt 1 bis 6 sind durch. Fünf ausgehaltene OPs — darunter drei im
+Extrapolations-Tier — schlagen beide trivialen Vorhersager.** Das ist die Zahl,
+auf die dieses Projekt seit Monaten gewartet hat, und sie kam nach **einem** Lauf
+ohne jede Abstimmung.
+
+**Wie gut das wirklich ist, steht in §11.5** — inklusive der Unterscheidung
+in-sample gegen ausgehalten (elf der sechzehn OPs sind Trainings-OPs auf ihrer
+eigenen Zeitachse) und des Befundes, dass der **Volumenstrom** die
+Schwierigkeitsachse ist und nicht der Tier.
 
 ## Der Weg dahin, an einem Tag
 
@@ -1558,10 +1656,12 @@ drei wären Umbauten gegen ein Problem gewesen, das es nicht gibt.
 
 | # | | wer / wann |
 |---|---|---|
+| **O14** | Volumenstrom ist die Schwierigkeitsachse: V̇=0 im Mittel 5.374 C gegen 2.928 C. Nur 2 von 11 Trainings-OPs haben V̇=0, beide Temperatur-Extremfälle. §11.5 | Envelope-Frage |
 | **O11** | OP19 wird schlechter, je besser das Modell wird (5.507 → 10.334 C). Extrapolation, kein Fehler — aber der Messvergleich taugt bis zur Envelope-Erweiterung nicht als Maß. §11.4 | vor jedem Messvergleich |
 | **O12** | Der BC-Term ist auf `ratio 0.0178` gefallen. Tut `w_bc` überhaupt etwas? | Sweep-Achse 2 |
 | **O13** | Der Fehler sitzt am Ende der Trajektorie: OP06 MAE 6.270 C, `late` 13.248 C | zu untersuchen |
-| **O8** | δ = 1.0 s gegen Δt_max 0.24 s | **Sweep-Achse 1** |
+| **—** | **Achse 0: `--w-phys 0 --w-bc 0` über 60 Epochen.** Die Kernaussage dieser Sitzung steht auf drei Epochen, und derselbe Lauf lag beim `spread` daneben. Ein Lauf, braucht `sweep.py` nicht | **zuerst** |
+| **O8** | δ = 1.0 s gegen Δt_max 0.24 s — der einzige bekannt falsche Parameter | **Sweep-Achse 1** |
 | **O6** | kein Gewicht auf Basis von Messungen gesetzt | Sweep-Achse 3 |
 | **O5** | tote Kanäle — `soc_start` konstant, Rate-Kanäle tot | zu entscheiden |
 | **O10** | Warnung: OP14s 0 °C sind geplant, nicht kaputt | nichts tun |
