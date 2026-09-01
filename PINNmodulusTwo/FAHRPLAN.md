@@ -31,8 +31,9 @@ offen war — nicht neu abzuleiten.
 |---|---|---|
 | **O1** | **Es liegen Schritt-6-Ergebnisse bis Epoche 30 vor, die noch niemand ausgewertet hat.** `artifacts/metrics.txt` und `artifacts/history.csv` einschicken. **Achtung: auch dieser Lauf hatte die 121x zu kleine Quelle (O7).** Er sagt weiter etwas über den Rollout und die Baselines, aber nichts über `w_phys` oder den Physik-Term | du schickst, ich werte |
 | **O2** | **ERLEDIGT am 01.09.** — 5b gelaufen und grün, siehe Stand-Tabelle. ~~Schritt 5b ist nie gelaufen — und ist seit O7 **nicht mehr hinfällig zu machen**: 5b-2 (`--w-phys 0 --w-bc 0`) trennt jetzt zum ersten Mal zwei Läufe, die sich im Physik-Term wirklich unterscheiden. Vorher waren beide praktisch quellenfrei~~ | erledigt |
-| **O3** | **ERLEDIGT am 01.09.** Der Bericht sagt: *„upstream assembly flagged: fluid_inlet_temp, fluid_mass_flow"* — `cell_current` wurde **nie markiert**. Also nicht „Profildatei fehlte", sondern: das Blatt stimmt für OP15 nicht, oder OP15 wurde ohne dieses Profil exportiert. Das ist eine **Rückfrage an die Simulationsseite**, kein Codefix — und sie blockiert nichts, OP15 ist reiner Berichts-OP | Rückfrage, wie O4 |
-| **O4** | §9a.2 OP12 (**Training**): Profil endet bei 1440 s, Trajektorie bis 1604 s | Rückfrage an die Simulationsseite |
+| **O3** | **GESCHLOSSEN am 01.09.** Der Rohexport von OP15 enthält **keine** `CellCurrent(t).csv` — das Signal wurde nie exportiert. Das Plansheet stimmt für OP15 nicht (oder OP15 wurde bewusst ohne CC-CV simuliert). Eine Zeile fürs Plansheet, kein Codefix, blockiert nichts | erledigt |
+| **O4** | **ABGESTUFT am 01.09.** OP12s Profil hat 4 Stützpunkte bis 1440 s, Trajektorie bis 1605 s; die letzten 10 % werden flach gehalten — **das ist der Ist-Zustand und bleibt so**. OP12 hat die **beste** MAE aller Trainings-OPs (3.942 C), das Problem zeigt sich also nicht. Schmale Restfrage: was hat StarCCM+ nach 1440 s benutzt? Antwort „letzten Wert gehalten" erledigt es ersatzlos | Restfrage, blockiert nichts |
+| **O10** | **KEIN offener Punkt, sondern eine Warnung.** OP14 startet über alle Punkte bei 0 °C. Das sieht nach Füllwert aus, ist aber die geplante Anfangsbedingung (`op_registry.py:123`, T0 = 0 °C, „coldest start in the set"). **Nicht maskieren, nicht ersetzen, OP14 nicht entfernen** — es ist einer von nur zwei OPs mit V̇ = 0, und die binden die Energiebilanz | nichts tun |
 | **O5** | **Tote Eingangskanäle.** `soc_start` ist über alle OPs konstant 10 % (`DEAD -> forced to 0`), und die Rate-Kanäle von `c_rate` und `fluid_mass_flow` sind im Training tot — werden aber auf OP15/OP16/OP19 lebendig. Das Modell soll dort einen Kanal deuten, den es nie gesehen hat. **Am 01.09. sichtbar gemacht:** `coverage_report` übersprang tote Skalar-Kanäle bisher **komplett** — ausgerechnet den Fall, in dem der Umschlag ein einziger Punkt ist. Jetzt bekommt jeder tote Kanal, den ein Berichts-OP bewegt, eine eigene Zeile. Die **Entscheidung** (Kanal streichen? Envelope erweitern?) bleibt offen | zu entscheiden, siehe §10 |
 | **O6** | Nichts an **Gewichten** ist auf Basis der Messungen geändert worden — bewusst, siehe §10a | offen bis 5b/6 |
 | **O7** | **ERLEDIGT und auf ECHTEN DATEN bestätigt (01.09.).** `[ENERGY]` ist weg, Bilanz 0.9x auf den bindenden No-Flow-OPs. Die Umrechnung teilte `jr1_w` durch `V_JR1 * N_JR1_POINTS`; die 121 Gitterpunkte waren doppelt gezählt, jedes `Qsrc` war 121x zu klein. Behoben, mit Test. **Folge: `Qsrc_scale`, `phys_scale` und jede Zahl aus Schritt 5 sind ungültig — Schritt 4 und 5b müssen neu laufen.** §11.1 | erledigt |
@@ -41,35 +42,90 @@ offen war — nicht neu abzuleiten.
 
 ---
 
-# Fragen an den lokalen Bot (er sieht die Rohdaten, ich nicht)
+# Rohexport-Untersuchung Q1–Q3 — beantwortet am 01.09.
 
-Drei Stück. **Q1 und Q2 können O3 und O4 schließen**, die bisher als
-„Rückfrage an die Simulationsseite" geführt werden — ein Bot mit Zugriff auf den
-Rohexport kann sie womöglich direkt beantworten, ohne dass jemand wartet.
+Der lokale Bot hat in die Rohdaten geschaut. **Zwei Fragen sind geschlossen,
+eine war ein Fehlalarm — und dessen Empfehlung hätte Schaden angerichtet.**
 
-**Q1 — schließt O4.** In `OP12.npz` deckt das `fluid_inlet_temp`-Profil
-0.0…1440.0 s ab, die Trajektorie läuft aber 0.1…1605.3 s. Die letzten ~165 s
-(10 %) werden mit dem letzten Profilwert flach gehalten, und OP12 ist ein
-**Trainings**-OP. Frage: Steht im Rohexport von OP12 ein Profil, das bis 1605 s
-reicht — oder endet die Quelle wirklich bei 1440 s? Anders gefragt: ist die
-Flachhaltung die einzig mögliche Annahme, oder ist ein Stück Profil beim Export
-verlorengegangen? Dasselbe für OP15.
+## Q3 — KEIN Fehler. OP14 startet bei 0 °C, weil es so geplant ist
 
-**Q2 — schließt O3.** Das Plansheet nennt OP15 „CC mit Fluidtemperaturprofil und
-Volumenstromprofil **und CC-CV**". Im Bündel variiert `cell_current` nicht, und
-die Upstream-Assembly hat den Kanal **nie als Profil markiert** (sie markiert
-`fluid_inlet_temp` und `fluid_mass_flow`). Frage: Gibt es im Rohexport von OP15
-eine `cell_current`-Zeitreihe? Wenn ja, ist die Assembly schuld; wenn nein,
-stimmt das Plansheet für OP15 nicht.
+Befund war: OP14 startet über alle 363 Punkte bei ~0 °C und überschreitet erst
+nach 123 s die 5 °C. Diagnose des Bots: „Füllwert, verzerrt Normierung",
+Empfehlung: die ersten 124 s maskieren, die Initialwerte auf 10 °C setzen, oder
+OP14 aus dem Training werfen.
 
-**Q3 — offen, kleiner.** Die Trainings-Temperaturspanne beginnt bei exakt
-`-0.0 C` (`T_mu=33 C, T_sigma=9.602 C, train range -0.0 .. 55.9 C`). Bei
-`fluid_initial_temp` = 21.55 ± 10.34 °C und einem Ladevorgang ist ein exakter
-Nullwert verdächtig — das sieht nach Füllwert aus, nicht nach Messung. Frage:
-Kommt die 0.0 in einem konkreten OP und an einer konkreten Stelle im Feld vor
-(welcher OP, welche Punkte, welcher Zeitschritt), und ist sie physikalisch
-plausibel? Falls Füllwert: sie geht in `T_mu`/`T_sigma` ein und verzerrt jede
-Normierung.
+**Das Plansheet sagt etwas anderes** (`op_registry.py:123`):
+
+```python
+OPSpec("OP14", "CC", "CH", 2.0, 0.0, 0.0, 0.0, tier=TIER_IN,
+       note="coldest start in the set, no flow"),
+#                 ^C-Rate ^T0  ^T_fluid ^V̇
+```
+
+`T0 = 0 °C`, `T_fluid = 0 °C`, `V̇ = 0`. OP14 **ist** der Kaltstart des
+Datensatzes, die kalte Ecke des Envelopes. Die 0 °C sind die Anfangsbedingung,
+kein verlorener Offset.
+
+Drei Dinge bestätigen es:
+
+* Ein Füllwert wäre exakt `0.0` oder `NaN`. Gemessen ist `-0.0011 → -0.0018 →
+  +0.0156`: ein gelöstes Feld, das um null rauscht und dann steigt.
+* 5 K in 123 s sind 0.04 K/s — die adiabate Rate der Quelle liegt bei ~0.03 K/s.
+  Passt.
+* `T_sigma` ist deshalb nicht „um 8.5 % aufgebläht", sondern **richtig**: der
+  Trainingssatz spannt tatsächlich 0 °C bis 40 °C Starttemperatur.
+
+> **Keine der drei Empfehlungen ausführen.** Maskieren, Ersetzen oder Entfernen
+> würde einen legitimen Trainings-OP zerstören — und ausgerechnet einen der
+> **zwei** mit V̇ = 0, also genau die, die die Energiebilanz binden (§11.1).
+> Kein Cache-Neubau.
+
+**Was OP14s hohe MAE stattdessen erklärt:** die zwei No-Flow-OPs sind die zwei
+schwersten. OP14 10.866 C und OP07 9.293 C liegen auf Platz 10 und 9 von 11 —
+kältester Start, keine Kühlung, größter Hub. Das ist eine kohärente physikalische
+Geschichte, kein Datenfehler.
+
+## Q2 → **O3 geschlossen**: OP15 hat nie ein Stromprofil gehabt
+
+Im Rohexport von OP15 gibt es **keine** `CellCurrent(t).csv` (OP12 hat eine).
+`cell_current` wurde für OP15 nie exportiert — kein Assembly-Fehler, ein
+fehlendes Eingangssignal.
+
+Damit ist von den zwei Ursachen aus §9a.1 die zweite bestätigt: **das Plansheet
+stimmt für OP15 nicht**, oder OP15 wurde bewusst ohne CC-CV-Auslauf simuliert.
+Blockiert nichts — OP15 ist reiner Berichts-OP. Was er testet (ungesehener
+Volumenstrom-Profiltyp), testet er weiterhin; was das Blatt zusätzlich verspricht
+(CC-CV), ist nicht drin. **Eine Zeile fürs Plansheet, kein Codefix.**
+
+## Q1 → **O4 abgestuft**: nichts tun ist hier die richtige Antwort
+
+`OP12_FluidInletTemperature(t).csv` hat **4 Stützpunkte** (0, 480, 960, 1440 s);
+die Trajektorie läuft bis 1605.3 s. Die letzten 165 s (~10 %) werden mit dem
+letzten Wert (35 °C) flach gehalten.
+
+Drei Gründe, es so zu lassen:
+
+1. **Die vorgeschlagene „Option B: Profil mit letztem Wert extrapolieren" ist
+   der Ist-Zustand.** `np.interp` in `data.py` hält außerhalb des Bereichs
+   genau den Randwert. Es gibt nichts umzustellen.
+2. **Der Solver hat mit hoher Wahrscheinlichkeit dasselbe getan.** StarCCM+
+   braucht nach 1440 s eine Randbedingung, und die Voreinstellung für eine
+   Tabellen-RB ist das Halten des letzten Werts. Dann ist die Flachhaltung nicht
+   eine Annahme über die Simulation, sondern eine Kopie davon.
+3. **Empirisch tut es nicht weh: OP12 hat die BESTE MAE aller elf
+   Trainings-OPs** (3.942 C). §9a.2 sagte, man erkenne das Problem daran, dass
+   OP12 auffällig schlechter sei. Er ist auffällig besser.
+
+„Trajektorie bei 1440 s abschneiden" wäre der schlechteste Weg: 10 % echter
+Simulationsdaten wegwerfen, um eine Annahme zu vermeiden, die empirisch nicht
+schadet. **Kein Cache-Neubau.**
+
+Was als schmale Rückfrage bleibt: *welchen Einlasstemperaturverlauf hat StarCCM+
+nach 1440 s tatsächlich verwendet?* Lautet die Antwort „letzten Wert gehalten",
+ist O4 ersatzlos erledigt.
+
+**Nebenbefund, festhalten:** vier Stützpunkte sind eine grobe Rampe. „Profil"
+suggeriert mehr Struktur, als `fluid_inlet_temp` auf OP12 hat.
 
 ---
 
@@ -919,6 +975,11 @@ Trainings- und kein Auswahl-OP. Was verloren geht, ist die Aussagekraft **dieses
 einen** Berichts: OP15 sollte den ungesehenen Volumenstrom-Profiltyp testen, und
 das tut er weiterhin — nur eben ohne den CC-CV-Anteil, den das Blatt verspricht.
 
+> **GESCHLOSSEN 01.09.** Der Rohexport enthält keine `CellCurrent(t).csv` für
+> OP15 (OP12 hat eine). Von den zwei Ursachen unten ist es die zweite: **nie
+> markiert**, weil nie exportiert. Das Plansheet stimmt für OP15 nicht, oder
+> OP15 wurde bewusst ohne CC-CV simuliert. Eine Zeile fürs Plansheet.
+
 **Nächster Schritt:** `python3 PINNmodulusTwo/data.py` erneut laufen lassen. Seit
 dem 31.08. druckt der Bericht bei einem MISMATCH zusätzlich, was die
 Upstream-Assembly für dieses Bündel als Profil *markiert* hat, und das trennt die
@@ -947,8 +1008,18 @@ Zu klären ist, ob der Simulationslauf wirklich länger war als das Profil (dann
 ist das Bündel richtig und die Flachhaltung die einzig mögliche Annahme), oder
 ob der Profilexport abgeschnitten wurde (dann ist er nachzuliefern).
 
-**Bis das geklärt ist:** kein Grund, Schritt 5 aufzuhalten. Aber wenn OP12 später
-auffällig schlechter ist als die anderen Trainings-OPs, steht hier, warum.
+**Am 01.09. geklärt, und die Antwort ist „so lassen".** Der Rohexport hat vier
+Stützpunkte (0, 480, 960, 1440 s), das Profil endet dort wirklich. Die
+Flachhaltung ist damit die einzig mögliche Annahme — und mit hoher
+Wahrscheinlichkeit dieselbe, die StarCCM+ selbst getroffen hat, denn eine
+Tabellen-Randbedingung hält voreingestellt den letzten Wert.
+
+**Und der Test, der hier vorgeschlagen war, ist gelaufen:** oben stand, man
+erkenne das Problem daran, dass OP12 später auffällig schlechter sei als die
+anderen Trainings-OPs. In 5b-1 hat OP12 die **beste** MAE aller elf (3.942 C).
+Der Befund zeigt sich nicht. Abschneiden der Trajektorie bei 1440 s würde 10 %
+echter Simulationsdaten wegwerfen, um eine Annahme zu vermeiden, die messbar
+nicht schadet — das wäre der schlechtere Tausch.
 
 ---
 
@@ -1320,10 +1391,13 @@ stark gedämpft (O9).
 | **O8** | δ = 1.0 s gegen Δt_max 0.24 s. Seit O7 frei, erste Sweep-Achse | nach Schritt 6 |
 | **O5** | tote Kanäle. OP19 fährt `soc_start` 77 % gegen trainierte 10 %, unsichtbar fürs Netz | zu entscheiden |
 | **O6** | kein Gewicht auf Basis von Messungen gesetzt — weiterhin bewusst | nach Schritt 6 |
-| **O4** | OP12-Profil endet bei 1440 s, Trajektorie 1605 s | **Q1 an den lokalen Bot** |
-| **O3** | OP15 `cell_current` nie markiert | **Q2 an den lokalen Bot** |
+| **O4** | OP12-Profil endet bei 1440 s — **so lassen**, nur schmale Restfrage an die Simulationsseite | blockiert nichts |
+| **O10** | **Warnung, kein Punkt:** OP14s 0 °C sind geplant, nicht kaputt. Nicht „reparieren" | nichts tun |
 
-**Erledigt in dieser Sitzung:** O1, O2, O7 — und Schritt 4, 5, 5b abgehakt.
+**Erledigt in dieser Sitzung:** O1, O2, O3, O7 — Schritt 4, 5, 5b abgehakt —
+und die Rohexport-Fragen Q1/Q2/Q3 beantwortet.
+
+**Kein Cache-Neubau nötig.** Weder OP12 noch OP14 werden angefasst.
 
 ## Was danach gebaut wird
 
