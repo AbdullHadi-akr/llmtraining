@@ -30,12 +30,13 @@ offen war — nicht neu abzuleiten.
 | # | offen | wer |
 |---|---|---|
 | **O1** | **Es liegen Schritt-6-Ergebnisse bis Epoche 30 vor, die noch niemand ausgewertet hat.** `artifacts/metrics.txt` und `artifacts/history.csv` einschicken. **Achtung: auch dieser Lauf hatte die 121x zu kleine Quelle (O7).** Er sagt weiter etwas über den Rollout und die Baselines, aber nichts über `w_phys` oder den Physik-Term | du schickst, ich werte |
-| **O2** | Schritt 5b ist nie gelaufen — und ist seit O7 **nicht mehr hinfällig zu machen**: 5b-2 (`--w-phys 0 --w-bc 0`) trennt jetzt zum ersten Mal zwei Läufe, die sich im Physik-Term wirklich unterscheiden. Vorher waren beide praktisch quellenfrei | zu laufen, nach Schritt 4 |
-| **O3** | §9a.1 OP15: `cell_current` fehlt im Bündel. `python3 data.py` erneut laufen lassen — der Bericht sagt seit 31.08., welche der zwei Ursachen es ist | du, 2 min |
+| **O2** | **ERLEDIGT am 01.09.** — 5b gelaufen und grün, siehe Stand-Tabelle. ~~Schritt 5b ist nie gelaufen — und ist seit O7 **nicht mehr hinfällig zu machen**: 5b-2 (`--w-phys 0 --w-bc 0`) trennt jetzt zum ersten Mal zwei Läufe, die sich im Physik-Term wirklich unterscheiden. Vorher waren beide praktisch quellenfrei~~ | erledigt |
+| **O3** | **ERLEDIGT am 01.09.** Der Bericht sagt: *„upstream assembly flagged: fluid_inlet_temp, fluid_mass_flow"* — `cell_current` wurde **nie markiert**. Also nicht „Profildatei fehlte", sondern: das Blatt stimmt für OP15 nicht, oder OP15 wurde ohne dieses Profil exportiert. Das ist eine **Rückfrage an die Simulationsseite**, kein Codefix — und sie blockiert nichts, OP15 ist reiner Berichts-OP | Rückfrage, wie O4 |
 | **O4** | §9a.2 OP12 (**Training**): Profil endet bei 1440 s, Trajektorie bis 1604 s | Rückfrage an die Simulationsseite |
 | **O5** | **Tote Eingangskanäle.** `soc_start` ist über alle OPs konstant 10 % (`DEAD -> forced to 0`), und die Rate-Kanäle von `c_rate` und `fluid_mass_flow` sind im Training tot — werden aber auf OP15/OP16/OP19 lebendig. Das Modell soll dort einen Kanal deuten, den es nie gesehen hat. **Am 01.09. sichtbar gemacht:** `coverage_report` übersprang tote Skalar-Kanäle bisher **komplett** — ausgerechnet den Fall, in dem der Umschlag ein einziger Punkt ist. Jetzt bekommt jeder tote Kanal, den ein Berichts-OP bewegt, eine eigene Zeile. Die **Entscheidung** (Kanal streichen? Envelope erweitern?) bleibt offen | zu entscheiden, siehe §10 |
 | **O6** | Nichts an **Gewichten** ist auf Basis der Messungen geändert worden — bewusst, siehe §10a | offen bis 5b/6 |
-| **O7** | **ERLEDIGT am 01.09. — es war ein Codefehler, keine Rückfrage.** Die Umrechnung teilte `jr1_w` durch `V_JR1 * N_JR1_POINTS`; die 121 Gitterpunkte waren doppelt gezählt, jedes `Qsrc` war 121x zu klein. Behoben, mit Test. **Folge: `Qsrc_scale`, `phys_scale` und jede Zahl aus Schritt 5 sind ungültig — Schritt 4 und 5b müssen neu laufen.** §11.1 | erledigt |
+| **O7** | **ERLEDIGT und auf ECHTEN DATEN bestätigt (01.09.).** `[ENERGY]` ist weg, Bilanz 0.9x auf den bindenden No-Flow-OPs. Die Umrechnung teilte `jr1_w` durch `V_JR1 * N_JR1_POINTS`; die 121 Gitterpunkte waren doppelt gezählt, jedes `Qsrc` war 121x zu klein. Behoben, mit Test. **Folge: `Qsrc_scale`, `phys_scale` und jede Zahl aus Schritt 5 sind ungültig — Schritt 4 und 5b müssen neu laufen.** §11.1 | erledigt |
+| **O9** | **NEU 01.09.** Mit Physik-Term ist `spread s/t` = 0.339/0.201, ohne = 2.15/1.03. Der Physik-Term dämpft den Rollout an der gesunden 1 vorbei ins Überdämpfte — trotzdem ist seine MAE besser. Was von beidem zählt, entscheidet sich erst über mehr Epochen und mehrere Seeds | erste Sweep-Frage |
 | **O8** | Der BDF-Stencil in `L_phys` nutzt δ = 1.0 s gegen eine Diffusions-Zeitskala von ~0.24 s. Ein Knopf (`--delta-phys`) und mit `[CFL WARN]` versehen. **Seit O7 erledigt ist, ist diese Achse frei** — sie war ausdrücklich hinter 11.1 eingereiht. Default bleibt 1.0, bis gemessen ist. §11.2 | erste Sweep-Achse |
 
 ---
@@ -51,13 +52,13 @@ zutrifft: nicht weitermachen, sondern die genannte Datei schicken.
 - [x] **1** Code holen — 31.08.
 - [x] **2** Läuft der Code? (keine Daten nötig) — 31.08., grün
 - [x] **3** Cache bauen, alle sechzehn — 31.08. (Bündel unberührt, gilt weiter)
-- [~] **4** Stimmen die Daten? — 31.08. gelaufen, aber **die Quellzahlen sind
-  ungültig**: der 121er-Fehler aus O7 steckte in `q_dot`. **Neu laufen lassen**,
-  es kostet 2 min und liefert die Zahlen, auf denen alles Weitere steht
+- [x] **4** Stimmen die Daten? — **01.09. neu gelaufen, grün.** `[ENERGY]` weg,
+  `Qsrc_scale` 2.916 / `phys_scale` 4.582 wie vorhergesagt, alles andere
+  unverändert. O3 dabei entschieden
 - [~] **5** Die Latte — 31.08. gelaufen, **nicht aussagekraeftig** (§9.3) und
   zusätzlich mit dem falschen `Qsrc` gerechnet
-- [ ] **5b** Kurzlauf bei der ECHTEN Konfiguration ← **das ist jetzt der Schritt**
-- [ ] **6** Erster ernsthafter Lauf (GPU)
+- [x] **5b** Kurzlauf bei der ECHTEN Konfiguration — **01.09., GRÜN.** `[SATURATED]` in Epoche 3 weg, und beide val-OPs schlagen zum ersten Mal die trivialen Vorhersager — **nur mit Physik-Term**
+- [ ] **6** Erster ernsthafter Lauf (GPU) ← **freigegeben durch 5b**
 
 ## Stand
 
@@ -69,20 +70,28 @@ Wird beim Abhaken ausgefüllt. Leer = noch nicht gemessen.
 | 2 | `pytest` | **123 passed, 1 skipped** | 01.09. |
 | 2 | `op_registry.py` | 11 train / 2 val / 3 test, keine Warnung | 31.08. |
 | 3 | 16 OPs gebaut | ja (OP19 offen) | 31.08. |
-| 4 | `MISMATCH`-Zeilen | **1 — OP15, `cell_current` fehlt** | 31.08. |
-| 4 | `[ENERGY]`-Zeile | war **~147x**; muss nach dem Fix verschwinden bzw. nahe 1 liegen | neu |
+| 4 | `MISMATCH`-Zeilen | **1 — OP15, `cell_current` fehlt.** Ursache am 01.09. entschieden: **nie markiert** (siehe O3) | 31.08. / 01.09. |
+| 4 | `[ENERGY]`-Zeile | **weg.** „balance holds to within 0.9x on the binding OP" (war ~147x) | **01.09.** |
+| 4 | Bilanz je OP | **0.5 .. 0.9x, und sie folgt dem Volumenstrom**: V̇=0 (OP07/OP14) -> 0.9x, V̇=0.0013 -> 0.6-0.7x, V̇=0.0026 -> 0.5x | **01.09.** |
+| 4 | `q_dot` (physikalisch) | mu=**6.578e4** W/m^3, Bereich -5.238e4 .. 1.534e5 | **01.09.** |
 | 4 | `bc_pairs` > 0 | **242** — gemessen, kein Fallback | 31.08. |
 | 4 | **`A` je Lag** | **90.8 / 22.7** (bei dt = 4 s) | 31.08. |
 | 4 | `dTdt_scale` | **3.534** | 31.08. |
 | 4 | `T_sigma` / `T_span_ref` | 9.616 C / 1604 s | 31.08. |
-| 4 | `phys_scale` / `Qsrc_scale` | ~~3.535 / 0.0241~~ **ungültig (O7: `Qsrc` war 121x zu klein)**. Erwartung nach dem Fix: `Qsrc_scale` ≈ 2.9, `phys_scale` ≈ 4.6 — **zu messen, nicht zu glauben** | neu |
+| 4 | `phys_scale` / `Qsrc_scale` | **4.582 / 2.916** — gemessen. Vorhergesagt waren 4.582 / 2.916 (= 0.0241 x 121), auf vier Stellen getroffen. Alt: 3.535 / 0.0241 | **01.09.** |
 | 5 | OP06 | `LOSES TO` (12.96 vs 10.82 C) — **nicht aussagekraeftig, §9.3** | 31.08. |
 | 5 | OP09 | `LOSES TO` (8.71 vs 7.78 C) — dito | 31.08. |
 | 5 | `[SATURATED]` | **ja, beide Epochen: 99 % / 94 % einer Trajektorie** | 31.08. |
 | 5 | `spread s/t` | **4.9 / 4.2** — Rollout streut 5x so weit wie die Labels | 31.08. |
 | — | alle Schritt-5-Zahlen | **mit `Qsrc` 121x zu klein gerechnet.** Der Physik-Term war praktisch abgeschaltet; was §9.3 zeigt, ist ein Rollout ohne Quelle | 01.09. |
-| 5b | `[SATURATED]` bei subsample 2 | | |
-| 5b | `A` bei subsample 2 | | |
+| 5b | `[SATURATED]` bei subsample 2 | **verschwindet.** Ep1 OP05 7364/7368 (99.9 %), Ep2 OP04 6370/7225 (88 %), **Ep3 keine** | **01.09.** |
+| 5b | `A` bei subsample 2 | **90.5 / 22.6** — praktisch identisch zu den 90.8/22.7 bei dt = 4 s. Die Warnung „A hängt am subsample" war für diesen Datensatz gegenstandslos | **01.09.** |
+| 5b | `spread s/t` | **9.02/6.04 → 0.339/0.201** (mit Physik). Vom Explodieren ins Überdämpfte, an 1 vorbei | **01.09.** |
+| 5b-1 | **val OP06** | **MAE 10.540 C — beats** (persistence 16.679, train-mean 10.801) | **01.09.** |
+| 5b-1 | **val OP09** | **MAE 7.494 C — beats** (persistence 18.549, train-mean 7.762) | **01.09.** |
+| 5b-2 | val OP06 / OP09 (ohne Physik) | **11.591 / 8.504 C — LOSES TO** auf beiden | **01.09.** |
+| 5b-1 | test OP13 / OP15 / OP16 | 8.686 / 7.239 / 4.204 C — alle drei **beats** | **01.09.** |
+| 5b-1 | OP19 (Messvergleich) | 5.507 C — **LOSES TO** (persistence 1.376), wie §9.4 vorhergesagt | **01.09.** |
 | 6 | `[SATURATED]` letzte Epoche | | |
 | 6 | MAE OP06 / OP09 | | |
 | 6 | MAE OP13 / OP15 / OP16 | | |
@@ -166,13 +175,14 @@ und sonst nichts — ein Messvergleich darf einen Trainingslauf nie blockieren.
 
 ---
 
-### - [~] Schritt 4 — Stimmen die Daten? (2 min) ← **noch einmal laufen lassen**
+### - [x] Schritt 4 — Stimmen die Daten? (2 min) ← **01.09. grün**
 
-> **Warum noch einmal:** der 121er-Fehler aus §11.1 saß in `q_dot`, also in
-> jeder Zahl, die aus der Quelle folgt — `Qsrc_scale`, `phys_scale`, die
-> `[ENERGY]`-Zeile. `dTdt_scale`, `A`, `bc_scale` und die MISMATCH-Zeilen sind
-> unberührt und sollten sich **nicht** bewegen; wenn doch, ist das der Befund.
-> Ein Lauf, zwei Minuten, und er erledigt O3 gleich mit.
+> **Am 01.09. neu gelaufen und grün.** Der 121er-Fehler aus §11.1 saß in
+> `q_dot`, also in jeder Zahl, die aus der Quelle folgt. Gemessen: `Qsrc_scale`
+> 0.0241 → **2.916**, `phys_scale` 3.535 → **4.582**, `[ENERGY]` **weg**
+> („balance holds to within 0.9x"), und `dTdt_scale`, `T_sigma`, `A`, `bc_pairs`
+> und die MISMATCH-Zeile exakt unverändert. Genau drei Zahlen haben sich bewegt,
+> um exakt 121. Die Tabelle mit Vorhersage gegen Messung steht in §11.1.
 
 ```bash
 python3 PINNmodulusTwo/data.py 2>&1 | tee 04_daten.txt
@@ -254,7 +264,36 @@ verschwendete Zeit. → `05_latte.txt` schicken, ich sage dir den Wert für
 
 ---
 
-### - [ ] Schritt 5b — Kurzlauf bei der ECHTEN Konfiguration (~15 min je Lauf)
+### - [x] Schritt 5b — 01.09. gelaufen, GRÜN → Schritt 6 ist frei
+
+> ## Das Ergebnis, auf das dieses Projekt seit Monaten wartet
+>
+> | | 5b-1 (mit Physik) | 5b-2 (`--w-phys 0 --w-bc 0`) |
+> |---|---|---|
+> | **val OP06** | **10.540 C — beats** | 11.591 C — LOSES TO |
+> | **val OP09** | **7.494 C — beats** | 8.504 C — LOSES TO |
+> | `[SATURATED]` Ep3 | **weg** | weg |
+> | `spread s/t` Ep3 | 0.339 / 0.201 | 2.15 / 1.03 |
+>
+> Zwei Aussagen, und die zweite ist die größere:
+>
+> 1. **`[SATURATED]` verschwindet.** Ep1 OP05 99.9 %, Ep2 OP04 88 %, Ep3 keine
+>    Zeile. Der weglaufende Rollout aus §9.3 war dt, genau wie vermutet. Nach der
+>    Entscheidungstabelle unten heißt das: **Schritt 6 starten.**
+> 2. **Der Physik-Term trägt.** Ohne ihn verlieren beide val-OPs gegen die
+>    trivialen Vorhersager, mit ihm schlagen sie beide. Das ist das erste Mal
+>    überhaupt, und es ist erst seit dem 121er-Fix messbar — vorher waren beide
+>    Läufe praktisch quellenfrei (§11.1).
+>
+> **Was diese Zahlen NICHT hergeben** (§10, unverändert gültig): ein Seed. Die
+> MAE-Differenz 10.54 gegen 11.59 ist ohne Seed-Streuung daneben nicht lesbar,
+> und der Vorsprung vor `train-mean` ist mit 2–4 % dünn (gegen `persistence` ist
+> er komfortabel). 5b-2 schaltet außerdem `w_phys` **und** `w_bc` zusammen ab,
+> trennt die beiden also nicht. Drei Epochen. Für eine Rangfolge zwischen
+> Konfigurationen reicht das nicht — dafür wird jetzt die Seed-Schleife gebaut.
+
+**Der ursprüngliche Plan, zur Nachvollziehbarkeit:**
+
 
 **Der Schritt, der entscheidet, ob Schritt 6 seine Stunden wert ist.**
 
@@ -369,6 +408,7 @@ Benchmark.
 |---|---|
 | **Quelle war 121x zu klein** | `data._read_raw` teilte `jr1_w` durch `V_JR1 * N_JR1_POINTS`. Die 121 JR1-Gitterpunkte waren doppelt gezählt. Jetzt `jr1_w / V_JR1`. §11.1 |
 | **Zwei Tests dazu** | die Umrechnung selbst (`q_dot * V_JR1 == jr1_w`, exakt) und die Empfindlichkeit des Energieberichts. Zu beidem gab es vorher keinen Test — deshalb konnte ein Faktor 121 still sein |
+| **`q_dot = 0` außerhalb JR1 bestätigt** | von der Simulationsseite, 01.09. Zelle und Gehäuse bekommen nichts. Damit ist die Bilanz geschlossen: `jr1_w` gleichmäßig über `V_JR1`, sonst nirgends — genau `jr1_w` geht ins Gebiet. Im Code festgehalten, samt Warnung, es **nicht** am Basis-README auszurichten (das sagt „JR1 + CC" und ist für diesen Datensatz falsch) |
 | **`coverage_report` meldet tote Kanäle** | er übersprang sie. Ein Kanal ohne Trainings-Varianz ist der Fall, in dem ein abweichender Wert am wenigsten interpolierbar und zugleich unsichtbar ist (`_normalise_config` zwingt ihn auf 0). O5 |
 
 **Was das für die Zahlen vom 31.08. heißt:** `Qsrc_scale`, `phys_scale` und
@@ -700,7 +740,25 @@ Nach dem Aufräumen: **10 Python-Dateien, 4 Dokumente.**
 
 ## 9. Offene Befunde (31.08.)
 
-### 9.3 Schritt 5 hat die Frage NICHT beantwortet — und warum
+### 9.3 Schritt 5 hat die Frage nicht beantwortet — 5b hat es getan (01.09.)
+
+> **Beantwortet.** Der weglaufende Rollout war **dt**. Bei subsample 2 ist
+> `[SATURATED]` in Epoche 3 weg (Ep1 99.9 % auf OP05, Ep2 88 % auf OP04, Ep3
+> nichts). Grund (a) und (b) unten fallen bei dt = 0.2 s weg, wie erwartet;
+> Grund (c) — der eigentliche Befund — löst sich mit ihnen auf.
+>
+> Zwei Nachträge, beide gemessen:
+>
+> * **`A` hängt hier NICHT nennenswert am subsample.** Bei dt = 0.2 s: 90.5/22.6
+>   gegen 90.8/22.7 bei dt = 4 s. Die Warnung in Schritt 4 („die aus Schritt 4 ist
+>   die Größenordnung, nicht der Wert") war für diesen Datensatz gegenstandslos.
+> * **Der `spread` schießt jetzt über das andere Ziel hinaus:** 9.02/6.04 in
+>   Epoche 1, 0.339/0.201 in Epoche 3. Er ist nicht bei 1 angekommen, sondern
+>   daran vorbei ins Überdämpfte. Ohne Physik-Term bleibt er bei 2.15/1.03, also
+>   näher an 1. Das ist eine offene Spannung: auf MAE gewinnt der Physik-Lauf,
+>   auf `spread` der andere. Neuer Punkt **O9**.
+
+Der Lauf sagt auf beiden val-OPs `LOSES TO`. **Diese Zahl zaehlt nicht**, aus
 
 Der Lauf sagt auf beiden val-OPs `LOSES TO`. **Diese Zahl zaehlt nicht**, aus
 drei Gruenden, und der dritte ist der eigentliche Befund.
@@ -859,6 +917,48 @@ eine uniforme volumetrische Quelle über `V_JR1` schon tut**. Die Einheit von
 Vorgängerprojekts (`docs/opbundle_contract.md`: `q_source … | W |`), und der
 README des Basis-PINN schreibt die richtige Formel sogar aus:
 `q̇(t) = heatSourceJr1(t) / V_JR1`.
+
+**Und das beheizte Gebiet ist keine Ausrede.** Am 01.09. von der
+Simulationsseite bestätigt: `q_dot = 0` in Zelle und Gehäuse, geheizt wird
+ausschließlich JR1. Die Bilanz ist damit **geschlossen** — `jr1_w` gleichmäßig
+über `V_JR1`, sonst nirgends, macht genau `jr1_w` im Gebiet. Kein ungezähltes
+Gebiet kann eine Abweichung aufnehmen, also ist jedes Verhältnis fern von 1 ein
+Befund und keine Modellierungslücke. (Das Basis-README behauptet „JR1 + CC" —
+für diesen Datensatz falsch; im Code steht jetzt eine Warnung davor.)
+
+### Auf echten Daten bestätigt, 01.09.
+
+Vorhergesagt war: genau drei Zahlen bewegen sich, und zwar um exakt 121.
+
+| | 31.08. | vorhergesagt | **gemessen 01.09.** |
+|---|---|---|---|
+| `Qsrc_scale` | 0.0241 | 2.916 | **2.916** |
+| `phys_scale` | 3.535 | 4.582 | **4.582** |
+| `[ENERGY]` | ~147x | weg | **weg** |
+| `dTdt_scale` | 3.534 | unverändert | **3.534** |
+| `T_sigma` / `T_span_ref` | 9.616 / 1604 | unverändert | **9.616 / 1604** |
+| `A` je Lag | 90.8 / 22.7 | unverändert | **90.8 / 22.7** |
+| `bc_pairs` | 242 | unverändert | **242** |
+| `MISMATCH` | 1 (OP15) | unverändert | **1 (OP15)** |
+
+**Und ein Beleg, den niemand eingebaut hat.** Die Bilanz je OP folgt dem
+Volumenstrom, monoton:
+
+| V̇ | OPs | Verhältnis |
+|---|---|---|
+| 0 | OP07, OP14 | **0.9x** |
+| 0.0013 | OP01–03, OP08, OP10–12 | 0.5–0.7x |
+| 0.0026 | OP04, OP05 | 0.5x |
+
+Ohne Kühlung bleiben 90 % der Quelle im Jelly Roll, der Rest leitet ins Gehäuse;
+mit Kühlung wird mehr abgeführt, und mit doppeltem Volumenstrom noch mehr. Das
+ist die Rangfolge, die eine Energiebilanz haben **muss**, und sie war vorher
+nicht da — bei 147x war jedes Verhältnis gleich falsch. Für dieses Verhalten
+wurde nichts angepasst; es fällt aus der korrigierten Konstante heraus.
+
+`q_dot` liegt jetzt bei mu = 6.58e4 W/m³ (Bereich -5.24e4 .. 1.53e5). Die
+negativen Werte sind kein Fehler: der entropische Anteil der Reaktionswärme ist
+in Teilen des SOC-Bereichs endotherm.
 
 **Die Zahl passt:** 147 gemessen gegen 121 aus der Formel. Der Rest ist genau
 das, was übrig bleiben muss — was tatsächlich über den Rand abfließt. Nach dem
@@ -1065,7 +1165,25 @@ sagt, was sich an diesem Tag geändert hat, §10 beantwortet, wann aus diesem
 Fahrplan ein Benchmark wird, und §10a, was aus den Messungen bewusst NICHT in den
 Code gewandert ist.
 
-**Stand: der Physik-Term war 121x zu klein, und das ist behoben.** Der
+**Stand: 5b ist grün, Schritt 6 ist frei — und der Physik-Term trägt.**
+
+Zwei Ergebnisse am 01.09., beide auf echten Daten:
+
+1. **Der 121er ist behoben und bestätigt.** `[ENERGY]` weg, Bilanz 0.9x auf den
+   No-Flow-OPs, und sie folgt monoton dem Volumenstrom. §11.1.
+2. **Beide val-OPs schlagen erstmals die trivialen Vorhersager** — OP06 10.540 C
+   gegen persistence 16.679 / train-mean 10.801, OP09 7.494 gegen 18.549 /
+   7.762. **Ohne** Physik-Term verlieren beide. Das ist der erste Beleg, dass der
+   Physik-Term in diesem Projekt etwas beiträgt, und er war vor dem Fix nicht zu
+   haben.
+
+Damit ist auch die Bedingung aus §10 erfüllt („einmal Schritt 5b oder 6
+auswerten"): ab hier wird die Seed-Schleife gebaut, denn ein Seed und drei
+Epochen tragen keine Rangfolge zwischen Konfigurationen.
+
+**Der alte Stand, zur Nachvollziehbarkeit:** Schritt 4 lief am 01.09. neu: `[ENERGY]` weg, Bilanz 0.9x auf
+den No-Flow-OPs, und die Bilanz folgt jetzt monoton dem Volumenstrom — ein
+Beleg, für den nichts angepasst wurde. Der nächste Schritt ist **5b**. Der
 Energiebericht vom 31.08. hat beim ersten Lauf getan, wofür er gebaut wurde: die
 ~147x, die er meldete, waren eine doppelt gezählte Division durch die 121
 JR1-Gitterpunkte in `data._read_raw`. §11.1 hat die Rechnung, `data.py` den Fix,
