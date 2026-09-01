@@ -1,26 +1,34 @@
 # Fahrplan — OP01–OP16 trainiert, OP19 als Messvergleich
 
-> ## ▶ Das Nächste: `sweep.py` — die Seed-Schleife
+> ## ▶ Das Nächste: trägt der Physik-Term überhaupt?
 >
-> **Schritt 6 ist am 01.09. gelaufen und grün.** Alle fünf Signale, siehe die
-> Stand-Tabelle in Teil III. Der Kern in einer Zeile: **`spread` steigt auf
-> 0.968 und beide val-OPs schlagen die trivialen Vorhersager um 42 % bzw. 54 %.**
+> ```bash
+> cd /mnt/c/Users/M0245635/batterysurrogatemodell
+> git checkout main && git pull
+> source modulus_env/bin/activate
 >
-> **Wie gut das Ergebnis wirklich ist — was in-sample zählt, was nicht, und
-> warum der Volumenstrom die eigentliche Schwierigkeitsachse ist: §11.5.**
+> python3 PINNmodulusTwo/train.py --epochs 60 --w-phys 0 --w-bc 0 2>&1 | tee 06b_ohne_physik.txt
+> ```
 >
-> Damit ist die Bedingung aus §10 erfüllt und die nächste Sache ist **kein Lauf,
-> sondern Code**: ~80 Zeilen, die `train.fit()` über mehrere Seeds schleifen und
-> eine Zeile je (Konfiguration, Seed) nach `artifacts/sweep.csv` schreiben.
+> ~2 h auf CPU. **Das ist der Vergleichslauf zu Schritt 6**, mit genau einer
+> Variablen: Physik- und BC-Term aus.
 >
-> **Warum das jetzt zuerst kommt:** ab hier werden Konfigurationen verglichen —
-> `--w-phys`, `--delta-phys` (O8), tote Kanäle (O5). Eine MAE-Differenz zwischen
-> zwei Läufen ist aber nicht lesbar, solange die Streuung über Seeds daneben
-> fehlt. Jede Zahl, die ohne sie entsteht, ist wieder die Sorte, wegen der die
-> acht Benchmark-Skripte gelöscht wurden.
+> **Warum das vor allem anderen kommt:** die Überschrift der letzten Sitzung
+> lautet „der Physik-Term trägt". Diese Aussage stammt aus **drei** Epochen
+> (Schritt 5b) — und **derselbe 5b-Lauf sagte auch, der `spread` kollabiere.
+> Das hat Schritt 6 widerlegt** (§11.3). Bei 60 Epochen ist nur der Lauf **mit**
+> Physik gemacht worden.
 >
-> Danach die erste Achse: **δ (`--delta-phys`)**, weil sie sauber isoliert ist
-> und der `[CFL WARN]` seit dem 31.08. bei jedem Lauf steht.
+> | Ergebnis von 06b | heißt | dann |
+> |---|---|---|
+> | val-MAE deutlich schlechter als 6.270 / 3.585 C (etwa 11 / 8 C wie in 5b) | **der Physik-Term trägt.** Bestätigt bei Konvergenz | weiter mit den Sweep-Achsen δ → `w_bc` → `w_phys` |
+> | val-MAE nahe 6.270 / 3.585 C | **er trägt nicht.** Die 5b-Differenz war Untertrainiertheit, wie schon beim `spread` | `w_phys` zurück auf 0 prüfen, Sweep-Achsen neu ordnen — O8 und O12 wären dann Nebensache |
+>
+> Zwei Stunden, die entscheiden, ob der halbe geplante Sweep überhaupt die
+> richtige Frage stellt. **Danach** `sweep.py` (Teil I).
+>
+> Wie gut Schritt 6 wirklich war — in-sample gegen ausgehalten, und warum der
+> Volumenstrom die eigentliche Schwierigkeitsachse ist: **§11.5**.
 ---
 
 **Diese Datei ist der Einstieg.** Alles andere ist Nachschlagewerk. Wenn du nur
@@ -110,7 +118,32 @@ Seeds → keine Rangfolge.
 
 ## Offene Punkte — nach Zuständigkeit
 
-Was hier steht, ist offen. Alles Erledigte ist in Teil III.
+> **Was „O5", „O11" usw. bedeuten:** **O** steht für *offener Punkt*. Sie werden
+> seit dem 31.08. fortlaufend durchnummeriert und **nie neu vergeben** — eine
+> Nummer gehört für immer zu ihrer Sache, damit ein Verweis in einem Commit oder
+> einer Nachricht nach Wochen noch stimmt. Offene stehen hier, geschlossene in
+> Teil III unter „Geschlossene Punkte".
+
+### Index: alle Punkte, O1 bis O14
+
+| # | worum es geht | Zustand |
+|---|---|---|
+| O1 | Schritt-6-Ergebnisse bis Epoche 30 lagen unausgewertet | ✅ hinfällig (121er) |
+| O2 | Schritt 5b war nie gelaufen | ✅ gelaufen, grün |
+| O3 | OP15: `cell_current` fehlt im Bündel | ✅ nie exportiert |
+| O4 | OP12: Profil endet bei 1440 s, Trajektorie bis 1605 s | ✅ Solver hielt den Wert |
+| **O5** | **tote Eingangskanäle** (`soc_start`, Rate-Kanäle) | **offen** |
+| **O6** | **kein Gewicht auf Basis von Messungen gesetzt** | **offen** |
+| O7 | Energiebilanz ging um ~147x nicht auf | ✅ der 121er, behoben |
+| **O8** | **BDF-Stencil δ = 1.0 s gegen Δt_max 0.24 s** | **offen** |
+| O9 | dämpft der Physik-Term nur, statt Dynamik zu lernen? | ✅ **widerlegt** — `spread` → 0.968 |
+| **O10** | **OP14s 0 °C sind geplant — nicht „reparieren"** | **stehende Warnung** |
+| **O11** | **OP19 wird schlechter, je besser das Modell wird** | **offen** |
+| **O12** | **BC-Term trägt fast nichts** (`ratio` 0.0178) | **offen** |
+| **O13** | **Fehler wächst zum Trajektorienende** | **offen** |
+| **O14** | **Volumenstrom ist die Schwierigkeitsachse** | **offen** |
+
+Die offenen im Detail:
 
 | # | offen | wer / wann |
 |---|---|---|
@@ -568,6 +601,28 @@ Geld.
 # TEIL III — ERLEDIGT
 
 Archiv: abgehakte Schritte, gemessene Zahlen, geschlossene Befunde.
+
+## Wo die Ergebnisse liegen
+
+**Die Rohdateien liegen nur auf der Arbeitsmaschine** — `artifacts/` und die
+`*.txt`-Logs sind gitignored, im Repo steht keine davon.
+
+| Datei | was drin ist |
+|---|---|
+| `06_lauf.txt` | das volle Log von Schritt 6 (im Repo-Wurzelverzeichnis, dorthin `tee`t das Kommando) |
+| `PINNmodulusTwo/artifacts/metrics.txt` | die MAE-Tabelle je OP mit Baselines und Coverage |
+| `PINNmodulusTwo/artifacts/history.csv` | **eine Zeile je Epoche** — `L_data`, die balancierten Terme, `spread_space`, `spread_time`, `delta`, die Betas. Daraus kommt die `spread`-Kurve in §11.3 |
+| `PINNmodulusTwo/artifacts/model.pt` | Checkpoint, alle 10 Epochen geschrieben |
+| `PINNmodulusTwo/artifacts/*.png` | die Plots |
+
+**Im Fahrplan** stehen die Zahlen an vier Stellen, und die sind versioniert:
+
+| wo | was |
+|---|---|
+| **Stand-Tabelle** (gleich unten) | alle gemessenen Werte je Schritt, mit Datum |
+| **§11.3** | die `spread`-Kurve über 60 Epochen — O9 widerlegt |
+| **§11.4** | OP19 wird schlechter — O11 |
+| **§11.5** | die Einordnung: in-sample gegen ausgehalten, V̇ als Schwierigkeitsachse — O14 |
 
 ## Geschlossene Punkte
 
@@ -1667,6 +1722,24 @@ drei wären Umbauten gegen ein Problem gewesen, das es nicht gibt.
 | **O10** | Warnung: OP14s 0 °C sind geplant, nicht kaputt | nichts tun |
 
 **Geschlossen am 01.09.:** O1, O2, O3, O4, O7, **O9**. Schritte 4, 5, 5b, 6.
+
+## Die offene Kernfrage, im Klartext
+
+**Trägt der Physik-Term, senkt er also die MAE — oder nicht?**
+
+Gemessen ist bisher nur dies:
+
+| | mit Physik | ohne (`--w-phys 0 --w-bc 0`) |
+|---|---|---|
+| **3 Epochen** (5b) | 10.540 / 7.494 C | 11.591 / 8.504 C |
+| **60 Epochen** (Schritt 6) | **6.270 / 3.585 C** | **nie gelaufen** |
+
+Bei drei Epochen war die Physik ~10 % besser. Aber derselbe Lauf sagte auch, der
+`spread` kollabiere — und Schritt 6 hat das widerlegt (§11.3). Eine Aussage aus
+diesem Lauf ist gefallen; die andere ist ungeprüft.
+
+**Die Antwort braucht genau einen Lauf**, und er steht ganz oben in dieser Datei.
+Bis er gelaufen ist, gilt: *bei drei Epochen ja, bei Konvergenz unbekannt.*
 
 ## Was der Code an diesem Tag gelernt hat
 
