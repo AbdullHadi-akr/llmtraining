@@ -1,15 +1,38 @@
 # Fahrplan — OP01–OP16 trainiert, OP19 als Messvergleich
 
+> ## ▶ Das Nächste: Schritt 6
+>
+> Schritt 1 bis 5b sind durch. **Es steht genau ein Kommando aus.**
+>
+> ```bash
+> cd /mnt/c/Users/M0245635/batterysurrogatemodell
+> git checkout main && git pull
+> source modulus_env/bin/activate
+>
+> python3 PINNmodulusTwo/train.py --epochs 60 2>&1 | tee 06_lauf.txt
+> ```
+>
+> CPU misst ~110 s/Epoche → ~2 h. Auf GPU deutlich weniger; `--device` fragt nach.
+>
+> **Danach schickst du drei Dateien:** `06_lauf.txt`, `artifacts/metrics.txt` und
+> — diesmal die wichtigste — `artifacts/history.csv`.
+>
+> Worauf du im Log schaust, steht direkt darunter. Signal 3 (`spread`) ist das
+> neue und das entscheidende.
+
+---
+
 **Diese Datei ist der Einstieg.** Alles andere ist Nachschlagewerk. Wenn du nur
 eine Datei liest, dann diese.
 
-Sie ist in drei Teile sortiert, und die Reihenfolge ist Absicht:
+Sie ist von oben nach unten sortiert: **was zu tun ist, steht oben; was erledigt
+ist, unten.**
 
 | Teil | was drinsteht |
 |---|---|
-| **I — ZU TUN** | das nächste Kommando, dann die offenen Punkte. Chronologisch. |
-| **II — NACHSCHLAGEWERK** | Datensatz, Split, Dateien, Regeln. Ändert sich selten. |
-| **III — ERLEDIGT** | abgehakte Schritte, gemessene Zahlen, geschlossene Befunde. Archiv. |
+| **I — ZU TUN** | das nächste Kommando, die Signale darin, die offenen Punkte, was danach gebaut wird |
+| **II — NACHSCHLAGEWERK** | Datensatz, Split, Dateien, Auswahl- und Abbruchregeln. Ändert sich selten |
+| **III — ERLEDIGT** | geschlossene Punkte, abgehakte Schritte, gemessene Zahlen, Befunde. Archiv |
 
 > ### Lebendes Dokument
 >
@@ -27,19 +50,9 @@ Sie ist in drei Teile sortiert, und die Reihenfolge ist Absicht:
 
 # TEIL I — ZU TUN
 
-# JETZT: genau eine Sache — Schritt 6
+# Schritt 6 — der erste ernsthafte Lauf
 
-Schritt 1 bis 5b sind durch. **Es steht nur noch ein Kommando aus:**
-
-```bash
-cd /mnt/c/Users/M0245635/batterysurrogatemodell
-source modulus_env/bin/activate
-git pull origin claude/fahrplan-issues-nx1nqp     # falls noch nicht geschehen
-
-python3 PINNmodulusTwo/train.py --epochs 60 2>&1 | tee 06_lauf.txt
-```
-
-CPU misst ~110 s/Epoche → ~2 h. Auf GPU deutlich weniger; `--device` fragt nach.
+Das Kommando steht oben. Hier steht, was dabei herauskommen muss.
 
 ## Worauf du in `06_lauf.txt` schaust — in dieser Reihenfolge
 
