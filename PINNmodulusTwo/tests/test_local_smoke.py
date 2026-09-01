@@ -14,6 +14,7 @@ has already substituted Modulus by the time this module is imported.
 
 from __future__ import annotations
 
+import copy
 import json
 import sys
 from pathlib import Path
@@ -513,15 +514,50 @@ def test_a_checkpoint_says_whether_the_run_finished(synthetic_cache, tmp_path):
 # physics sanity
 # --------------------------------------------------------------------------
 
+def test_q_dot_is_the_jr1_power_spread_over_the_jr1_volume(synthetic_cache):
+    """The units error that made every Qsrc 121x too small, pinned.
+
+    ``q_source[:, 0]`` is ``jr1_w`` and carries WATTS -- the bundle contract
+    says so. ``Qsrc`` multiplies ``q_dot`` by a plain 0/1 region mask, so
+    ``q_dot`` has to arrive as a VOLUMETRIC source in W/m^3, and the conversion
+    is one division by the volume the heat sits in.
+
+    Until 01.09.2026 the loader divided by ``V_JR1 * N_JR1_POINTS`` on a
+    "Gleichverteilung" reading inherited from the base project. Spreading the
+    total power over the 121 JR1 points is what a uniform source over V_JR1
+    already does, so the point count was counted twice and the source came out
+    121x short. Nothing failed: a uniform factor is divided straight back out by
+    the EMA balancer and ``L_phys`` lands at O(1) either way. The statement that
+    does see it is the one asserted here -- integrate the volumetric source over
+    the volume and the total power has to come back.
+    """
+    op_id = "OP01"
+    npz = np.load(Path(synthetic_cache) / f"{op_id}.npz", allow_pickle=True)
+    jr1_w = np.asarray(npz["q_source"], dtype=np.float64)[:, 0]
+
+    # subsample 1 with point sampling: no window averaging between the two, so
+    # the round trip is exact rather than approximate.
+    raw = data_mod._read_raw(op_id, 1, "point")
+
+    recovered = raw["q_dot"] * data_mod.V_JR1          # W/m^3 * m^3 -> W
+    assert recovered == pytest.approx(jr1_w, rel=1e-9), (
+        "q_dot * V_JR1 must give back the cached watts; an extra factor here is "
+        "a uniform error on every Qsrc and invisible everywhere else"
+    )
+    assert np.max(np.abs(recovered - jr1_w / data_mod.N_JR1_POINTS)) > 0, (
+        "the JR1 point count must not appear in the source conversion"
+    )
+
+
 def test_energy_balance_report_compares_the_source_against_the_rise(synthetic_cache):
     """The check that would catch a units error in the heat column.
 
-    ``Qsrc`` is built from ``q_dot`` with a 0/1 region mask and NO volume
-    division, i.e. ``q_dot`` is treated as W/m^3. The upstream column is named
-    ``jr1_w``. If it is a total power in watts instead, every ``Qsrc`` is wrong
-    by the JR1 volume -- a UNIFORM factor, which is exactly the kind that hides:
-    the EMA balancer divides it straight back out and ``L_phys`` still lands at
-    O(1). Only an energy argument sees it.
+    ``Qsrc`` is built from ``q_dot`` with a 0/1 region mask, i.e. ``q_dot`` is
+    treated as W/m^3, and the single division in ``_read_raw`` is what makes it
+    so. An error in that one number is a UNIFORM factor on every ``Qsrc`` --
+    exactly the kind that hides: the EMA balancer divides it straight back out
+    and ``L_phys`` still lands at O(1). Only an energy argument sees it, and on
+    31.08.2026 this report is what saw it (~147x on the real bundles).
     """
     bundle = data_mod.load_ops(op_ids=["OP01", "OP02"], subsample_time=40)
     lines = data_mod.energy_balance_report(bundle)
@@ -530,6 +566,71 @@ def test_energy_balance_report_compares_the_source_against_the_rise(synthetic_ca
     rows = [l for l in lines if "ratio=" in l]
     assert len(rows) == len(bundle.ops)
     assert all("<|dTn/dtn|>" in l and "<|Qsrc|>" in l for l in rows)
+
+
+def test_coverage_report_speaks_up_for_a_dead_channel(synthetic_cache):
+    """The channel that cannot be extrapolated to was the one nothing reported.
+
+    ``soc_start`` is constant across all sixteen OPs, so ``config_active`` marks
+    it dead and ``_normalise_config`` forces it to 0 no matter what a held-out
+    OP carries. That makes a differing value the WORST case, not a harmless one:
+    the network is handed an identical feature and never learns the difference
+    exists. ``coverage_report`` used to skip dead channels outright, so the only
+    channel where the envelope is a single point was also the only silent one.
+    """
+    # One OP is the smallest bundle in which a scalar channel has no variance
+    # at all -- which is what soc_start is across the real sixteen.
+    bundle = data_mod.load_ops(op_ids=["OP01"], subsample_time=40)
+    idx = data_mod.CONFIG_ORDER.index("soc_start")
+    assert not bundle.config_active[idx], "soc_start has to be dead here"
+
+    op = bundle.ops[0]
+    inside = data_mod.coverage_report(bundle, op)
+    assert not any("soc_start" in l for l in inside), (
+        "an OP that carries the trained value is not off the envelope"
+    )
+
+    moved = copy.deepcopy(op)
+    moved.cfg_phys = np.array(moved.cfg_phys, dtype=np.float64, copy=True)
+    moved.cfg_phys[:, idx] += 40.0
+    lines = data_mod.coverage_report(bundle, moved)
+
+    hits = [l for l in lines if "soc_start" in l]
+    assert hits, "a dead channel moving off its single trained value has to be reported"
+    assert "DEAD" in hits[0] and "invisible" in hits[0], (
+        "and the line has to say why it is worse than an ordinary overshoot"
+    )
+
+
+def test_energy_balance_report_flags_a_shrunken_source(synthetic_cache):
+    """And the detector has to fire, or the guard above guards nothing.
+
+    Reintroducing the old divisor by hand -- ``Qsrc`` scaled down by the JR1
+    point count -- has to move every ratio by exactly that factor and raise the
+    ``[ENERGY]`` verdict. This is the failure mode the 121 was, reproduced
+    without reverting the loader.
+
+    The absolute ratio is not asserted: the synthetic field is not built from
+    its own source (``make_synthetic_cache`` picks the rise and the watts
+    independently), so only real bundles can be expected to balance. What has to
+    hold on any bundle is the SENSITIVITY -- a source scaled by k moves every
+    ratio by exactly k, which is what makes the report able to see a uniform
+    factor at all.
+    """
+    bundle = data_mod.load_ops(op_ids=["OP01", "OP02"], subsample_time=40)
+
+    def ratios(b):
+        return [float(l.split("ratio=")[1].split("x")[0])
+                for l in data_mod.energy_balance_report(b) if "ratio=" in l]
+
+    before = ratios(bundle)
+    for op in bundle.ops:
+        op.Qsrc = op.Qsrc / data_mod.N_JR1_POINTS
+    after = ratios(bundle)
+
+    assert after == pytest.approx(
+        [r * data_mod.N_JR1_POINTS for r in before], rel=1e-3)
+    assert any("[ENERGY]" in l for l in data_mod.energy_balance_report(bundle))
 
 
 def test_cfl_check_looks_at_the_physics_stencil_not_only_the_data_step(capsys):

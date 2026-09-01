@@ -107,8 +107,27 @@ def _resolve_data_cache() -> Path:
 
 DATA_CACHE = _resolve_data_cache()
 
-# JR1 volume + Gleichverteilung factor (matches the base project).
+# JR1 volume in m^3 (single jelly roll; the base project uses the same value for
+# the cell-centre points).
+#
+# ``q_source[:, 0]`` is the upstream column ``jr1_w`` and carries WATTS -- the
+# bundle contract says so outright ("| `q_source` | ... | W |", see
+# legacy/battery_surrogate_agenticWorkflow/docs/opbundle_contract.md). A total
+# power becomes the volumetric source the heat equation wants by ONE division,
+# by the volume it is deposited in:
+#
+#     q_dot [W/m^3] = jr1_w [W] / V_JR1 [m^3]
+#
+# Until 01.09.2026 this divided by ``V_JR1 * N_JR1_POINTS`` as well, on a
+# "Gleichverteilung" reading inherited from the base project's
+# ``pinn/data/load_op01.py``. That reading double-counts: spreading the total
+# power equally over the 121 JR1 grid points is what a uniform volumetric source
+# over V_JR1 already does. Dividing by the point count on top made every Qsrc
+# 121x too small -- see energy_balance_report for how that was caught.
 V_JR1 = 4.394793e-04
+
+# Number of JR1 grid points. NOT part of the source conversion (see above); kept
+# because tools/make_synthetic_cache.py checks its grid against it.
 N_JR1_POINTS = 121
 
 # Order of the 7 config scalars in ``sim_config_scalar`` (unchanged).
@@ -400,7 +419,9 @@ def _read_raw(op_id: str, subsample_time: int, resample: str) -> dict:
 
     # Drivers: window-reduced (see _backward_window_mean).
     jr1_full = np.asarray(npz["q_source"], dtype=np.float64)[:, 0]
-    q_dot_full = jr1_full / (V_JR1 * N_JR1_POINTS)     # W/m^3, Gleichverteilung
+    # jr1_w is a total power in W; the residual wants W/m^3. One division, by
+    # the volume the heat is deposited in. See the note at V_JR1.
+    q_dot_full = jr1_full / V_JR1                      # W -> W/m^3
     q_dot = _resample_driver(q_dot_full, subsample_time, keep, resample)
 
     cfg_full, profiles, coverage = _config_timeseries_full(npz, t_full, config)
@@ -1028,19 +1049,22 @@ def energy_balance_report(bundle: NormBundle) -> List[str]:
 
         q_dot * q_mask * T_span_ref / (rho * Cp * T_sigma)
 
-    with ``q_mask`` a plain 0/1 indicator of the JR1 region. That treats
-    ``q_dot`` as a VOLUMETRIC source, W/m^3. If the cached column is instead a
-    total power in watts -- the upstream name is ``jr1_w`` -- then a division by
-    the JR1 volume is missing and every ``Qsrc`` is wrong by that volume,
-    uniformly. A uniform factor is invisible in the loss (the EMA balancer
+    with ``q_mask`` a plain 0/1 indicator of the JR1 region, so ``q_dot`` has to
+    reach it as a VOLUMETRIC source in W/m^3. The cached column is a total power
+    in watts (``jr1_w``), and the whole conversion is the one division in
+    ``_read_raw``. Any error in that single number is a UNIFORM factor on every
+    ``Qsrc`` -- and a uniform factor is invisible in the loss (the EMA balancer
     divides it straight back out) and invisible in ``L_phys`` (which lands at
     O(1) either way). It is only visible here.
 
-    The consequence if the factor is real: the residual reduces to
-    ``dTdt = Fo : grad^2 Tn``, i.e. the physics term tells the network the cell
-    is heated by nothing at all and must reach its temperature by conduction
-    alone. That is a different PDE from the one the data obeys, and no weight on
-    it can be right.
+    That is exactly what this report caught on 31.08.2026: a ratio of ~147x,
+    against a spurious extra division by the 121 JR1 grid points that the source
+    conversion carried over from the base project. With the source 121x too
+    small the residual is effectively ``dTdt = Fo : grad^2 Tn``, i.e. the physics
+    term tells the network the cell is heated by nothing at all and must reach
+    its temperature by conduction alone -- a different PDE from the one the data
+    obeys, on which no weight can be right. Fixed 01.09.2026; this report stays
+    as the guard, because nothing else in the pipeline can see such a factor.
 
     Reported per OP, with the ratio; a zero-flow OP whose ratio is far from 1 is
     the conclusive case.
@@ -1100,11 +1124,10 @@ def energy_balance_report(bundle: NormBundle) -> List[str]:
             f"  [ENERGY] the source is short by a factor of ~{ref:.0f} {basis}.",
             "  The heated region rises far faster than Qsrc can drive it, so Qsrc",
             "  is too SMALL rather than the temperature too large.",
-            "  The first thing to check is the unit of the cached heat column: it is",
-            "  read as q_source[:, 0], the upstream name is 'jr1_w', and data.py",
-            "  uses it as W/m^3 with a 0/1 region mask and no volume division. If it",
-            "  is a total power in watts, dividing by the JR1 volume is the missing",
-            "  step and would move the ratio by exactly that volume.",
+            "  The conversion to check is the single division in data._read_raw:",
+            "  q_source[:, 0] is 'jr1_w', a total power in W, and becomes W/m^3 by",
+            "  dividing by V_JR1 and nothing else. An extra factor there -- the JR1",
+            "  point count was one, until 01.09.2026 -- lands here and nowhere else.",
             "  Until this is settled, w_phys is not tunable: the residual describes a",
             "  cell heated by ~nothing, which is not the cell the data came from.",
         ]
@@ -1194,12 +1217,38 @@ def coverage_report(bundle: NormBundle, op: OPData) -> List[str]:
     testing extrapolation, and the two deserve different words in a result
     table. Reported per channel, in physical units, with the overshoot expressed
     in training sigmas because that is what the network actually sees.
+
+    Channels with NO training variance are reported too, and separately: they
+    have no sigma to overshoot (``config_sigma`` is the 1e-8 guard there) and
+    ``_normalise_config`` forces them to 0 regardless of value, so a held-out OP
+    that moves one is off the envelope in the hardest way there is -- the
+    network is not even told. Until 01.09.2026 those channels were skipped here,
+    which made the one case that most needed saying the only silent one.
     """
     lines = []
     for i, name in enumerate(CONFIG_ORDER):
-        if not bundle.config_active[i]:
-            continue
         col = op.cfg_phys[:, i]
+        if not bundle.config_active[i]:
+            # A DEAD channel is the one case the sigma arithmetic below cannot
+            # express -- config_sigma is the 1e-8 guard, so every overshoot
+            # comes out as ~1e8 sigma -- and it used to be skipped outright.
+            # That is backwards: a channel with no training variance is exactly
+            # where a held-out value cannot be interpolated to. It is forced to
+            # 0 by _normalise_config whatever it is, so the network is not told
+            # it differs at all; if nothing says so here, nothing says so.
+            if not np.isfinite(col).any():
+                continue
+            lo, hi = float(np.nanmin(col)), float(np.nanmax(col))
+            trained = float(bundle.config_mu[i])
+            span = max(abs(trained), abs(lo), abs(hi))
+            if max(abs(lo - trained), abs(hi - trained)) > 1e-6 * max(span, 1.0):
+                lines.append(
+                    f"  {name}: {lo:.4g} .. {hi:.4g} against a training set that "
+                    f"holds it constant at {trained:.4g}. The channel is DEAD and "
+                    f"forced to 0, so this difference is invisible to the network "
+                    f"-- it is outside the trained envelope, not interpolation."
+                )
+            continue
         if not np.isfinite(col).any():
             lines.append(f"  {name}: no value in this bundle -> filled with the "
                          f"training mean and fed as a neutral feature")
