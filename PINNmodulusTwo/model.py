@@ -326,6 +326,15 @@ class RecurrentField(nn.Module):
     def diff_gain(self) -> torch.Tensor:
         return torch.exp(self.log_diff_gain)
 
+    def betas(self) -> list[float]:
+        """Learned swish slope per hidden layer, for the log.
+
+        On the backbone rather than reached through ``model.mlp`` so the caller
+        does not have to know which architecture it holds: ``ConvRecurrentField``
+        has no ``mlp`` at all and answers this from its conv stack.
+        """
+        return self.mlp.betas()
+
     def gates(self) -> torch.Tensor:
         """All-ones: every history channel is always on. There is no lag gating.
 

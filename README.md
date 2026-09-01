@@ -168,6 +168,17 @@ strict superset (a constant driver is a profile that does not move) and two
 copies of the same model only drift apart. `--resample point
 --no-driver-history` reproduces the old constant-only preprocessing exactly.
 
+**Two function classes, one pipeline.** `--arch mlp` (default) is the Modulus
+coordinate network described above. `--arch cnn` predicts the whole field per
+step with convolutions: the 363 points are three x-planes carrying the same
+regular 11 × 11 raster in (y, z), so the field is an image and heat conduction —
+being local — is what a 3 × 3 kernel already is. Same data, same split, same
+recurrence, same inputs, same metrics; the physics residual then comes from grid
+stencils rather than autograd, which is required rather than optional. Nothing
+about it has been measured on the real data yet. See
+[`PINNmodulusTwo/README.md`](PINNmodulusTwo/README.md) *Why a CNN, and what it
+changes* and `FAHRPLAN.md`.
+
 From OP08 the drivers become **profiles** that vary in time — a fluid
 temperature profile, a pre-simulated CC-CV current whose CV phase tapers the
 current away, and in OP15 a volume-flow profile. That is what the recurrence is
@@ -178,6 +189,9 @@ have very different temperatures because their *history* differed.
 |---|---|
 | `model.py` | `RecurrentField` + the Modulus MLP + `rollout` |
 | `physics.py` | the nondimensional anisotropic heat residual and the Neumann BC |
+| `grid.py` | the 363 points as the structured 3 × 11 × 11 raster they actually are |
+| `cnn_model.py` | `--arch cnn`: the same recurrence, convolutions instead of the MLP |
+| `physics_grid.py` | that residual again, differenced on the raster instead of by autograd |
 | `data.py` | loading, normalisation, driver resampling, the three reports |
 | `op_registry.py` | the plan sheet in code: OP01–OP16, tiers, the split. Runs without data |
 | `op_metrics.py` | per-OP metrics: MAE, RMSE, peak error, transient vs. quiescent |

@@ -89,8 +89,42 @@ use_driver_history: true
 driver_rate_lags: [5.0, 20.0]
 
 # ---- model ------------------------------------------------------------------
-layer_size: 128
-num_layers: 4
+# Function approximator: `mlp` (the Modulus coordinate network, one point at a
+# time) or `cnn` (convolutions over the 3 x 11 x 11 raster the 363 measurement
+# points actually form, whole field per step).
+#
+# The CNN is not a different project: same data, same split, same recurrence,
+# same op_metrics, same trivial predictors next to every line. It differs in the
+# function class and in nothing else -- deliberately, so that a difference in
+# MAE is attributable. Two things do follow from the architecture and are worth
+# knowing before reading a number:
+#
+#   * The physics residual comes from grid stencils (physics_grid.py) instead of
+#     autograd. It is exact on quadratics, but the x direction has only THREE
+#     planes, so d2T/dx2 is constant in x -- a limit of the data, not the method.
+#   * The residual covers the 3 x 9 x 9 interior; the outer y/z ring has no
+#     stencil and no boundary condition to close it with.
+#
+# `--time-deriv autograd` is not available with `cnn` (there is no continuous
+# time input); bdf1/bdf2 work unchanged.
+arch: mlp
+layer_size: 128            # arch: mlp
+num_layers: 4              # arch: mlp
+# --- arch: cnn ---------------------------------------------------------------
+# Receptive field is 1 + 2*cnn_depth cells in (y, z); the raster is 11 wide, so
+# depth 5 already lets every point see every other. x is folded into the channel
+# dimension and is therefore fully connected at every layer -- with three planes
+# there is no locality to exploit.
+cnn_width: 64
+cnn_depth: 4
+cnn_kernel: 3
+# Edge handling. `replicate` asserts zero gradient one cell outside the cell;
+# `zeros` asserts the normalised zero temperature there, which is a Dirichlet
+# boundary nobody measured.
+cnn_padding: replicate
+# TIME steps per optimiser step. 0 derives it from batch_data / batch_phys /
+# batch_bc so each term keeps roughly the point count it has under arch: mlp.
+batch_grid: 0
 k_max: 2                   # nur im raw-Modus wirksam
 history_mode: hybrid       # raw | hybrid
 # Segment lengths of the hybrid history, in SECONDS.

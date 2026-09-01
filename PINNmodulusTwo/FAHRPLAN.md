@@ -62,7 +62,7 @@ Das Kommando steht oben. Hier steht, was dabei herauskommen muss.
 | 2 | `[SATURATED]` in der **letzten** Epoche | keine Zeile | Rollout weggelaufen → mehr Epochen, dann `lr` runter |
 | 3 | **`spread s/t`** über die Epochen | **steigt Richtung 1** | **bleibt bei ~0.3 oder fällt → O9 bestätigt**, siehe unten |
 | 4 | `[FLAT]` | kommt nicht | dasselbe wie 3, nur lauter |
-| 5 | `LOSES TO` auf OP06/OP09 | kommt nicht | schlechter als „nichts tun" → das Problem sind Daten/Modellklasse, nicht Gewichte |
+| 5 | `LOSES TO` auf OP06/OP09 | kommt nicht | schlechter als „nichts tun" → das Problem sind Daten/Modellklasse, nicht Gewichte. Für die Modellklasse gibt es seit 01.09. `--arch cnn`, siehe unten |
 
 **Signal 3 ist das neue und das wichtigste.** In 5b stand `spread_time` bei
 **0.201** — die `[FLAT]`-Warnung löst bei 0.2 aus, es fehlten also 0.5 %. Ob das
@@ -116,6 +116,87 @@ Default und keine Loss-Balance geändert worden.
 
 Die Auswahlregeln stehen bereits fest, §10 in Teil II — inklusive der neuen:
 **`spread` ist eine Nebenbedingung, kein Ziel.**
+
+---
+
+## Und wenn Signal 5 kommt: `--arch cnn`
+
+Zeile 5 der Signaltabelle sagt, was ein `LOSES TO` auf OP06/OP09 bedeutet:
+**das Problem sind dann Daten oder Modellklasse, nicht die Gewichte.** Gegen die
+zweite Hälfte davon gibt es seit 01.09.2026 einen Schalter.
+
+**Warum ein CNN hier überhaupt anwendbar ist.** Die 363 Punkte sind kein
+Punkthaufen. Sie sind drei x-Ebenen (Zellmitte, JR1-Mitte, Gehäusewand) mit
+demselben regelmäßigen **11 × 11**-Raster in (y, z) — nachzulesen in den drei
+`coordinates/*.csv`, die bis auf x identisch sind. Das Temperaturfeld **ist**
+also ein Bild `3 × 11 × 11`, und Wärmeleitung ist lokal: ein 3×3-Kernel *ist*
+der Differenzenstern. Das MLP muss sich diese Lokalität aus rohen Koordinaten
+selbst erarbeiten, aus sechzehn Betriebspunkten. Das CNN bekommt sie geschenkt.
+
+`grid.py` leitet das Raster zur Laufzeit aus `bundle.xn` ab und **prüft** es;
+ist die Geometrie kein Tensorprodukt mehr, bricht der Lauf mit dem Grund ab,
+statt auf einem verwürfelten Bild zu trainieren.
+
+**Was gleich bleibt — mit Absicht.** Datensatz, Split, Rekurrenz (History-Layout,
+`delta`/`delta_grid`/`rate_lags`, Kausalitätsklemme, Rollout-Schnellpfad,
+Residual-Level), `op_metrics`, die beiden trivialen Vorhersager. Und die
+**Eingänge**: `[xn(3), static(S), config(C), forcing(F), history(k)]`, punktweise
+dasselbe, was das MLP sieht — die Skalare über das Bild gebroadcastet. Kein
+Zusatzkanal, auch nicht der naheliegende (das Quellfeld `Qsrc`, das sich das MLP
+heute aus `q_dot` und dem JR1-Indikator zusammenreimen muss). Ein Unterschied in
+der MAE soll der **Modellklasse** zuzuordnen sein und sonst nichts.
+
+**Was sich zwangsläufig ändert.** Der Physik-Term. `physics.py` holt seine
+Raumableitungen per Autograd nach `xn` — das geht nur bei einer stetigen
+Funktion von `xn`. Eine Faltung liest ein Gitter. Sie bekommt `xn` zwar als
+Kanäle, Autograd liefert also **keine Null, sondern eine plausibel aussehende
+Zahl** — die Antwort auf „was passiert, wenn ich diesen Pixel umetikettiere,
+während die Nachbarn stehen bleiben". Mit Wärmeleitung hat das nichts zu tun,
+und nichts würde krachen: `L_phys` fiele wie in jedem anderen Lauf. Deshalb
+**verweigert `physics.py` ein Gittermodell jetzt ausdrücklich**, und
+`physics_grid.py` differenziert stattdessen das Gitter.
+
+Was das kostet, ungeschönt:
+
+| | Autograd (`--arch mlp`) | Gitter (`--arch cnn`) |
+|---|---|---|
+| y, z | beliebiger Punkt | zentrale Differenzen, **9 von 11** Ebenen je Achse |
+| x | beliebige Stelle | drei Ebenen ⇒ **eine Quadratik**, `d²T/dx²` konstant in x |
+| Residuenpunkte je Zeitschritt | 1 pro Vorwärtslauf | **243** aus *einem* Vorwärtslauf |
+
+Der äußere y/z-Ring trägt kein Residuum: dort gibt es keine Randbedingung, mit
+der man ihn schließen könnte, und ein einseitiger Stern würde eine erfinden. Die
+x-Grenze ist eine Grenze **der Daten**, nicht der Methode — aus drei Ebenen holt
+kein Verfahren eine dritte x-Mode. Dass die Autograd-Variante in x genauer
+*aussieht*, liegt nur daran, dass sie zwischen den Ebenen Krümmung erfinden darf,
+die niemand gemessen hat.
+
+**Stand: nichts davon ist auf den echten Daten gemessen.** Das ist der ganze
+Punkt der Reihenfolge in dieser Datei. Was existiert, ist der Schalter, die
+Tests (`tests/test_cnn_grid.py`, Sekunden, ohne Daten und ohne GPU) und ein
+Durchlauf auf dem synthetischen Bündel. Absolute Zahlen von dort sagen über
+OP01–OP16 nichts — genau wie in Kapitel 9 von `README_ERSTER_TEST.md`.
+
+**Wann es sich lohnt, und wann nicht.** Erst nach Schritt 6, und nur wenn
+Schritt 6 die Modellklasse in Verdacht bringt:
+
+```bash
+python3 PINNmodulusTwo/train.py --arch cnn --epochs 60 2>&1 | tee 07_cnn.txt
+```
+
+Ein Lauf, ein Seed, gegen `06_lauf.txt` gehalten — und **gelesen wie 5b**: eine
+MAE-Differenz ohne die Streuung über Seeds daneben ist keine Rangfolge. Sobald
+`sweep.py` steht, ist `--arch` eine weitere Sweep-Achse und wird wie jede andere
+behandelt.
+
+Zwei Signale, auf die es dabei besonders ankommt:
+
+* **`spread s/t`** (Signal 3 oben). O9 fragt, ob der Physik-Term nur dämpft. Ein
+  Faltungsmodell hat eine andere Antwort auf dieselbe Frage, weil es räumliche
+  Struktur nicht erst lernen muss.
+* **`LOSES TO`** auf OP06/OP09. Bleibt es auch mit `--arch cnn` stehen, war die
+  Modellklasse nicht das Problem — und der Verdacht wandert auf die Daten
+  (O5: tote Eingangskanäle, der Envelope).
 
 ---
 

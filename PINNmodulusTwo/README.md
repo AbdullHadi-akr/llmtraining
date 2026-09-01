@@ -60,6 +60,16 @@ selects on it.
   and the network is never told it differs) and `energy_balance_report` (can the
   source account for the temperature rise? It is the only check that can see a
   uniform factor on `Qsrc`, and on 31.08.2026 it found one: 121x).
+- `grid.py` — the 363 points as a structured **3 × 11 × 11** raster (three
+  x-planes, the same regular 11 × 11 in (y, z) on each). Derives the permutation
+  from `bundle.xn` at runtime and **checks** it: a geometry that is not a tensor
+  product fails here with the reason instead of training on a scrambled image.
+  Only used by `--arch cnn`.
+- `cnn_model.py` — `ConvRecurrentField`: the same recurrence with the Modulus MLP
+  replaced by convolutions over (y, z), the three x-planes folded into the
+  channel axis. See **Why a CNN, and what it changes** below.
+- `physics_grid.py` — the same heat residual, differenced on that raster instead
+  of taken by autograd. Required, not optional: see the same section.
 - `op_registry.py` — the plan sheet in code: OP01–OP16, which OP carries which
   profile, the tiers, and the split. **Runs without data.**
 - `op_metrics.py` — per-OP rollout metrics. Not just a mean: a CC-CV OP spends
@@ -88,6 +98,79 @@ selects on it.
 - `config.yaml` — hyperparameters. Since the benchmark scripts are gone this is
   the ONLY place a default lives (CLI overrides available).
 
+
+## Why a CNN, and what it changes (`--arch cnn`)
+
+The 363 measurement points are **not** a point cloud. They are three x-planes —
+cell centre, JR1 centre, housing wall — each carrying the same regular 11 × 11
+raster in (y, z); the three `coordinates/*.csv` agree to the last digit on y and
+z and differ only in x. The temperature field is therefore literally a
+`3 × 11 × 11` image, and the process generating it is **local**: a point's next
+temperature depends on its neighbours and on the source there. A 3 × 3
+convolution is that stencil, with the locality built in instead of learned.
+
+The MLP has to discover locality from raw coordinates, one point at a time, from
+sixteen operating points. That is a lot to ask of this much data. It is the
+argument for trying the other function class — not a claim that it wins.
+**Nothing here has been measured on the real data**; `FAHRPLAN.md` says when the
+comparison is worth running and how to read it.
+
+**Held identical on purpose.** Dataset, split, recurrence (history layout,
+`delta`/`delta_grid`/`rate_lags`, the causality clamp, the rollout fast path, the
+residual level), `op_metrics`, both trivial predictors — and the *inputs*:
+`[xn(3), static(S), config(C), forcing(F), history(k)]` per point, exactly what
+the MLP is fed, with the scalars broadcast across the image. Not even the obvious
+extra channel (the volumetric source field `Qsrc`, which the MLP currently has to
+reconstruct from `q_dot` and the JR1 indicator) is added. A difference in MAE
+should be attributable to the architecture and to nothing else.
+
+**Layout.** `(B, F, nx, ny, nz)` is folded to `(B, nx·F, ny, nz)`: 3 × 3 kernels
+over y and z (11 levels each, genuinely local; four layers reach 9 of 11 cells,
+five reach all of them — no pooling, an 11 × 11 image has nothing to pool), and x
+folded into the channels so every layer is fully connected across the three
+planes. With three levels there is no locality in x to exploit. Edge padding is
+`replicate` (zero gradient one cell out); `zeros` would assert the normalised
+zero temperature there, a Dirichlet boundary nobody measured.
+
+**What necessarily changes: the physics term.** `physics.py` takes its spatial
+derivatives by autograd with respect to `xn`, which is meaningful only for a
+continuous function of `xn`. A convolution reads a lattice. It *does* take `xn`
+as three channels, so autograd returns a finite, plausible-looking number — and
+that is the danger, because the number answers "how does the prediction respond
+to relabelling a pixel's coordinates while its neighbours' temperatures stay
+put?", which has nothing to do with conduction. Nothing would raise and `L_phys`
+would fall like any other run. So `physics.py` now **refuses** a model carrying a
+`grid` attribute, and `physics_grid.py` differences the lattice instead.
+
+What that discretisation costs, stated plainly:
+
+| | autograd (`--arch mlp`) | grid (`--arch cnn`) |
+|---|---|---|
+| y, z | any point | central differences on **9 of 11** levels per axis |
+| x | any position | three planes ⇒ **one quadratic**; `d²T/dx²` is constant in x |
+| residual points per step | 1 per forward pass | **243**, from *one* forward pass |
+
+The outer y/z ring carries no residual: there is no boundary condition on the
+cell's outer faces to close it with, and a one-sided stencil there would be
+inventing one. The x limit is a limit of the **data**, not the method — three
+planes cannot yield a third x-mode. The autograd Laplacian only *looks* more
+accurate in x because it is free to invent curvature between planes that nothing
+measured. `--time-deriv autograd` is unavailable with `--arch cnn` (there is no
+continuous time input); `bdf1`/`bdf2` are unchanged, and difference the
+recurrence exactly as before.
+
+**Minibatching.** A convolution has no meaning on scattered pixels, so the batch
+is over *times* and each one carries the whole field. That is not a concession:
+one forward pass supervises all 363 points instead of the single pixel a
+pointwise draw uses. `--batch-grid 0` (the default) derives the time counts from
+`--batch-data`/`--batch-phys`/`--batch-bc` so each term keeps roughly the point
+count it has under `--arch mlp`, and the derived numbers are printed at startup.
+
+Guards live in `tests/test_cnn_grid.py` — seconds, no data, no GPU: the real
+coordinates really are 3 × 11 × 11, the permutation round-trips, every second
+derivative of a quadratic is exact, `field` and `field_batch` agree, the
+convolution is translation-equivariant in y, and `physics.py` refuses the grid
+model.
 
 ## Why recurrence (profiles)
 

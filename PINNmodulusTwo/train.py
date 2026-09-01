@@ -44,7 +44,9 @@ from data import (
     available_ops, load_ops, normalisation_report, profile_report,
     require_ops,
 )
+from cnn_model import ConvRecurrentField
 from device_utils import enable_tf32, resolve_device, seed_everything
+from grid import build_grid_spec, describe as describe_grid
 from model import RecurrentField, rollout
 from op_metrics import format_op_metrics, op_metrics, rollout_phys
 from op_registry import (
@@ -52,6 +54,9 @@ from op_registry import (
     TIER_IN, split_summary, tier_or_unknown,
 )
 from physics import heat_residual, boundary_condition_loss
+from physics_grid import (
+    GridStencils, boundary_condition_loss_grid, heat_residual_grid,
+)
 
 THIS_DIR = Path(__file__).resolve().parent
 ART_DIR = THIS_DIR / "artifacts"
@@ -177,6 +182,33 @@ def parse_args() -> argparse.Namespace:
                         "cascade back from there. Independent of --subsample.")
     p.add_argument("--width", type=int, default=d.get("layer_size", 128))
     p.add_argument("--depth", type=int, default=d.get("num_layers", 4))
+    p.add_argument("--arch", choices=["mlp", "cnn"], default=d.get("arch", "mlp"),
+                   help="function approximator. 'mlp' is the Modulus coordinate "
+                        "network (one point at a time). 'cnn' predicts the whole "
+                        "3x11x11 field per step with convolutions over (y, z) -- "
+                        "same inputs, same recurrence, same metrics; the physics "
+                        "residual then comes from grid stencils "
+                        "(physics_grid.py) instead of autograd")
+    p.add_argument("--cnn-width", type=int, default=d.get("cnn_width", 64),
+                   help="--arch cnn: channels per hidden conv layer")
+    p.add_argument("--cnn-depth", type=int, default=d.get("cnn_depth", 4),
+                   help="--arch cnn: hidden conv layers. The receptive field is "
+                        "1 + 2*depth cells; the raster is 11 wide, so depth 5 "
+                        "already reaches everywhere")
+    p.add_argument("--cnn-kernel", type=int, default=d.get("cnn_kernel", 3),
+                   help="--arch cnn: odd kernel size in (y, z)")
+    p.add_argument("--cnn-padding", default=d.get("cnn_padding", "replicate"),
+                   choices=["replicate", "zeros", "reflect", "circular"],
+                   help="--arch cnn: edge handling. 'replicate' asserts zero "
+                        "gradient outside the cell; 'zeros' asserts the "
+                        "normalised zero temperature one cell out, which is a "
+                        "Dirichlet boundary nobody measured")
+    p.add_argument("--batch-grid", type=int, default=d.get("batch_grid", 0),
+                   help="--arch cnn: TIME steps per optimiser step. Each one "
+                        "carries the whole field, so 0 (the default) derives it "
+                        "from --batch-data / --batch-phys / --batch-bc so that "
+                        "each term keeps roughly the point count it has under "
+                        "--arch mlp")
     p.add_argument("--lr", type=float, default=d.get("lr", 2e-3))
     p.add_argument("--weight-decay", type=float, default=d.get("weight_decay", 0.0))
     p.add_argument("--gain-lr-mult", type=float, default=d.get("gain_lr_mult", 25.0),
@@ -560,16 +592,75 @@ def fit(args):
         for line in amp_lines:
             print(line, flush=True)
 
-    model = RecurrentField(
-        n_config=bundle.n_config, n_static=n_static, n_forcing=n_forcing,
-        k_max=args.k_max, history_mode=args.history_mode, rate_lags=rate_lags_n,
-        layer_size=args.width, num_layers=args.depth,
-        delta_seconds=delta_phys_s, dtn=dtn, t_span_ref=bundle.T_span_ref,
-        rate_scale=rate_scale, delta_grid=delta_grid_n,
-        use_autograd_time=(args.time_deriv == "autograd"),
-        residual_output=bool(getattr(args, "residual_output", False)),
-        learn_gains=bool(getattr(args, "learn_gains", False)),
-    ).to(device)
+    # ``cnn`` replaces ONLY the function approximator. Everything the recurrence
+    # is made of -- the history layout, delta/delta_grid/rate_lags, the causality
+    # clamp, the rollout fast path, the residual level -- is inherited from
+    # RecurrentField, so a difference in the reported MAE is a difference between
+    # architectures and not between two training setups. What it cannot inherit
+    # is the autograd Laplacian: a convolution does not depend on the coordinate
+    # tensor, so ``physics.heat_residual`` would return grad^2 T = 0 exactly and
+    # report a falling L_phys all the way down. physics_grid.py differences the
+    # lattice instead; see its docstring for what the three x-planes cost.
+    use_cnn = getattr(args, "arch", "mlp") == "cnn"
+    grid_spec = stencils = None
+    if use_cnn:
+        if args.time_deriv == "autograd":
+            raise SystemExit(
+                "--arch cnn has no continuous-time input: use --time-deriv "
+                "bdf1 or bdf2 (they difference the recurrence itself)."
+            )
+        grid_spec = build_grid_spec(
+            torch.as_tensor(bundle.xn, dtype=torch.float64)
+        ).to(device)
+        for line in describe_grid(grid_spec, bundle.L_ref):
+            print(f"  {line}", flush=True)
+        model = ConvRecurrentField(
+            grid=grid_spec,
+            n_config=bundle.n_config, n_static=n_static, n_forcing=n_forcing,
+            k_max=args.k_max, history_mode=args.history_mode,
+            rate_lags=rate_lags_n,
+            width=args.cnn_width, num_layers=args.cnn_depth,
+            kernel_size=args.cnn_kernel, padding_mode=args.cnn_padding,
+            delta_seconds=delta_phys_s, dtn=dtn, t_span_ref=bundle.T_span_ref,
+            rate_scale=rate_scale, delta_grid=delta_grid_n,
+            residual_output=bool(getattr(args, "residual_output", False)),
+            learn_gains=bool(getattr(args, "learn_gains", False)),
+        ).to(device)
+        stencils = GridStencils(grid_spec, dtype=torch.float32, device=device)
+        reach = model.net.receptive_field
+        print(
+            f"  conv stack: width={args.cnn_width} layers={args.cnn_depth} "
+            f"kernel={args.cnn_kernel} pad={args.cnn_padding} "
+            f"in_channels={grid_spec.nx}x{model.in_per_plane}="
+            f"{grid_spec.nx * model.in_per_plane}",
+            flush=True,
+        )
+        print(
+            f"  receptive field {2 * reach + 1} of {grid_spec.ny} cells in y, "
+            f"{grid_spec.nz} in z"
+            + ("" if 2 * reach + 1 >= max(grid_spec.ny, grid_spec.nz)
+               else "  [PARTIAL] a point cannot see the whole raster; "
+                    "raise --cnn-depth if that matters"),
+            flush=True,
+        )
+        print(
+            f"  residual points/step {stencils.n_residual_points} of "
+            f"{grid_spec.n_points} (the outer y/z ring carries no stencil), "
+            f"BC points/step {stencils.n_bc_points}",
+            flush=True,
+        )
+    else:
+        model = RecurrentField(
+            n_config=bundle.n_config, n_static=n_static, n_forcing=n_forcing,
+            k_max=args.k_max, history_mode=args.history_mode,
+            rate_lags=rate_lags_n,
+            layer_size=args.width, num_layers=args.depth,
+            delta_seconds=delta_phys_s, dtn=dtn, t_span_ref=bundle.T_span_ref,
+            rate_scale=rate_scale, delta_grid=delta_grid_n,
+            use_autograd_time=(args.time_deriv == "autograd"),
+            residual_output=bool(getattr(args, "residual_output", False)),
+            learn_gains=bool(getattr(args, "learn_gains", False)),
+        ).to(device)
     # src_gain / diff_gain used to carry a ~100x scale gap that ``physics.py``
     # created itself, by dividing each residual term by a different RMS. The
     # residual is now assembled in its own consistent units and divided by one
@@ -595,7 +686,8 @@ def fit(args):
         f"delta=1.0s = {float(model.delta):.4g} normalised (fixed) "
         f"delta_grid={delta_grid_s:g}s gates=all-on "
         f"history_mode={model.history_mode} rate_lags_s={rate_lags_s} "
-        f"width={args.width} depth={args.depth}",
+        + (f"width={args.cnn_width} depth={args.cnn_depth} (conv)"
+           if use_cnn else f"width={args.width} depth={args.depth}"),
         flush=True,
     )
 
@@ -619,7 +711,10 @@ def fit(args):
     # And it samples min(n_bc, batch_bc) points, so a thin boundary plane
     # silently shrinks the BC batch rather than sampling it repeatedly.
     batch_bc = int(getattr(args, "batch_bc", 128))
-    if 0 < n_bc < batch_bc and args.w_bc != 0.0:
+    # --arch cnn evaluates EVERY point of the x=0 plane at every sampled time
+    # (the field they sit on was computed in one pass anyway), so it never
+    # subsamples the plane and this warning would be pure noise there.
+    if 0 < n_bc < batch_bc and args.w_bc != 0.0 and not use_cnn:
         print(f"  [WARN] only {n_bc} boundary points against --batch-bc "
               f"{batch_bc}: the BC term is estimated from {n_bc} samples per "
               f"step, not {batch_bc}. Its gradient is correspondingly noisier "
@@ -651,6 +746,30 @@ def fit(args):
     if rollout_clamp > 0.0:
         print(f"rollout saturation guard: |Tn| <= {rollout_clamp:g}", flush=True)
     batch_data = int(getattr(args, "batch_data", 2048))
+    # --arch cnn draws TIMES, not (time, point) pairs: one forward pass produces
+    # the whole field, so the point count per step is a consequence of the time
+    # count rather than a free choice. Deriving it from the pointwise batch sizes
+    # keeps each term at roughly the number of points it estimates itself from
+    # under --arch mlp, so w_data:w_phys:w_bc does not silently change meaning
+    # when the architecture is switched. --batch-grid overrides all three.
+    n_time_data = n_time_phys = n_time_bc = 0
+    grid_points = None
+    if use_cnn:
+        override = int(getattr(args, "batch_grid", 0) or 0)
+        n_pts_grid = grid_spec.n_points
+        n_time_data = override or max(1, round(batch_data / n_pts_grid))
+        n_time_phys = override or max(
+            1, round(int(args.batch_phys) / stencils.n_residual_points))
+        n_time_bc = override or max(
+            1, round(batch_bc / stencils.n_bc_points))
+        grid_points = torch.arange(n_pts_grid, device=device)
+        print(
+            f"grid minibatch: {n_time_data} times x {n_pts_grid} pts data, "
+            f"{n_time_phys} x {stencils.n_residual_points} phys, "
+            f"{n_time_bc} x {stencils.n_bc_points} bc"
+            + ("  (--batch-grid override)" if override else "  (derived)"),
+            flush=True,
+        )
     print(
         f"optimiser steps = {inner_steps} per OP per epoch x {len(ops)} OPs "
         f"x {args.epochs} epochs = {inner_steps * len(ops) * args.epochs} total "
@@ -825,19 +944,49 @@ def fit(args):
                 # pooled over [:split_t] only.
                 # t starts at 1: row 0 is the imposed initial condition, never a
                 # prediction.
-                bt = torch.randint(1, op["split_t"], (batch_data,), device=device)
-                bp = torch.randint(0, n_pts, (batch_data,), device=device)
-                tq = op["tn"][bt]
-                hist = model._history(own_hist, dtn, tq, bp)
-                pred = model.field(
-                    op["xn"][bp], op["static"][bp], op["cfg"][bt],
-                    op["forcing"][bt], hist, model.level(own_hist, dtn, tq),
-                )
-                L_data = torch.mean((pred - Tn_seq[bt, bp]) ** 2)
+                if use_cnn:
+                    # A convolution has no meaning on a scattered set of pixels,
+                    # so the minibatch is over TIMES and each one carries the
+                    # whole field. That is not a concession: one forward pass now
+                    # supervises all 363 points instead of the single pixel a
+                    # pointwise draw would use, so the same number of network
+                    # evaluations buys 363x the labels.
+                    bt = torch.randint(1, op["split_t"], (n_time_data,),
+                                       device=device)
+                    tq = op["tn"][bt]
+                    tq_rep = tq.repeat_interleave(n_pts)
+                    p_rep = grid_points.repeat(n_time_data)
+                    hist = model._history(own_hist, dtn, tq_rep, p_rep)
+                    pred = model.field_batch(
+                        op["xn"], op["static"], op["cfg"][bt], op["forcing"][bt],
+                        hist.reshape(n_time_data, n_pts, -1),
+                        model.level(own_hist, dtn, tq),
+                    )
+                    L_data = torch.mean((pred - Tn_seq[bt]) ** 2)
+                else:
+                    bt = torch.randint(1, op["split_t"], (batch_data,),
+                                       device=device)
+                    bp = torch.randint(0, n_pts, (batch_data,), device=device)
+                    tq = op["tn"][bt]
+                    hist = model._history(own_hist, dtn, tq, bp)
+                    pred = model.field(
+                        op["xn"][bp], op["static"][bp], op["cfg"][bt],
+                        op["forcing"][bt], hist, model.level(own_hist, dtn, tq),
+                    )
+                    L_data = torch.mean((pred - Tn_seq[bt, bp]) ** 2)
 
                 # ---- physics term (autograd space + FD time) -----------------
                 # History for the residual comes from the same frozen rollout.
-                if want_phys:
+                if want_phys and use_cnn:
+                    pt = torch.randint(0, t_end, (n_time_phys,), device=device)
+                    res = heat_residual_grid(
+                        model, stencils, op["xn"], op["static"], op["cfg"][pt],
+                        op["forcing"][pt], op["Fo"], op["Qsrc"][pt], own_hist,
+                        dtn, op["tn"][pt], phys_scale,
+                        time_deriv=args.time_deriv, residual_norm=residual_norm,
+                    )
+                    L_phys = torch.mean(res ** 2)
+                elif want_phys:
                     pt = torch.randint(0, t_end, (args.batch_phys,), device=device)
                     pp = torch.randint(0, n_pts, (args.batch_phys,), device=device)
                     res = heat_residual(
@@ -851,7 +1000,15 @@ def fit(args):
                     L_phys = nan
 
                 # ---- boundary condition term (dT/dx = 0 at x=0) --------------
-                if want_bc:
+                if want_bc and use_cnn:
+                    pt_bc = torch.randint(0, t_end, (n_time_bc,), device=device)
+                    bc_res = boundary_condition_loss_grid(
+                        model, stencils, op["xn"], op["static"], op["cfg"][pt_bc],
+                        op["forcing"][pt_bc], own_hist, dtn, op["tn"][pt_bc],
+                        bundle.bc_scale, residual_norm=residual_norm,
+                    )
+                    L_bc = torch.mean(bc_res ** 2)
+                elif want_bc:
                     pt_bc = torch.randint(0, t_end, (args.batch_bc,), device=device)
                     bc_res = boundary_condition_loss(
                         model, op["xn"], op["static"], op["cfg"][pt_bc],
@@ -1066,7 +1223,7 @@ def fit(args):
         else:
             epochs_without_improvement += 1
         if epoch == 1 or epoch % 5 == 0 or epoch == args.epochs:
-            betas = np.round(model.mlp.betas(), 2)
+            betas = np.round(model.betas(), 2)
             sg = float(model.src_gain.detach())
             dg = float(model.diff_gain.detach())
             # Log learned rate_lags (hybrid mode only)
@@ -1151,11 +1308,19 @@ def save_checkpoint(model, bundle, args, dtn, history, path: Path) -> None:
     travel in the file, so the checkpoint does not depend on ``config.yaml``
     still saying what it said at training time.
     """
+    cnn = str(getattr(args, "arch", "mlp")) == "cnn"
     torch.save(
         {
             "model_state_dict": model.state_dict(),
-            # Exactly the RecurrentField constructor arguments, so reloading is
-            # RecurrentField(**ckpt["model_config"]) followed by load_state_dict.
+            # Which class to rebuild. A checkpoint that does not say so is a
+            # state_dict whose parameter names happen to differ, and the load
+            # error then names a tensor instead of the architecture.
+            "arch": "cnn" if cnn else "mlp",
+            # Exactly the constructor arguments of the class ``arch`` names, so
+            # reloading stays RecurrentField(**ckpt["model_config"]) -- or
+            # ConvRecurrentField(**ckpt["model_config"]) -- followed by
+            # load_state_dict. Nothing that is not a constructor argument of
+            # that class belongs in here.
             "model_config": {
                 "n_config": bundle.n_config,
                 "n_static": model.n_static,
@@ -1164,16 +1329,31 @@ def save_checkpoint(model, bundle, args, dtn, history, path: Path) -> None:
                 "history_mode": args.history_mode,
                 "rate_lags": [float(v) / bundle.T_span_ref
                               for v in getattr(args, "rate_lags", [])],
-                "layer_size": int(args.width),
-                "num_layers": int(args.depth),
                 "delta_seconds": float(getattr(args, "delta_phys", 1.0)),
                 "dtn": float(dtn),
                 "t_span_ref": float(bundle.T_span_ref),
                 "rate_scale": float(model.rate_scale),
                 "delta_grid": float(model.delta_grid),
-                "use_autograd_time": (args.time_deriv == "autograd"),
                 "residual_output": bool(model.residual_output),
                 "learn_gains": bool(model.learn_gains),
+                **(
+                    {
+                        # The permutation travels with the weights: a conv model
+                        # reloaded against a different point ordering would
+                        # produce a scrambled field and raise nothing.
+                        "grid": model.grid.to_dict(),
+                        "width": int(args.cnn_width),
+                        "num_layers": int(args.cnn_depth),
+                        "kernel_size": int(args.cnn_kernel),
+                        "padding_mode": str(args.cnn_padding),
+                    }
+                    if cnn else
+                    {
+                        "layer_size": int(args.width),
+                        "num_layers": int(args.depth),
+                        "use_autograd_time": (args.time_deriv == "autograd"),
+                    }
+                ),
             },
             # T_pred_C = Tn * T_sigma + T_mu. Without these the weights predict
             # a z-score against a normalisation nothing recorded.
@@ -1367,7 +1547,7 @@ def evaluate(model, bundle, ops, dtn, device, history, args) -> None:
         f"delta(final) = {float(model.delta):.5g} (normalised time)",
         f"src_gain(final)  = {float(model.src_gain):.4g}",
         f"diff_gain(final) = {float(model.diff_gain):.4g}",
-        f"betas(final) = {np.round(model.mlp.betas(), 3).tolist()}",
+        f"betas(final) = {np.round(model.betas(), 3).tolist()}",
         "",
     ]
     lines += normalisation_report(bundle) + [""]

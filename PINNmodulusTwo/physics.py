@@ -6,6 +6,32 @@ import torch
 from model import RecurrentField
 
 
+def _reject_grid_model(model) -> None:
+    """Stop a lattice model from being differentiated through its input channels.
+
+    Both terms in this module get their spatial derivatives from
+    ``torch.autograd`` with respect to ``xn``. That is meaningful only for a
+    model that is a continuous FUNCTION of the coordinate -- the Modulus MLP.
+
+    A convolution is not. It does read ``xn``, as three input CHANNELS, so
+    autograd does return a finite, plausible-looking number here; but that number
+    is "how does the prediction respond to relabelling a pixel's coordinates
+    while its neighbours' temperatures stay put", not "how does the field vary in
+    space". The conduction the residual is about lives in the kernel, which this
+    derivative never touches. Nothing would raise and ``L_phys`` would fall like
+    any other run, so the check has to be explicit.
+
+    ``physics_grid.py`` differences the lattice instead.
+    """
+    if getattr(model, "grid", None) is not None:
+        raise NotImplementedError(
+            f"{type(model).__name__} is a grid model: its spatial derivatives "
+            "must come from physics_grid.heat_residual_grid / "
+            "boundary_condition_loss_grid, not from autograd on xn. train.py "
+            "picks the right pair from --arch."
+        )
+
+
 def _grad(outputs: torch.Tensor, inputs: torch.Tensor) -> torch.Tensor:
     """d(outputs.sum())/d(inputs), keeping the graph for higher-order derivs."""
     return torch.autograd.grad(
@@ -50,6 +76,7 @@ def boundary_condition_loss(
     
     Returns residual for sampled boundary points and times.
     """
+    _reject_grid_model(model)
     # Find boundary point indices where x ≈ 0
     bc_indices = torch.where(bc_mask)[0]
     if len(bc_indices) == 0:
@@ -122,6 +149,7 @@ def heat_residual(
       - bdf2: 2nd-order backward difference, O(Δt²) error (recommended)
       - autograd: continuous autograd derivative, O(ε_machine) error
     """
+    _reject_grid_model(model)
     xb = xn[p_idx].requires_grad_(True)   # (B, 3); indexing already copies
     hist = model._history(Tn_seq, dtn, tn_q, p_idx)
     level = model.level(Tn_seq, dtn, tn_q)
