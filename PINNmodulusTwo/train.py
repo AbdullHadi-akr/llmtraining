@@ -83,21 +83,57 @@ HISTORY_KEYS = (
 )
 
 
-def _check_cfl_stability(bundle, delta_s, device):
-    """Warn if the effective time step violates a simple CFL estimate."""
+def _check_cfl_stability(bundle, delta_s, device, phys_delta_s=None):
+    """Warn when a time step is coarse against the fastest diffusion timescale.
+
+    ``dt_max`` here is the explicit-scheme stability step for the LARGEST
+    Fourier number on the grid -- in this cell that is the aluminium housing,
+    where lambda is two orders above the jelly roll. It is not a stability limit
+    for this model (nothing time-steps the PDE), but it IS the timescale on which
+    the temperature field can change, so a finite difference taken over a longer
+    step cannot resolve it.
+
+    TWO steps are checked, and until 31.08. only the first was:
+
+    * ``delta_s`` -- the DATA grid step, which sets how finely the rollout is
+      sampled.
+    * ``phys_delta_s`` -- the lag of the BDF stencil in ``physics.py``, i.e.
+      ``model.delta``. This is the one the time derivative in ``L_phys`` is
+      actually built from, and it is a SEPARATE hyperparameter: it stays at its
+      configured value however fine the data grid is. Checking only the data step
+      therefore green-lit a residual whose derivative was taken over a lag four
+      times the limit while the printed line said "CFL OK".
+    """
     alpha_max = float(bundle.Fo.max()) * bundle.L_ref**2 / (bundle.T_span_ref + 1e-30)
     L_axis = bundle.xn.max(axis=0) - bundle.xn.min(axis=0)
     vol = float(np.prod(L_axis * bundle.L_ref))
     dx_est = (vol / bundle.xn.shape[0]) ** (1.0 / 3.0)
     dt_max_cfl = dx_est**2 / (6.0 * alpha_max + 1e-30)
+
     stable = float(delta_s) <= dt_max_cfl
     status = "CFL OK" if stable else "CFL WARN"
     print(
-        f"[{status}] Δt={float(delta_s):.3f}s, "
+        f"[{status}] data Δt={float(delta_s):.3f}s, "
         f"Δt_max≈{dt_max_cfl:.3f}s -> "
         f"{'STABLE' if stable else 'POTENTIALLY UNSTABLE'}",
         flush=True,
     )
+    if stable and float(delta_s) > 0.5 * dt_max_cfl:
+        print(f"  [CFL] …but only {dt_max_cfl / float(delta_s):.1f}x of margin. "
+              f"Δt_max is set by the housing, where Fo is ~{float(bundle.Fo.max()):.3g}.",
+              flush=True)
+
+    if phys_delta_s is not None and float(phys_delta_s) > dt_max_cfl:
+        print(
+            f"  [CFL WARN] the PHYSICS stencil uses δ={float(phys_delta_s):.3g}s, "
+            f"which is {float(phys_delta_s) / dt_max_cfl:.1f}x Δt_max. The BDF time "
+            f"derivative in L_phys is taken over a lag longer than the field's "
+            f"fastest timescale, so it is systematically wrong exactly where Fo is "
+            f"large -- the housing. This is INDEPENDENT of --subsample: δ is its own "
+            f"knob (--delta-phys). L_phys is suspect until δ is brought under "
+            f"{dt_max_cfl:.3g}s or the residual is shown to be insensitive to it.",
+            flush=True,
+        )
     return stable
 
 
@@ -301,6 +337,13 @@ def parse_args() -> argparse.Namespace:
                         "empty string disables. The file carries everything "
                         "RecurrentField and the de-normalisation need, so a run "
                         "is reloadable without config.yaml")
+    p.add_argument("--delta-phys", type=float, default=d.get("delta_phys", 1.0),
+                   help="lag of the BDF stencil in the physics residual, in "
+                        "SECONDS. Was hardwired at 1.0 until 31.08. In hybrid "
+                        "history mode it feeds ONLY L_phys (the network's own "
+                        "history uses --delta-grid and --rate-lags), so it is an "
+                        "isolated knob there; in raw mode it also spaces the "
+                        "history channels and changes the model")
     p.add_argument("--checkpoint-every", type=int,
                    default=d.get("checkpoint_every", 10),
                    help="write the checkpoint every N epochs DURING training, "
@@ -466,7 +509,8 @@ def fit(args):
             op["forcing"] = op["forcing"][:, :0]
     dtn = ops[0]["dtn"]
     dt_s = dtn * bundle.T_span_ref
-    _check_cfl_stability(bundle, dt_s, device)
+    delta_phys_s = float(getattr(args, "delta_phys", 1.0))
+    _check_cfl_stability(bundle, dt_s, device, phys_delta_s=delta_phys_s)
     phys_scale = bundle.phys_scale
     rate_lags_s = [float(v) for v in getattr(args, "rate_lags", [])]
     rate_lags_n = [v / bundle.T_span_ref for v in rate_lags_s]
@@ -520,7 +564,7 @@ def fit(args):
         n_config=bundle.n_config, n_static=n_static, n_forcing=n_forcing,
         k_max=args.k_max, history_mode=args.history_mode, rate_lags=rate_lags_n,
         layer_size=args.width, num_layers=args.depth,
-        delta_seconds=1.0, dtn=dtn, t_span_ref=bundle.T_span_ref,
+        delta_seconds=delta_phys_s, dtn=dtn, t_span_ref=bundle.T_span_ref,
         rate_scale=rate_scale, delta_grid=delta_grid_n,
         use_autograd_time=(args.time_deriv == "autograd"),
         residual_output=bool(getattr(args, "residual_output", False)),
@@ -1122,7 +1166,7 @@ def save_checkpoint(model, bundle, args, dtn, history, path: Path) -> None:
                               for v in getattr(args, "rate_lags", [])],
                 "layer_size": int(args.width),
                 "num_layers": int(args.depth),
-                "delta_seconds": 1.0,
+                "delta_seconds": float(getattr(args, "delta_phys", 1.0)),
                 "dtn": float(dtn),
                 "t_span_ref": float(bundle.T_span_ref),
                 "rate_scale": float(model.rate_scale),
