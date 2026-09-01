@@ -366,6 +366,12 @@ verlorengehen:
 
 ## 3. Die Phasen
 
+> **Hinweis:** Die Phasen sind die **ältere** Rahmung des Projekts. Operativ gilt
+> die Schritt-Liste (1 … 6) aus Teil I und Teil III — sie ist feiner und
+> aktueller. Die Phasen stehen hier, weil sie die Begründungen tragen, warum in
+> dieser Reihenfolge vorgegangen wird. Zuordnung: Phase 0 ≙ Schritt 2, Phase 1 ≙
+> Schritt 3–4, Phase 2 ≙ Schritt 5/5b, Phase 3 ≙ Schritt 6, Phase 4 ≙ `sweep.py`.
+
 ### Phase 0 — Rauchtest ohne Daten (Minuten, kein GPU)
 
 Prüft die Mathematik, nicht das Ergebnis. Läuft auf einem frischen Checkout.
@@ -411,7 +417,7 @@ python3 PINNmodulusTwo/tools/interface_probe.py
 | SNR | > 100, sonst misst der kurze Rate-Kanal Rauschen |
 | Grenzflächenanteil | notieren — entscheidet über `ARCHITECTURE.md` 4.1 Option A vs. B |
 
-### Phase 2 — Der Maßstab (Minuten) ← **hier fehlt bisher alles**
+### Phase 2 — Der Maßstab (Minuten) ← **am 01.09. gemessen, siehe Schritt 5b**
 
 Ein kurzer Lauf, allein wegen der Latte. Die MAE des Modells ist hier egal:
 
@@ -541,6 +547,16 @@ Geld.
 # TEIL III — ERLEDIGT
 
 Archiv: abgehakte Schritte, gemessene Zahlen, geschlossene Befunde.
+
+## Geschlossene Punkte
+
+| # | war | wie geschlossen | wann |
+|---|---|---|---|
+| **O1** | Schritt-6-Ergebnisse bis Epoche 30 lagen unausgewertet | hinfällig: der Lauf hatte die 121x zu kleine Quelle. 5b ersetzt ihn | 01.09. |
+| **O2** | Schritt 5b war nie gelaufen | gelaufen und grün — `[SATURATED]` weg, beide val-OPs schlagen die trivialen Vorhersager | 01.09. |
+| **O3** | OP15: `cell_current` fehlt im Bündel | Rohexport hat **keine** `CellCurrent(t).csv`. Nie exportiert, also stimmt das Plansheet für OP15 nicht. Blockiert nichts (Berichts-OP). §9a.1, Q2 | 01.09. |
+| **O4** | OP12: Profil endet bei 1440 s, Trajektorie bis 1605 s | Kein Knick in `dT/dt` an der Nahtstelle → der Solver hat den letzten Wert gehalten, `np.interp` tut dasselbe. Keine Rückfrage nötig. §9a.2, Q1 | 01.09. |
+| **O7** | Energiebilanz ging um ~147x nicht auf | Codefehler: `jr1_w` wurde zusätzlich durch die 121 JR1-Gitterpunkte geteilt. Behoben, mit Tests, und auf echten Daten bestätigt. §11.1 | 01.09. |
 
 ## Der Weg dahin (alles erledigt)
 
