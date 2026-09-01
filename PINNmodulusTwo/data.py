@@ -1012,6 +1012,107 @@ def effective_rate_scale(dTdt_scale: float, rate_lags_n: Sequence[float],
     return scale, lines
 
 
+def energy_balance_report(bundle: NormBundle) -> List[str]:
+    """Can the heat source account for the temperature the cell actually reaches?
+
+    The nondimensional equation is ``dTn/dtn = Fo : grad^2 Tn + Qsrc``. Averaged
+    over the cell the diffusion term integrates to the boundary flux, so for an
+    operating point with **no coolant flow** almost nothing leaves and
+
+        <dTn/dtn>  ~  <Qsrc>        (over the heated region)
+
+    has to hold to within the cooling that is left. That makes it a real test of
+    the SOURCE, and it needs no model at all -- only the bundle.
+
+    Why it is worth testing: ``Qsrc`` is built as
+
+        q_dot * q_mask * T_span_ref / (rho * Cp * T_sigma)
+
+    with ``q_mask`` a plain 0/1 indicator of the JR1 region. That treats
+    ``q_dot`` as a VOLUMETRIC source, W/m^3. If the cached column is instead a
+    total power in watts -- the upstream name is ``jr1_w`` -- then a division by
+    the JR1 volume is missing and every ``Qsrc`` is wrong by that volume,
+    uniformly. A uniform factor is invisible in the loss (the EMA balancer
+    divides it straight back out) and invisible in ``L_phys`` (which lands at
+    O(1) either way). It is only visible here.
+
+    The consequence if the factor is real: the residual reduces to
+    ``dTdt = Fo : grad^2 Tn``, i.e. the physics term tells the network the cell
+    is heated by nothing at all and must reach its temperature by conduction
+    alone. That is a different PDE from the one the data obeys, and no weight on
+    it can be right.
+
+    Reported per OP, with the ratio; a zero-flow OP whose ratio is far from 1 is
+    the conclusive case.
+    """
+    try:
+        flow_idx = CONFIG_ORDER.index("fluid_mass_flow")
+    except ValueError:                                   # pragma: no cover
+        flow_idx = None
+
+    lines = [
+        "energy balance (does the source explain the temperature rise?):",
+        "  <dTn/dtn> against <Qsrc>, both over the heated JR1 region and the",
+        "  training split. A no-flow OP has almost nowhere to lose heat, so its",
+        "  ratio has to be near 1 -- see energy_balance_report for what a large",
+        "  ratio would mean.",
+    ]
+    worst = 0.0
+    worst_noflow = 0.0
+    for op in bundle.ops:
+        jr1 = np.asarray(bundle.q_mask) > 0.5
+        if not jr1.any():
+            continue
+        n = max(2, int(op.split_t))
+        tn = np.asarray(op.tn, dtype=np.float64)[:n]
+        Tn = np.asarray(op.Tn, dtype=np.float64)[:n][:, jr1]
+        if tn.shape[0] < 3:
+            continue
+        # central difference, same stencil the scales are built from
+        dTdt = (Tn[2:] - Tn[:-2]) / (tn[2:] - tn[:-2])[:, None]
+        mean_dTdt = float(np.abs(dTdt).mean())
+        mean_Qsrc = float(np.abs(np.asarray(op.Qsrc, dtype=np.float64)[:n][:, jr1]).mean())
+        ratio = mean_dTdt / (mean_Qsrc + 1e-30)
+
+        flow = float("nan")
+        if flow_idx is not None and np.asarray(op.cfg_phys).size:
+            flow = float(np.nanmean(np.asarray(op.cfg_phys)[:n, flow_idx]))
+        no_flow = np.isfinite(flow) and abs(flow) < 1e-9
+        tag = "  <- NO FLOW: this one has to balance" if no_flow else ""
+        lines.append(
+            f"  {op.op_id}  <|dTn/dtn|>={mean_dTdt:9.4g}  <|Qsrc|>={mean_Qsrc:9.4g}"
+            f"  ratio={ratio:8.1f}x  flow={flow:.4g}{tag}"
+        )
+        worst = max(worst, ratio)
+        if no_flow:
+            worst_noflow = max(worst_noflow, ratio)
+
+    ref = worst_noflow or worst
+    if ref > 10.0:
+        basis = ("on the no-flow OP, where almost nothing can be carried away, so"
+                 " there is nowhere else for that energy to have come from"
+                 if worst_noflow else
+                 "on the worst OP. No zero-flow OP was in this set, so cooling"
+                 " could in principle explain part of it -- but not a factor this"
+                 " large, and OP07/OP14 settle it outright")
+        lines += [
+            "",
+            f"  [ENERGY] the source is short by a factor of ~{ref:.0f} {basis}.",
+            "  The heated region rises far faster than Qsrc can drive it, so Qsrc",
+            "  is too SMALL rather than the temperature too large.",
+            "  The first thing to check is the unit of the cached heat column: it is",
+            "  read as q_source[:, 0], the upstream name is 'jr1_w', and data.py",
+            "  uses it as W/m^3 with a 0/1 region mask and no volume division. If it",
+            "  is a total power in watts, dividing by the JR1 volume is the missing",
+            "  step and would move the ratio by exactly that volume.",
+            "  Until this is settled, w_phys is not tunable: the residual describes a",
+            "  cell heated by ~nothing, which is not the cell the data came from.",
+        ]
+    elif ref:
+        lines.append(f"  balance holds to within {ref:.1f}x on the binding OP.")
+    return lines
+
+
 def profile_report(bundle: NormBundle, extra_ops: Sequence[OPData] = ()) -> List[str]:
     """What each OP's bundle actually contains, next to what the sheet claims.
 
@@ -1147,6 +1248,7 @@ if __name__ == "__main__":
     require_ops(*DEFAULT_TRAIN_OPS, *DEFAULT_VAL_OPS, *DEFAULT_TEST_OPS)
     b = load_ops(op_ids=list(DEFAULT_TRAIN_OPS), subsample_time=40)
     print("\n".join(normalisation_report(b)))
+    print("\n".join(energy_balance_report(b)))
     held = [build_op(o, b, subsample_time=40)
             for o in list(DEFAULT_VAL_OPS) + list(DEFAULT_TEST_OPS)]
     print("\n".join(profile_report(b, held)))

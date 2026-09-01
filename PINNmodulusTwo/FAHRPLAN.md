@@ -34,7 +34,9 @@ offen war — nicht neu abzuleiten.
 | **O3** | §9a.1 OP15: `cell_current` fehlt im Bündel. `python3 data.py` erneut laufen lassen — der Bericht sagt seit 31.08., welche der zwei Ursachen es ist | du, 2 min |
 | **O4** | §9a.2 OP12 (**Training**): Profil endet bei 1440 s, Trajektorie bis 1604 s | Rückfrage an die Simulationsseite |
 | **O5** | **Tote Eingangskanäle.** `soc_start` ist über alle OPs konstant 10 % (`DEAD -> forced to 0`), und die Rate-Kanäle von `c_rate` und `fluid_mass_flow` sind im Training tot — werden aber auf OP15/OP16/OP19 lebendig. Das Modell soll dort einen Kanal deuten, den es nie gesehen hat | zu entscheiden, siehe §10 |
-| **O6** | Nichts an **Gewichten** ist auf Basis der Messungen geändert worden — bewusst, siehe §10 | offen bis 5b/6 |
+| **O6** | Nichts an **Gewichten** ist auf Basis der Messungen geändert worden — bewusst, siehe §10a | offen bis 5b/6 |
+| **O7** | **⚠️ Die Energiebilanz geht um ~147x nicht auf.** `python3 data.py` zeigt es jetzt selbst. Wahrscheinlich wird `q_source[:,0]` (`jr1_w`, Watt) als W/m³ benutzt — eine fehlende Volumendivision. **Solange das offen ist, ist `w_phys` nicht einstellbar.** §11 | du, 2 min + Rückfrage |
+| **O8** | Der BDF-Stencil in `L_phys` nutzt δ = 1.0 s gegen eine Diffusions-Zeitskala von ~0.24 s. Jetzt ein Knopf (`--delta-phys`) und mit `[CFL WARN]` versehen. §11.2 | erste Sweep-Achse |
 
 ---
 
@@ -770,6 +772,80 @@ ob der Profilexport abgeschnitten wurde (dann ist er nachzuliefern).
 
 **Bis das geklärt ist:** kein Grund, Schritt 5 aufzuhalten. Aber wenn OP12 später
 auffällig schlechter ist als die anderen Trainings-OPs, steht hier, warum.
+
+---
+
+## 11. Was die Messung über das MODELL sagt (31.08.)
+
+Zwei Befunde, die aus den Zahlen von Schritt 4/5 folgen und beide den
+**Physik-Term** betreffen. Beide sind jetzt im Code sichtbar gemacht; keiner ist
+blind repariert worden.
+
+### 11.1 Die Energiebilanz geht um Faktor ~147 nicht auf ← **der wichtigste Befund**
+
+```
+dTdt_scale = 3.534        Qsrc_scale = 0.0241        Verhaeltnis 147x
+```
+
+In physikalischen Einheiten: das beheizte Gebiet steigt um **~34 K** über den
+Lauf, die Quelle kann davon **0.23 K** erklären.
+
+Die nichtdimensionale Gleichung ist `dTn/dtn = Fo : ∇²Tn + Qsrc`. Über die Zelle
+gemittelt integriert sich der Diffusionsterm zum Randfluss — bei **OP07 und
+OP14, die beide Volumenstrom 0 haben**, kann also fast nichts abfließen, und
+`<dTn/dtn> ≈ <Qsrc>` muss gelten. Tut es um zwei Größenordnungen nicht.
+
+**Der wahrscheinliche Grund** steht in `data.py`:
+
+```python
+Qsrc = q_dot * q_mask * T_span_ref / (rho * Cp * T_sigma)
+q_mask = (region == 1)          # 0/1, KEINE Volumendivision
+```
+
+`q_dot` ist `q_source[:, 0]`, und die Spalte heißt stromaufwärts **`jr1_w`** —
+Watt, nicht W/m³. Wird eine Gesamtleistung als volumetrische Quelle eingesetzt,
+fehlt die Division durch das JR1-Volumen, und zwar **uniform**.
+
+**Warum das bisher niemand sehen konnte:** ein uniformer Faktor ist unsichtbar.
+Die EMA-Balance teilt ihn direkt wieder heraus, `L_phys` landet trotzdem bei
+O(1), und `phys_scale` wird aus denselben verfälschten Zahlen gebaut. Nur ein
+Energieargument sieht ihn — und genau das druckt `data.py` jetzt
+(`energy_balance_report`).
+
+**Die Konsequenz, wenn es sich bestätigt:** das Residuum reduziert sich auf
+`dTdt = Fo : ∇²Tn`. Der Physik-Term sagt dem Netz dann, die Zelle werde von
+**nichts** geheizt und müsse ihre Temperatur allein durch Leitung erreichen. Das
+ist eine andere PDE als die, der die Daten gehorchen, und **kein `w_phys` kann
+darauf richtig sein.**
+
+> **Deshalb ist O7 vor jedem Gewichts-Sweep zu klären.** Ein Balance-Sweep auf
+> einem falschen Residuum misst, wie schnell man den Physik-Term abschaltet.
+
+**Nächster Schritt:** `python3 PINNmodulusTwo/data.py` — die neue
+`[ENERGY]`-Zeile nennt den Faktor je OP. Dann beim Simulations-Export nachfragen,
+welche Einheit `jr1_w` wirklich trägt.
+
+### 11.2 Der Physik-Stencil ist 4x zu grob — und wurde nie geprüft
+
+`Fo` erreicht im **Aluminiumgehäuse** ~200 (Jelly Roll: ~0.1), die schnellste
+Diffusions-Zeitskala liegt damit bei `Δt_max ≈ 0.24 s`. Der BDF2-Stencil in
+`physics.py` nutzt aber `δ = 1.0 s` — bis zum 31.08. **hartverdrahtet**, kein
+Flag, kein config-Schlüssel.
+
+Schlimmer: die CFL-Prüfung bekam nur den **Datenschritt** übergeben, nicht `δ`.
+Und `δ` folgt `--subsample` nicht — es bleibt bei seinem Wert, wie fein das
+Gitter auch wird. Ein Lauf bei `subsample 2` druckte also `CFL OK` (dt = 0.2 s
+gegen 0.24 s, allerdings nur 1.2x Reserve), während die Zeitableitung im
+Residuum über eine 4x zu lange Spanne gebildet wurde.
+
+Seit dem 31.08.: `--delta-phys` ist ein Knopf (Default unverändert 1.0, damit
+sich nichts still ändert), und die CFL-Prüfung sieht beide Schritte an und warnt
+getrennt.
+
+Im **hybriden** History-Modus — dem Default — speist `δ` **ausschließlich**
+`L_phys`; die History des Netzes hängt an `--delta-grid` und `--rate-lags`. Das
+macht `δ` zu einer sauber isolierten Achse und damit zum **besten ersten
+Sweep-Kandidaten**, sobald 11.1 geklärt ist.
 
 ---
 

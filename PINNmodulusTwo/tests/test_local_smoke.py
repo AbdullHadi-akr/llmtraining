@@ -507,3 +507,55 @@ def test_a_checkpoint_says_whether_the_run_finished(synthetic_cache, tmp_path):
     hist_short["epoch"] = []
     train_mod.save_checkpoint(model, bundle, args, dtn, hist_short, path)
     assert torch.load(path, weights_only=False)["run"]["complete"] is False
+
+
+# --------------------------------------------------------------------------
+# physics sanity
+# --------------------------------------------------------------------------
+
+def test_energy_balance_report_compares_the_source_against_the_rise(synthetic_cache):
+    """The check that would catch a units error in the heat column.
+
+    ``Qsrc`` is built from ``q_dot`` with a 0/1 region mask and NO volume
+    division, i.e. ``q_dot`` is treated as W/m^3. The upstream column is named
+    ``jr1_w``. If it is a total power in watts instead, every ``Qsrc`` is wrong
+    by the JR1 volume -- a UNIFORM factor, which is exactly the kind that hides:
+    the EMA balancer divides it straight back out and ``L_phys`` still lands at
+    O(1). Only an energy argument sees it.
+    """
+    bundle = data_mod.load_ops(op_ids=["OP01", "OP02"], subsample_time=40)
+    lines = data_mod.energy_balance_report(bundle)
+
+    assert any("energy balance" in l for l in lines)
+    rows = [l for l in lines if "ratio=" in l]
+    assert len(rows) == len(bundle.ops)
+    assert all("<|dTn/dtn|>" in l and "<|Qsrc|>" in l for l in rows)
+
+
+def test_cfl_check_looks_at_the_physics_stencil_not_only_the_data_step(capsys):
+    """δ is its own knob and was never checked -- that is how it stayed at 4x.
+
+    ``_check_cfl_stability`` used to be handed only the data grid step. The BDF
+    stencil in ``physics.py`` uses ``model.delta``, which does NOT follow
+    ``--subsample``: a fine data grid printed "CFL OK" while the residual's time
+    derivative was taken over a lag four times the limit.
+    """
+    from types import SimpleNamespace
+
+    bundle = SimpleNamespace(
+        Fo=np.array([[[1.0, 0, 0], [0, 1.0, 0], [0, 0, 1.0]]]),
+        L_ref=0.0768, T_span_ref=1604.0,
+        xn=np.array([[0.0, 0, 0], [1.0, 1.0, 1.0]]),
+    )
+    train_mod._check_cfl_stability(bundle, 1e-6, None, phys_delta_s=1e9)
+    out = capsys.readouterr().out
+    assert "CFL OK" in out, "the data step alone should still read OK"
+    assert "PHYSICS stencil" in out, "the physics lag must be flagged separately"
+    assert "--delta-phys" in out, "and the message must name the knob"
+
+
+def test_delta_phys_reaches_the_model(synthetic_cache):
+    """The knob has to change the BDF lag, not just parse."""
+    args = _tiny_args(synthetic_cache, delta_phys=0.25)
+    model, bundle, _packed, _dtn, _hist = train_mod.fit(args)
+    assert float(model.delta) == pytest.approx(0.25 / bundle.T_span_ref, rel=1e-6)

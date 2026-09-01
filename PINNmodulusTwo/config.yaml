@@ -123,6 +123,21 @@ rate_lags: [5.0, 20.0]  # seconds, hybrid history mode only
 # there. Independent of subsample_time - do not confuse the two.
 delta_grid: 0.2            # ONLY used when history_mode: hybrid
 time_deriv: bdf2           # bdf1 | bdf2 | autograd
+# Lag of the BDF stencil in the physics residual, in SECONDS. Hardwired at 1.0
+# until 31.08.2026; now a knob, still defaulting to 1.0 so nothing changed
+# silently.
+#
+# The CFL estimate on this cell puts the fastest diffusion timescale at
+# ~0.24 s (set by the ALUMINIUM HOUSING, where lambda is two orders above the
+# jelly roll). A 1.0 s stencil is therefore ~4x too coarse to resolve it, and
+# the time derivative in L_phys is systematically wrong exactly where Fo is
+# largest. train.py prints a [CFL WARN] for it now.
+#
+# In hybrid history mode this feeds ONLY L_phys -- the network's own history
+# uses delta_grid and rate_lags -- so it is an isolated knob and a clean first
+# axis for a sweep. In raw mode it also spaces the history channels and changes
+# the model.
+delta_phys: 1.0
 use_static: true
 use_forcing: true
 
