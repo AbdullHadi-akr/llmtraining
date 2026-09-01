@@ -1,25 +1,23 @@
 # Fahrplan — OP01–OP16 trainiert, OP19 als Messvergleich
 
-> ## ▶ Das Nächste: Schritt 6
+> ## ▶ Das Nächste: `sweep.py` — die Seed-Schleife
 >
-> Schritt 1 bis 5b sind durch. **Es steht genau ein Kommando aus.**
+> **Schritt 6 ist am 01.09. gelaufen und grün.** Alle fünf Signale, siehe die
+> Stand-Tabelle in Teil III. Der Kern in einer Zeile: **`spread` steigt auf
+> 0.968 und beide val-OPs schlagen die trivialen Vorhersager um 42 % bzw. 54 %.**
 >
-> ```bash
-> cd /mnt/c/Users/M0245635/batterysurrogatemodell
-> git checkout main && git pull
-> source modulus_env/bin/activate
+> Damit ist die Bedingung aus §10 erfüllt und die nächste Sache ist **kein Lauf,
+> sondern Code**: ~80 Zeilen, die `train.fit()` über mehrere Seeds schleifen und
+> eine Zeile je (Konfiguration, Seed) nach `artifacts/sweep.csv` schreiben.
 >
-> python3 PINNmodulusTwo/train.py --epochs 60 2>&1 | tee 06_lauf.txt
-> ```
+> **Warum das jetzt zuerst kommt:** ab hier werden Konfigurationen verglichen —
+> `--w-phys`, `--delta-phys` (O8), tote Kanäle (O5). Eine MAE-Differenz zwischen
+> zwei Läufen ist aber nicht lesbar, solange die Streuung über Seeds daneben
+> fehlt. Jede Zahl, die ohne sie entsteht, ist wieder die Sorte, wegen der die
+> acht Benchmark-Skripte gelöscht wurden.
 >
-> CPU misst ~110 s/Epoche → ~2 h. Auf GPU deutlich weniger; `--device` fragt nach.
->
-> **Danach schickst du drei Dateien:** `06_lauf.txt`, `artifacts/metrics.txt` und
-> — diesmal die wichtigste — `artifacts/history.csv`.
->
-> Worauf du im Log schaust, steht direkt darunter. Signal 3 (`spread`) ist das
-> neue und das entscheidende.
-
+> Danach die erste Achse: **δ (`--delta-phys`)**, weil sie sauber isoliert ist
+> und der `[CFL WARN]` seit dem 31.08. bei jedem Lauf steht.
 ---
 
 **Diese Datei ist der Einstieg.** Alles andere ist Nachschlagewerk. Wenn du nur
@@ -50,42 +48,50 @@ ist, unten.**
 
 # TEIL I — ZU TUN
 
-# Schritt 6 — der erste ernsthafte Lauf
+# `sweep.py` — die Seed-Schleife
 
-Das Kommando steht oben. Hier steht, was dabei herauskommen muss.
+**Schritt 6 ist gelaufen und grün** (Zahlen in Teil III). Ab hier werden
+Konfigurationen verglichen, und dafür fehlt das Werkzeug.
 
-## Worauf du in `06_lauf.txt` schaust — in dieser Reihenfolge
+## Was gebaut wird
 
-| # | Signal | gut | schlecht → was dann |
-|---|---|---|---|
-| 1 | `[ABORT]` | kommt nicht | Loss nicht-endlich → zurück zu 5b, `--max-rate-amp 50` |
-| 2 | `[SATURATED]` in der **letzten** Epoche | keine Zeile | Rollout weggelaufen → mehr Epochen, dann `lr` runter |
-| 3 | **`spread s/t`** über die Epochen | **steigt Richtung 1** | **bleibt bei ~0.3 oder fällt → O9 bestätigt**, siehe unten |
-| 4 | `[FLAT]` | kommt nicht | dasselbe wie 3, nur lauter |
-| 5 | `LOSES TO` auf OP06/OP09 | kommt nicht | schlechter als „nichts tun" → das Problem sind Daten/Modellklasse, nicht Gewichte |
-
-**Signal 3 ist das neue und das wichtigste.** In 5b stand `spread_time` bei
-**0.201** — die `[FLAT]`-Warnung löst bei 0.2 aus, es fehlten also 0.5 %. Ob das
-Untertrainiertheit war oder ein Artefakt des Physik-Terms, entscheidet **dieser**
-Lauf und sonst nichts:
-
-* `spread` steigt Richtung 1 **und** MAE fällt → der Physik-Term trägt wirklich.
-  Weiter mit der Seed-Schleife (§10).
-* `spread` bleibt bei ~0.3 **und** MAE fällt trotzdem → **O9 bestätigt**: die
-  MAE-Verbesserung ist Varianzreduktion, keine bessere Dynamik. Dann **nicht**
-  mehr Epochen, sondern `--w-phys 0.01` gegen `0.1` messen.
-
-## Was du danach schickst
+~80 Zeilen, eine Datei, kein Framework:
 
 ```
-06_lauf.txt   +   PINNmodulusTwo/artifacts/metrics.txt
-              +   PINNmodulusTwo/artifacts/history.csv    <- wegen spread je Epoche
+python3 PINNmodulusTwo/sweep.py --seeds 0 1 2 --epochs 20
+  -> artifacts/sweep.csv : eine Zeile je (Konfiguration, Seed)
+  -> stdout              : Mittel und Std je Konfiguration über die val-OPs
 ```
 
-`history.csv` ist diesmal die wichtigere Datei: die `spread`-Spalten über 60
-Epochen sind das, was 5b nicht beantworten konnte.
+Ruft `train.fit()` in einer Schleife, sonst nichts. Kein Plot, kein Resume, kein
+Checkpoint-Merge — die kommen zuletzt und nur für die Achse, die wirklich Stunden
+läuft.
 
----
+## Warum zuerst das und nicht die nächste Achse
+
+Eine MAE-Differenz zwischen zwei Läufen ist **nicht lesbar**, solange die
+Streuung über Seeds daneben fehlt. 6.27 gegen 6.51 ist kein Ergebnis, wenn
+derselbe Lauf mit anderem Seed zwischen 5.9 und 6.8 schwankt. Genau das hat allen
+bisherigen Ergebnissen dieses Projekts gefehlt.
+
+Schritt 6 hat dafür gerade das Lehrstück geliefert: nach drei Epochen stand
+`spread` bei 0.201 und sah aus wie ein Artefakt; nach sechzig steht er bei 0.968.
+**Drei Epochen sind kein Trend, und ein Seed ist keine Streuung.**
+
+## Die Achsen danach, in dieser Reihenfolge
+
+| # | Achse | warum zuerst |
+|---|---|---|
+| 1 | **δ (`--delta-phys`)**, O8 | sauber isoliert (speist im Hybrid-Modus nur `L_phys`), und der `[CFL WARN]` steht bei jedem Lauf: 1.0 s gegen Δt_max 0.24 s. Punkte: 1.0 (Default), 0.2 (= Datengitter) |
+| 2 | **`w_bc`**, O12 | der BC-Term ist auf `ratio 0.0178` gefallen. Tut er überhaupt etwas? Dazu `--batch-bc` auf 121 statt 128 |
+| 3 | **`w_phys`**, O6 | erst wenn 1 und 2 stehen — sonst misst man δ mit dem Gewicht |
+
+## Die Auswahlregeln stehen fest
+
+Siehe §10 in Teil II. Kurz: Mittel über `--val-ops`, nie ein einzelner OP · nach
+Tier getrennt berichten · Kriterium ist MAE, nie `L_data` · **`spread` als
+Nebenbedingung in [0.7, 1.3]** · Spanne zwischen Konfigurationen < Spanne zwischen
+Seeds → keine Rangfolge.
 
 ## Offene Punkte — nach Zuständigkeit
 
@@ -93,29 +99,15 @@ Was hier steht, ist offen. Alles Erledigte ist in Teil III.
 
 | # | offen | wer / wann |
 |---|---|---|
-| **O9** | **Dämpft der Physik-Term nur, statt Dynamik zu lernen?** Mit Physik `spread s/t` = 0.339/**0.201**, ohne = 2.15/1.03 — die `[FLAT]`-Warnung löst bei 0.2 aus, es fehlten 0.5 %. §11.3 hat die Analyse | **Schritt 6 beantwortet es** |
+| **O11** | **NEU 01.09. OP19 wird schlechter, je besser das Modell wird.** 5b: 10.334 C sind 88 % **schlechter** als die 5.507 C nach drei Epochen — während jeder andere OP sich verbessert hat. Erwartbar bei 16.7 σ Extrapolation, aber es heißt: die Simulations-MAE sagt über den Prüfstand nichts, sie sagt es sogar mit wachsender Überzeugung falsch. §11.4 | vor jedem Messvergleich klären |
+| **O12** | **NEU 01.09. Der BC-Term trägt fast nichts.** `ratio bc` fällt über den Lauf auf **0.0178** — knapp 2 % der Größe des Datenterms. Dazu die stehende Warnung: 121 BC-Punkte gegen `--batch-bc 128`. Ob `w_bc` überhaupt etwas tut, ist eine Sweep-Frage | erste Sweep-Achsen |
+| **O13** | **NEU 01.09. Der Fehler sitzt am Ende der Trajektorie.** OP06: MAE 6.270 C, aber `late(held out)` = **13.248 C** — doppelt. Gleiches Muster auf OP03 (3.341 / 7.371) und OP16 (3.476 / 6.959). Der Rollout driftet spät, obwohl `spread` gesund ist | zu untersuchen |
 | **O8** | Der BDF-Stencil nutzt δ = 1.0 s gegen Δt_max ≈ 0.24 s (`[CFL WARN]` bei jedem Lauf). Knopf ist da (`--delta-phys`), Default bleibt 1.0 bis gemessen. Seit O7 die erste freie Sweep-Achse. §11.2 | nach Schritt 6 |
 | **O6** | Kein Gewicht auf Basis von Messungen gesetzt — weiterhin bewusst, §10a | nach Schritt 6 |
 | **O5** | **Tote Eingangskanäle.** `soc_start` ist über alle OPs konstant 10 % (`DEAD -> forced to 0`), die Rate-Kanäle von `c_rate` und `fluid_mass_flow` sind im Training tot — auf OP15/OP16/OP19 aber lebendig. OP19 fährt `soc_start` = 77 % gegen trainierte 10 %, und das Netz erfährt davon nichts. Seit 01.09. meldet `coverage_report` es wenigstens. Die **Entscheidung** (Kanal streichen? Envelope erweitern?) ist offen, §10 | zu entscheiden |
 | **O10** | **Warnung, kein Punkt.** OP14 startet über alle Punkte bei 0 °C. Das sieht nach Füllwert aus, ist aber die geplante Anfangsbedingung (`op_registry.py:123`: T0 = 0 °C, „coldest start in the set"). **Nicht maskieren, nicht ersetzen, OP14 nicht entfernen** — es ist einer von nur zwei OPs mit V̇ = 0, und die binden die Energiebilanz | nichts tun |
 
 **Geschlossen am 01.09.:** O1, O2, O3, O4, O7. Siehe Teil III.
-
----
-
-## Danach: `sweep.py`
-
-Die Bedingung aus §10 („einmal Schritt 5b oder 6 auswerten") ist mit 5b erfüllt.
-Nach Schritt 6 wird die **Seed-Schleife** gebaut — ~80 Zeilen, ruft `train.fit()`
-in einer Schleife, schreibt `artifacts/sweep.csv`, sonst nichts.
-
-**Vorher nicht.** Ein Seed und drei Epochen tragen keine Rangfolge zwischen
-Konfigurationen: eine MAE-Differenz ist nicht lesbar, solange die Streuung über
-Seeds daneben fehlt. Genau deshalb ist in dieser Sitzung kein Gewicht, kein
-Default und keine Loss-Balance geändert worden.
-
-Die Auswahlregeln stehen bereits fest, §10 in Teil II — inklusive der neuen:
-**`spread` ist eine Nebenbedingung, kein Ziel.**
 
 ---
 
@@ -582,7 +574,7 @@ Archiv: abgehakte Schritte, gemessene Zahlen, geschlossene Befunde.
 - [x] **5** Die Latte — 31.08. gelaufen, **nicht aussagekraeftig** (§9.3) und
   mit dem falschen `Qsrc` gerechnet. **Von 5b ersetzt, nicht zu wiederholen**
 - [x] **5b** Kurzlauf bei der ECHTEN Konfiguration — **01.09., GRÜN.** `[SATURATED]` in Epoche 3 weg, und beide val-OPs schlagen zum ersten Mal die trivialen Vorhersager — **nur mit Physik-Term**
-- [ ] **6** Erster ernsthafter Lauf (GPU) ← **freigegeben durch 5b**
+- [x] **6** Erster ernsthafter Lauf — **01.09., GRÜN auf allen fünf Signalen.** `spread` 0.201 → **0.968**, `[SATURATED]` ab Epoche 26 weg, beide val-OPs schlagen die trivialen Vorhersager deutlich
 
 ## Stand
 
@@ -616,10 +608,16 @@ Wird beim Abhaken ausgefüllt. Leer = noch nicht gemessen.
 | 5b-2 | val OP06 / OP09 (ohne Physik) | **11.591 / 8.504 C — LOSES TO** auf beiden | **01.09.** |
 | 5b-1 | test OP13 / OP15 / OP16 | 8.686 / 7.239 / 4.204 C — alle drei **beats** | **01.09.** |
 | 5b-1 | OP19 (Messvergleich) | 5.507 C — **LOSES TO** (persistence 1.376), wie §9.4 vorhergesagt | **01.09.** |
-| 6 | `[SATURATED]` letzte Epoche | | |
-| 6 | MAE OP06 / OP09 | | |
-| 6 | MAE OP13 / OP15 / OP16 | | |
-| 6 | MAE OP19 (Messvergleich) | | |
+| 6 | `[ABORT]` | **kam nicht** | 01.09. |
+| 6 | `[SATURATED]` letzte Epoche | **weg.** Fällt monoton: Ep1 99.9 % (OP05) → Ep4 99.4 % → Ep14 47 % → Ep25 22 % → ab Ep26 keine Zeile | **01.09.** |
+| 6 | **`spread s/t`** | **1.10 / 0.968** — von 9.02/6.04 in Ep1 monoton auf ~1 und dort geblieben. **O9 beantwortet** | **01.09.** |
+| 6 | `[FLAT]` | **kam nie** | 01.09. |
+| 6 | MAE OP06 / OP09 | **6.270 / 3.585 C — beide beats.** 42 % bzw. 54 % besser als `train-mean` (10.801 / 7.762), gegen `persistence` 16.679 / 18.549 | **01.09.** |
+| 6 | MAE OP13 / OP15 / OP16 | **4.097 / 4.809 / 3.476 C — alle drei beats**, 57 / 40 / 24 % besser als `train-mean` | **01.09.** |
+| 6 | MAE Trainings-OPs | 1.000 (OP01) … 5.656 (OP14), **alle beats** | 01.09. |
+| 6 | MAE OP19 (Messvergleich) | **10.334 C — LOSES TO** (persistence 1.376). Und 88 % **schlechter** als in 5b. Siehe O11 | **01.09.** |
+| 6 | `L_data` | 100.5 → **0.0515** | 01.09. |
+| 6 | Loss-Balance | arbeitet jetzt: `ratio phys/bc` 2.17/0.782 → **0.605/0.0178**, betas [0.91 …] → [0.98 2.64 3.9 3.99] | 01.09. |
 
 Alles läuft aus dem Repo-Wurzelverzeichnis:
 
@@ -873,7 +871,13 @@ er es bei dt = 0.2 s immer noch ist, trennen diese zwei Läufe.
 
 ---
 
-### - [ ] Schritt 6 — Der erste ernsthafte Lauf (Stunden, jetzt GPU)
+### - [x] Schritt 6 — 01.09. gelaufen, grün auf allen fünf Signalen
+
+> **01.09. gelaufen, ~2 h auf CPU, grün auf allen fünf Signalen.** Kein
+> `[ABORT]`, kein `[FLAT]`, `[SATURATED]` ab Epoche 26 verschwunden, `spread`
+> auf 0.968, und alle sechzehn Simulations-OPs schlagen die trivialen
+> Vorhersager. Die Zahlen stehen in der Stand-Tabelle, die Deutung in §11.3
+> (O9 geschlossen) und §11.4 (O11 neu).
 
 **Erst wenn 5b grün ist** — also `[SATURATED]` verschwunden. Sechzig Epochen auf
 einem Rollout, der zu 99 % im Clamp hängt, ranken das Clamp-Verhalten und nicht
@@ -904,6 +908,39 @@ Vier Signale im Log, in dieser Rangfolge:
 | `[FLAT]` | Feld konstant; ein fallendes `L_phys` ist dann die triviale Lösung, nicht Physik | `--w-phys` / `--w-bc` senken |
 | **`spread` bleibt bei ~0.3** | **O9: die MAE-Verbesserung ist Varianzreduktion, keine Dynamik.** In 5b stand er bei 0.201, die `[FLAT]`-Schwelle ist 0.2 | `--w-phys 0.01` gegen `0.1` messen — **nicht** mehr Epochen. §11.3 |
 | `LOSES TO` auf OP06/OP09 | schlechter als „nichts tun" | **das** ist das Problem, nicht die Gewichte |
+
+#### Worauf geschaut wurde — und was herauskam
+
+| # | Signal | gut | schlecht → was dann |
+|---|---|---|---|
+| 1 | `[ABORT]` | kommt nicht | Loss nicht-endlich → zurück zu 5b, `--max-rate-amp 50` |
+| 2 | `[SATURATED]` in der **letzten** Epoche | keine Zeile | Rollout weggelaufen → mehr Epochen, dann `lr` runter |
+| 3 | **`spread s/t`** über die Epochen | **steigt Richtung 1** | **bleibt bei ~0.3 oder fällt → O9 bestätigt**, siehe unten |
+| 4 | `[FLAT]` | kommt nicht | dasselbe wie 3, nur lauter |
+| 5 | `LOSES TO` auf OP06/OP09 | kommt nicht | schlechter als „nichts tun" → das Problem sind Daten/Modellklasse, nicht Gewichte |
+
+**Signal 3 ist das neue und das wichtigste.** In 5b stand `spread_time` bei
+**0.201** — die `[FLAT]`-Warnung löst bei 0.2 aus, es fehlten also 0.5 %. Ob das
+Untertrainiertheit war oder ein Artefakt des Physik-Terms, entscheidet **dieser**
+Lauf und sonst nichts:
+
+* `spread` steigt Richtung 1 **und** MAE fällt → der Physik-Term trägt wirklich.
+  Weiter mit der Seed-Schleife (§10).
+* `spread` bleibt bei ~0.3 **und** MAE fällt trotzdem → **O9 bestätigt**: die
+  MAE-Verbesserung ist Varianzreduktion, keine bessere Dynamik. Dann **nicht**
+  mehr Epochen, sondern `--w-phys 0.01` gegen `0.1` messen.
+
+#### Die Dateien dazu
+
+```
+06_lauf.txt   +   PINNmodulusTwo/artifacts/metrics.txt
+              +   PINNmodulusTwo/artifacts/history.csv    <- wegen spread je Epoche
+```
+
+`history.csv` ist diesmal die wichtigere Datei: die `spread`-Spalten über 60
+Epochen sind das, was 5b nicht beantworten konnte.
+
+---
 
 ---
 
@@ -1135,7 +1172,39 @@ Vorzeichen dieser Größe still.
 Die `[ENERGY]`-Zeile muss verschwinden oder nahe 1 stehen; `Qsrc_scale` und
 `phys_scale` sind die neuen maßgeblichen Zahlen.
 
-### 11.3 Der Physik-Term dämpft — Artefakt oder Untertrainiertheit? (O9, 01.09.)
+### 11.3 Der Physik-Term dämpft — **Untertrainiertheit. O9 geschlossen, 01.09.**
+
+> ## Die Vermutung war falsch, und das ist das Ergebnis
+>
+> Nach 5b stand hier der Verdacht, die MAE-Verbesserung durch den Physik-Term sei
+> **Varianzreduktion statt Dynamik** — ein Regularisierungs-Artefakt. Zwei
+> Modelle sind unabhängig darauf gekommen, und der stärkste Beleg schien der
+> `[FLAT]`-Detektor zu sein, der um 0.5 % nicht ausgelöst hatte.
+>
+> **Schritt 6 sagt: nein.** `spread_time` über 60 Epochen:
+>
+> | Ep | 1 | 5 | 10 | 20 | 30 | 40 | 50 | **60** |
+> |---|---|---|---|---|---|---|---|---|
+> | `spread_t` | 6.04 | 0.223 | 0.567 | 0.915 | 0.921 | 0.837 | 0.891 | **0.968** |
+>
+> Der Rollout kommt aus dem Explodieren (6.04), schießt ins Überdämpfte (0.223 in
+> Epoche 5), und **steigt dann monoton auf 0.968** — also praktisch genau auf die
+> gesunde 1. Räumlich dasselbe: 9.02 → 1.10. Die 0.201 nach drei Epochen war
+> **ein Durchgangswert**, kein Fixpunkt.
+>
+> Gleichzeitig fällt die MAE weiter (OP06 10.540 → 6.270 C, OP09 7.494 → 3.585 C).
+> Beides zusammen — `spread` → 1 **und** MAE fällt — ist genau der Fall, den die
+> Signaltabelle als „der Physik-Term trägt wirklich" führt.
+>
+> **Was daraus zu lernen ist, über den Befund hinaus:** drei Epochen sind kein
+> Trend. Der `spread` war in Epoche 5 bei 0.223 und in Epoche 60 bei 0.968 — wer
+> nach drei Epochen extrapoliert, liest ein Vorzeichen als Ergebnis. §10a hat
+> genau deshalb kein Gewicht auf 5b-Zahlen gesetzt, und das war richtig.
+>
+> Nicht gebaut wurden dabei: `L_spread`, Gradient-Balancing, adaptives `w_phys`.
+> Alle drei wären Umbauten gegen ein Problem gewesen, das es nicht gibt.
+
+**Die Ausgangslage, zur Nachvollziehbarkeit:**
 
 Aus 5b, drei Epochen, ein Seed:
 
@@ -1182,6 +1251,35 @@ Daten).
 `spread` über 60 Epochen Richtung 1, war 0.2 Untertrainiertheit. Bleibt er bei
 ~0.3 während die MAE fällt, ist es das Artefakt — dann `--w-phys 0.01` gegen
 `0.1` messen statt mehr Epochen.
+
+---
+
+### 11.4 OP19 wird schlechter, je besser das Modell wird (O11, 01.09.)
+
+| | 5b (3 Epochen) | Schritt 6 (60 Epochen) |
+|---|---|---|
+| val OP06 / OP09 | 10.540 / 7.494 C | **6.270 / 3.585 C** |
+| test OP13 / 15 / 16 | 8.686 / 7.239 / 4.204 C | **4.097 / 4.809 / 3.476 C** |
+| **OP19 (Messung)** | 5.507 C | **10.334 C** ← 88 % schlechter |
+
+Jeder Simulations-OP verbessert sich, der Messvergleich verschlechtert sich fast
+um das Doppelte. Das ist kein Widerspruch, sondern die Definition von
+Extrapolation: OP19 liegt 16.7 σ unter dem trainierten `c_rate`-Bereich (es ist
+eine Entladung, OP01–OP16 sind alle Ladungen), 12.2 σ unter `cell_current`, fährt
+`soc_start` = 77 % gegen trainierte 10 % — über einen **toten** Kanal, den das
+Netz nicht sehen kann (O5) — und läuft mit `tn` bis 2.18 aus dem normierten
+Zeitbereich heraus.
+
+Ein untrainiertes Netz sagt dort etwas Beliebiges; ein gut trainiertes sagt
+**mit Überzeugung** das, was in seinem Envelope richtig wäre. Die zweite Sorte
+Fehler ist größer.
+
+**Die Konsequenz für die Bewertung:** die Simulations-MAE sagt über den Prüfstand
+nichts, und der Messvergleich darf nie als Auswahlkriterium dienen — er tut es
+laut §1 auch nicht. Zu klären, bevor OP19 je als Erfolgsmaß gilt: erst den
+Envelope erweitern (eine Entladung ins Training, `soc_start` beleben), dann
+messen. `max = 96.760 C` auf OP19 zeigt außerdem, dass es dort Stellen gibt, an
+denen die Vorhersage nicht nur ungenau, sondern unphysikalisch ist.
 
 ---
 
@@ -1431,57 +1529,57 @@ Was `train.py` dadurch selbst kann, ohne dass ein Benchmark existieren muss:
 
 ## Sitzungsende 01.09. — Lagebericht
 
-**Schritt 1–5b sind durch, Schritt 6 ist freigegeben und noch nicht gelaufen.**
-Der Physik-Term hatte eine 121x zu kleine Quelle; das ist behoben und auf echten
-Daten bestätigt. Seitdem schlagen beide val-OPs zum ersten Mal die trivialen
-Vorhersager — aber nur mit Physik-Term, und der Rollout ist dabei verdächtig
-stark gedämpft (O9).
+**Schritt 1 bis 6 sind durch. Das Modell schlägt auf allen sechzehn
+Simulations-OPs die trivialen Vorhersager.** Das ist die Zahl, auf die dieses
+Projekt seit Monaten gewartet hat.
 
-**Dein nächstes Kommando steht ganz oben unter „JETZT".** Es ist eines.
-
-## Was am 01.09. gemessen wurde
+## Der Weg dahin, an einem Tag
 
 | | |
 |---|---|
-| **Schritt 4** | `[ENERGY]` weg (war ~147x). `Qsrc_scale` 0.0241 → **2.916**, `phys_scale` 3.535 → **4.582**, beide exakt wie vorhergesagt. Alles andere unverändert. Die Bilanz folgt monoton dem Volumenstrom: V̇=0 → 0.9x, V̇=0.0026 → 0.5x |
-| **Schritt 5b** | `[SATURATED]` in Epoche 3 **weg** — der weglaufende Rollout aus §9.3 war `dt`. val OP06 **10.540 C beats**, OP09 **7.494 C beats**; ohne Physik-Term verlieren beide |
-| **offen daraus** | `spread` = 0.339/**0.201** mit Physik gegen 2.15/1.03 ohne. `[FLAT]` löst bei 0.2 aus. §11.3, O9 |
+| **Der Fehler** | `q_dot` war um Faktor 121 zu klein — die „Gleichverteilung" wurde doppelt gezählt. Der Physik-Term war praktisch quellenfrei. §11.1 |
+| **Schritt 4** | `Qsrc_scale` 0.0241 → **2.916**, `phys_scale` 3.535 → **4.582**, beide exakt wie vorhergesagt. `[ENERGY]` weg, Bilanz folgt monoton dem Volumenstrom |
+| **Schritt 5b** | `[SATURATED]` weg, beide val-OPs schlagen erstmals — **nur mit** Physik-Term |
+| **Schritt 6** | `spread` 0.201 → **0.968**, val-MAE 6.270 / 3.585 C (42 % / 54 % besser als `train-mean`), alle Test-OPs beats |
 
-## Offene Punkte, sortiert
+## Was widerlegt wurde, und das gehört dazu
 
-| | | wer |
+Nach 5b stand hier die Vermutung, die MAE-Verbesserung durch den Physik-Term sei
+**Varianzreduktion statt Dynamik** — ein Regularisierungs-Artefakt. Zwei Modelle
+kamen unabhängig darauf. **Schritt 6 hat es widerlegt:** `spread` steigt monoton
+von 0.223 (Epoche 5) auf 0.968 (Epoche 60), während die MAE weiter fällt.
+
+Die 0.201 nach drei Epochen war ein Durchgangswert. **Drei Epochen sind kein
+Trend** — und genau deshalb war es richtig, darauf kein Gewicht zu setzen und
+weder `L_spread` noch Gradient-Balancing noch adaptives `w_phys` einzubauen. Alle
+drei wären Umbauten gegen ein Problem gewesen, das es nicht gibt.
+
+## Offene Punkte
+
+| # | | wer / wann |
 |---|---|---|
-| **O9** | dämpft der Physik-Term nur, statt Dynamik zu lernen? | **Schritt 6 beantwortet es** |
-| **O8** | δ = 1.0 s gegen Δt_max 0.24 s. Seit O7 frei, erste Sweep-Achse | nach Schritt 6 |
-| **O5** | tote Kanäle. OP19 fährt `soc_start` 77 % gegen trainierte 10 %, unsichtbar fürs Netz | zu entscheiden |
-| **O6** | kein Gewicht auf Basis von Messungen gesetzt — weiterhin bewusst | nach Schritt 6 |
-| **O10** | **Warnung, kein Punkt:** OP14s 0 °C sind geplant, nicht kaputt. Nicht „reparieren" | nichts tun |
+| **O11** | OP19 wird schlechter, je besser das Modell wird (5.507 → 10.334 C). Extrapolation, kein Fehler — aber der Messvergleich taugt bis zur Envelope-Erweiterung nicht als Maß. §11.4 | vor jedem Messvergleich |
+| **O12** | Der BC-Term ist auf `ratio 0.0178` gefallen. Tut `w_bc` überhaupt etwas? | Sweep-Achse 2 |
+| **O13** | Der Fehler sitzt am Ende der Trajektorie: OP06 MAE 6.270 C, `late` 13.248 C | zu untersuchen |
+| **O8** | δ = 1.0 s gegen Δt_max 0.24 s | **Sweep-Achse 1** |
+| **O6** | kein Gewicht auf Basis von Messungen gesetzt | Sweep-Achse 3 |
+| **O5** | tote Kanäle — `soc_start` konstant, Rate-Kanäle tot | zu entscheiden |
+| **O10** | Warnung: OP14s 0 °C sind geplant, nicht kaputt | nichts tun |
 
-**Erledigt in dieser Sitzung:** O1, O2, O3, **O4**, O7 — Schritt 4, 5, 5b
-abgehakt — und die Rohexport-Fragen Q1/Q2/Q3 beantwortet, alle drei aus den
-Daten, keine durch eine Rückfrage.
+**Geschlossen am 01.09.:** O1, O2, O3, O4, O7, **O9**. Schritte 4, 5, 5b, 6.
 
-**Kein Cache-Neubau nötig.** Weder OP12 noch OP14 werden angefasst.
+## Was der Code an diesem Tag gelernt hat
 
-## Was danach gebaut wird
+* `q_dot = jr1_w / V_JR1`, und `q_dot = 0` außerhalb JR1 — im Code gegen ein
+  „Zurückreparieren" am Basis-README abgesichert.
+* Drei neue Tests: die Umrechnung, die Empfindlichkeit des Energieberichts, tote
+  Kanäle im Coverage-Report.
+* `coverage_report` meldet tote Skalar-Kanäle — hat sofort OP19s `soc_start`
+  gefunden.
 
-Die Bedingung aus §10 („einmal 5b oder 6 auswerten") ist erfüllt. Nach Schritt 6
-kommt `sweep.py`, die Seed-Schleife, ~80 Zeilen. Vorher nicht: ein Seed und drei
-Epochen tragen keine Rangfolge zwischen Konfigurationen, und genau deshalb ist in
-dieser Sitzung **kein Gewicht, kein Default und keine Loss-Balance** geändert
-worden. Der 121er war ein Einheitenfehler mit einer eindeutigen richtigen
-Antwort — das ist die einzige Sorte Änderung, die ohne Messung zulässig war.
+**Kein Gewicht, kein Default, keine Loss-Balance geändert. Kein Cache-Neubau.**
+Der 121er war ein Einheitenfehler mit einer eindeutigen richtigen Antwort; das
+ist die einzige Sorte Änderung, die ohne Messung zulässig war.
 
-## Was der Code in dieser Sitzung gelernt hat
-
-* `q_dot = jr1_w / V_JR1`, und `q_dot = 0` außerhalb JR1 (von der
-  Simulationsseite bestätigt, im Code gegen ein „Zurückreparieren" am
-  Basis-README abgesichert).
-* Drei neue Tests: die Umrechnung selbst, die Empfindlichkeit des
-  Energieberichts, tote Kanäle im Coverage-Report.
-* `coverage_report` meldet jetzt tote Skalar-Kanäle — hat auf echten Daten
-  sofort OP19s `soc_start` gefunden.
-
-**Ausgeführt am 01.09.:** `pytest` 123 passed / 1 skipped · `selftest.py` all
-checks passed · `op_registry.py` · Importcheck · Schritt 4 und 5b auf echten
-Daten auf der Arbeitsmaschine.
+**Ausgeführt:** `pytest` 123 passed / 1 skipped · `selftest.py` · `op_registry.py`
+· Importcheck · Schritte 4, 5b und 6 auf echten Daten auf der Arbeitsmaschine.
