@@ -445,6 +445,18 @@ def _grid_arrays(layer, xyz, T_span_ref, L_ref):
     region = np.asarray(props["region"])
     rc = (rho * Cp).reshape(-1, 1, 1)
     Fo = lam * T_span_ref / (rc * (L_ref ** 2) + 1e-30)
+    # The heat source acts on JR1 ONLY. q_dot is zero in the cell centre and in
+    # the housing -- confirmed 01.09.2026 by the simulation side.
+    #
+    # Do not "fix" this against the base project's README, which says the source
+    # applies to "all jelly-roll points (JR1 + CC)". That statement is wrong for
+    # this dataset, and following it would inject
+    # ``jr1_w * (V_JR1 + V_CC) / V_JR1`` -- more power than the simulation
+    # reports -- because q_dot is already jr1_w spread over V_JR1 alone.
+    #
+    # Together with that conversion (see the note at V_JR1) the bookkeeping
+    # closes exactly: a uniform jr1_w / V_JR1 over the region that represents
+    # V_JR1, and nothing anywhere else, puts precisely jr1_w into the domain.
     q_mask = (region == 1).astype(np.float64)
     return rho, Cp, lam, Fo, region, q_mask
 
@@ -1065,6 +1077,13 @@ def energy_balance_report(bundle: NormBundle) -> List[str]:
     its temperature by conduction alone -- a different PDE from the one the data
     obeys, on which no weight can be right. Fixed 01.09.2026; this report stays
     as the guard, because nothing else in the pipeline can see such a factor.
+
+    The bookkeeping this rests on closes exactly, which is why a ratio far from 1
+    is a finding rather than a modelling gap: q_dot is jr1_w spread uniformly
+    over V_JR1, and the source is zero in the cell centre and the housing
+    (confirmed by the simulation side, see _grid_arrays). So precisely jr1_w
+    enters the domain -- no unaccounted region is heated, and nothing about the
+    heated extent can absorb a discrepancy.
 
     Reported per OP, with the ratio; a zero-flow OP whose ratio is far from 1 is
     the conclusive case.
