@@ -708,57 +708,115 @@ CNN trotzdem zu bauen, weil er im Entwurf steht.
 
 ---
 
-## 12. Was ich noch brauche
+## 12. Alle offenen Fragen
 
-Vier Punkte. Die ersten beiden blockieren [`GridCNN/FAHRPLAN.md`](FAHRPLAN.md)
-Stufe 2, die anderen nicht.
+Vollstaendig, nach Adressat sortiert. Zu jeder Entscheidung steht eine
+Empfehlung — wo du einverstanden bist, reicht „ja".
 
-**12.1 — Die Zahl aus Achse 0.** Du sagtest, der Lauf ist fertig. Ich brauche
-val OP06 / OP09 aus `06b_ohne_physik.txt`. Warum es hier zaehlt: liegt sie nahe
-6.270 / 3.585 C, traegt der Physik-Term nicht, und dann sind der FD-Stencil,
-`L_phys` und ein guter Teil von §11.5 hier Aufwand fuer nichts — die Leiter
-wuerde sich umsortieren.
+### 12.1 An dich — Fakten
 
-**12.2 — Liegt `data_raw/` auf der Maschine?** Der Wandterm braucht
-`Tmfavg_fluid_out`, `Heat Transfer: solid to fluid`, `Cp_fluid` und `mdot`, und
-die stehen nur in den Roh-CSVs, nicht im `.npz`. Ohne `data_raw/` faellt Stufe 2
-aus.
+**F1. Die Zahl aus Achse 0.** val OP06 / OP09 aus `06b_ohne_physik.txt`
+(`--w-phys 0 --w-bc 0`, 60 Epochen). Du sagtest, der Lauf ist durch.
 
-**12.3 — Cache-Schema anfassen oder nicht?** Zwei Wege, und es ist deine
-Entscheidung, weil der erste geteilte Infrastruktur beruehrt:
+> **Warum es hier zaehlt:** liegt sie nahe 6.270 / 3.585 C, traegt der
+> Physik-Term nicht. Dann sind der FD-Stencil, `L_phys` und ein guter Teil von
+> Stufe 3 Aufwand fuer nichts, und die Leiter sortiert sich um: der Wandterm
+> bliebe, das Residuum floege raus. Es ist die einzige Zahl, die den Plan noch
+> umwerfen kann.
+
+**F2. Liegt `data_raw/` auf der Maschine?** Der Wandterm braucht
+`Tmfavg_fluid_out`, `Heat Transfer: solid to fluid`, `Cp_fluid` und `mdot` —
+die stehen nur in den Roh-CSVs, nicht im `.npz`. Ohne sie faellt Stufe 1 und 2
+aus und GridCNN startet ohne Wandterm, also ohne seinen besten Teil.
+
+**F3. Wo laeuft GridCNN — CPU lokal oder GPU-Server?** Bestimmt drei Dinge
+konkret: die Groesse von `f`, das BPTT-Fenster `k` (Stufe 5) und wie viele
+Seeds pro Konfiguration realistisch sind. Auf der CPU waeren 3 Seeds x 3
+Konfigurationen schon ein Tag.
+
+### 12.2 An dich — Entscheidungen
+
+**F4. Kommt die fehlende Wand-BC als O16 in `PINNmodulusTwo/FAHRPLAN.md`?**
+Der Befund steht oben unter „Zu 5". Es ist deine Datei und die O-Nummern sind
+deine Buchfuehrung, deshalb frage ich statt es zu tun. Sag Nummer und Teil,
+dann trage ich ihn ein.
+
+**F5. Cache-Schema erweitern oder GridCNN-lokal lesen?**
 
 | | |
 |---|---|
-| **a) sauber** | `generate_cache.py` + `opbundle_contract.md` erweitern, `schema_version` hoch, alle sechzehn OPs neu bauen (10-30 min). `PINNmodulusTwo` bekommt die Groessen damit auch — und es *braucht* sie, wenn §11.3 stimmt |
-| **b) leicht** | GridCNN liest die vier Groessen lokal aus den Roh-CSVs neben dem `.npz`. Nichts Bestehendes wackelt, aber es entsteht ein zweiter Datenpfad — genau die Doppelung, wegen der am 31.08. zusammengelegt wurde |
+| **a) sauber** *(Empfehlung)* | `generate_cache.py` + `opbundle_contract.md` erweitern, `schema_version` hoch, alle sechzehn OPs neu bauen (10–30 min). `PINNmodulusTwo` bekommt die vier Groessen damit auch — und braucht sie, falls F6 ja lautet |
+| b) leicht | GridCNN liest die vier Groessen lokal aus den Roh-CSVs. Nichts Bestehendes wackelt, aber es entsteht ein zweiter Datenpfad — genau die Doppelung, wegen der am 31.08. zusammengelegt wurde |
 
-*Empfehlung: a.* Die Doppelung ist teurer als der Rebuild.
+**F6. Darf ich die Wand-BC nach `PINNmodulusTwo` portieren — als eigener PR?**
+Nach meiner eigenen Bewertung (§11.3) ist das der beste Aufwand-Ertrag im
+ganzen Projekt: ~80–120 Zeilen, behebt eine nachgewiesene Luecke, wird von
+gemessenem `Q̇(t)` beaufsichtigt, in Tagen messbar. Es beruehrt aber
+`physics.py` und `train.py` des laufenden Projekts, also frage ich, statt es
+einzuplanen.
 
-**12.4 — Eine Frage an den lokalen Bot, Faktor-2-Risiko.** Formuliert in §12.5.
-Sie ist genau die Sorte, die das Projekt schon einmal 121x gekostet hat.
+> *Empfehlung: ja, aber erst nach Stufe 1.* Wenn die Bilanz nicht aufgeht, waere
+> es eine falsche Randbedingung in einem funktionierenden Modell.
 
-### 12.5 Zum Kopieren, falls du den lokalen Bot fragen willst
+**F7. Rollt GridCNN OP19 mit?** Wie `PINNmodulusTwo`: ausrollen und berichten,
+nie trainieren, nie selektieren. *Empfehlung: ja* — sonst fehlt der einzige
+Messvergleich, und O11 (OP19 wird schlechter, je besser das Modell wird) haette
+keine zweite Beobachtung.
+
+### 12.3 An den lokalen Bot
+
+Der fertige Text steht in §12.4. Drei Praezisierungen zum Waermestrom, bevor er
+Randbedingung wird — es geht um Vorzeichen, Bezugsflaeche und zweimal um einen
+**Faktor 2**. Dieses Projekt hat an genau dieser Sorte Buchhaltung schon einmal
+121x verloren (FAHRPLAN §11.1).
+
+### Was ich NICHT mehr frage
+
+Damit klar ist, was als erledigt gilt:
+
+* **y/z-Rand: adiabat oder Symmetrie?** Praktisch egal — beide sind
+  Nullgradient, beide werden `reflect`. Die Auskunft konnte es nicht hart
+  belegen, und sie muss es auch nicht.
+* **Punktreihenfolge im Buendel / ob alle OPs dasselbe Gitter haben.**
+  `tools/spatial_rank.py` leitet beides ab und meldet Abweichungen.
+* **`h(V_dot)` gelernt oder kalibriert?** Entscheidet Stufe 1 an den Daten,
+  nicht wir am Tisch.
+
+## 12.4 Zum Kopieren: der Prompt fuer den lokalen Bot
 
 ```
-Anschluss an 030. Drei Praezisierungen zum Waermestrom, bevor ich ihn als
-Randbedingung einbaue -- es geht um Vorzeichen, Bezugsflaeche und den
-Halbmodell-Faktor.
+Anschluss an 029 und 030. Fuenf Praezisierungen zum Waermestrom und zur
+Geometrie, bevor ich den Waermeaustritt an der Gehaeusewand als
+Randbedingung in ein Modell einbaue. Es geht um Vorzeichen, Bezugsflaeche
+und zweimal um einen moeglichen Faktor 2.
 
 1) Bezieht sich "Heat Transfer: solid to fluid Monitor (W)" auf das
-   HALBMODELL (also eine Kuehlplatte, x = 0 .. 0.0219) oder auf die ganze
-   Zelle (beide ±x-Platten)? Ein Faktor 2 an dieser Stelle ist genau die
-   Sorte Fehler, die dieses Projekt schon einmal um 121x danebenliegen
-   liess.
+   HALBMODELL (eine Kuehlplatte, x = 0 .. 0.0219) oder auf die ganze Zelle
+   (beide ±x-Platten)?
 
-2) Welche Flaeche A liegt dem zugrunde? Die Rechnung h = Qdot / (A * dT)
-   braucht sie. Ist es die 0.198 x 0.104 m grosse Zellflaeche
-   (= 0.0206 m^2), die Kuehlplattenflaeche, oder eine benetzte Flaeche im
-   Kuehlkanal?
+2) Und dieselbe Frage fuer die Quelle: ist die JR1-Leistung, die
+   PINNmodulusTwo als q_source[:,0] liest, ebenfalls Halbmodell — oder
+   ganze Zelle? Beide muessen dieselbe Konvention haben, sonst geht die
+   Bilanz um Faktor 2 nicht auf. Falls das nirgends dokumentiert ist:
+   welche der beiden Groessen laesst sich unabhaengig pruefen?
 
-3) Vorzeichenkonvention: ist der Monitor positiv, wenn Waerme VOM
+3) Welche Flaeche A liegt dem Waermestrom zugrunde? Die Rechnung
+   h = Qdot / (A * dT) braucht sie. Ist es die 0.198 x 0.104 m grosse
+   Zellflaeche (= 0.0206 m^2), die Kuehlplattenflaeche, oder eine benetzte
+   Flaeche im Kuehlkanal?
+
+4) Vorzeichenkonvention: ist der Monitor positiv, wenn Waerme VOM
    Festkoerper INS Fluid geht? Und passt sein Zeitintegral quantitativ zu
    dem, was energy_balance_report als Fehlbetrag sieht (V_dot = 0 -> 0.9x,
    V_dot = 0.0026 -> 0.5x der Quellenergie)?
+
+5) Laut 029 endet die Loesungsdomaene bei x = 0.0219, die Kuehlplatten
+   liegen bei x = ±0.0238. Was liegt in den 1.9 mm dazwischen —
+   Gehaeusewandstaerke, ein Kontaktwiderstand, ein Spalt? Ich brauche das
+   nicht aufzuloesen, aber ich muss wissen, ob ein aus Qdot berechnetes h
+   der reine Konvektionskoeffizient ist oder ein GESAMTuebergang inklusive
+   dieser Schicht. Fuer das Modell will ich den Gesamtuebergang; es soll
+   nur nicht faelschlich als Konvektionskoeffizient etikettiert sein.
 
 Wenn dabei ohnehin ein Skript entsteht: bitte fuer OP04/OP05 (hoher Fluss)
 und OP07/OP14 (kein Fluss) beide Seiten der Bilanz gegenueberstellen --
@@ -766,6 +824,9 @@ und OP07/OP14 (kein Fluss) beide Seiten der Bilanz gegenueberstellen --
   dT_fluid_gemessen(t) = Tmfavg_fluid_out(t) - fluid_inlet_temp(t)
   dT_fluid_bilanz(t)   = integral(Qdot dt) / (mdot * Cp_fluid)
 
-Das ist die Gegenprobe aus 030, sie braucht kein Modell, und sie sagt vor
-dem ersten Training, ob die Bilanz aufgeht.
+und zusaetzlich h_eff = Qdot / (A * (T_wand_mittel - T_fluid_mittel)) gegen
+den Volumenstrom auftragen. Liegt das auf einer Kurve, ist h eine feste
+Funktion von V_dot und kostet keinen freien Parameter. Das ist die
+Gegenprobe aus 030, sie braucht kein Modell, und sie sagt vor dem ersten
+Training, ob die Bilanz aufgeht.
 ```
