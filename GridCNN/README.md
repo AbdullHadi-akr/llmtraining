@@ -11,7 +11,8 @@
 > Bilanzprobe (`FAHRPLAN.md` Stufe 1).
 
 Ein zweiter, **unabhängiger** Modellansatz neben
-[`PINNmodulusTwo/`](../PINNmodulusTwo/). Nicht dessen Ersatz: dasselbe Datum,
+[`PINNmodulusTwo/`](../PINNmodulusTwo/). Was der Datensatz dabei *nicht*
+hergeben kann, steht in [`README_OPS.md`](README_OPS.md). Nicht dessen Ersatz: dasselbe Datum,
 derselbe Split, dieselben Metriken, damit die beiden vergleichbar sind — aber
 eigenes Modell, eigenes Training, eigener Verlust.
 
@@ -131,21 +132,22 @@ Begründung in §4.
 
 ---
 
-## 3. Der Input
+## 3. Der Input — fest, Stand 02.09.
 
-Layout je Zeitschritt: `(C, 11, 11)`, x in den Kanälen.
+Layout je Zeitschritt: `(C, 11, 11)`. Gefaltet wird über (y, z); x ist eine
+kurze echte Achse mit Geisterschichten (§5), nicht ein Kanalstapel.
 
-### 3a. Zustand und Historie — 6 bis 9 Kanäle
+### 3a. Zustand und Historie — 9 Kanäle
 
-| Block | Kanäle | was |
+| Block | Kanäle | |
 |---|---|---|
-| `T_t` | 3 | das normierte Feld jetzt (die 3 x-Ebenen) |
-| `T_t − T_{t−Δ1}` | 3 | Rate über kurzem Lag |
-| `T_t − T_{t−Δ2}` | 3 | Rate über langem Lag *(optional)* |
+| `T_t` | 3 | das normierte Feld jetzt, eine Ebene je x |
+| `T_t − T_{t−Δ₁}` | 3 | Rate über kurzem Lag |
+| `T_t − T_{t−Δ₂}` | 3 | Rate über langem Lag |
 
-Das ist bewusst die **Hybrid-Historie aus `model.py`** (1 Anker + eine Rate je
-Lag), nur feldweise statt punktweise. Damit ist der Vergleich zum bestehenden
-Modell eine Architekturfrage und keine Featurefrage.
+Bewusst die **Hybrid-Historie aus `PINNmodulusTwo/model.py`** (ein Anker plus
+eine Rate je Lag), nur feldweise statt punktweise. Damit ist der Vergleich der
+beiden Modelle eine Architekturfrage und keine Featurefrage.
 
 ### 3b. Die Quelle — 0 zeitabhängige Kanäle
 
@@ -155,75 +157,104 @@ Modell eine Architekturfrage und keine Featurefrage.
 Qsrc = r["q_dot"][:, None] * q_mask[None, :] * T_span_ref / (rho * Cp * T_sigma)
 ```
 
-`q_dot(t)` ist **ein Skalar je Zeitschritt** (JR1-Gesamtleistung / V_JR1),
+`q_dot(t)` ist **ein Skalar je Zeitschritt** (JR1-Gesamtleistung / `V_JR1`),
 `q_mask` ist die JR1-Ebene, `ρCp` ist statisch. Also:
 
 > **`Qsrc` = Skalar(t) × feste Ortskarte.** Das räumliche Muster ist über die
 > ganze Trajektorie konstant, nur die Amplitude bewegt sich.
 
-Damit fällt der Block auf **eine statische Karte** (`q_mask/(ρCp)`) plus den
-Skalar `q_dot_z(t)`, der ohnehin schon in `n_forcing` steckt. Keine
-zeitabhängigen Feldkanäle.
+Damit fällt der Block auf **eine statische Karte** plus den Skalar `q_dot_z(t)`,
+der ohnehin schon in den Treibern steckt. Keine zeitabhängigen Feldkanäle.
 
-**Die Folge ist größer als die eingesparten drei Kanäle:** der *einzige*
-räumlich strukturierte und gleichzeitig zeitabhängige Input ist `T` selbst.
-Alles andere ist statische Karte × globaler Skalar. Das macht den Rangtest in
-§8 noch schärfer — wenn nichts Zeitabhängiges räumliche Struktur einträgt,
-kann das Feld kaum hochrangig sein.
+**Die Folge ist größer als die eingesparten Kanäle:** der *einzige* räumlich
+strukturierte und gleichzeitig zeitabhängige Input ist `T` selbst. Alles andere
+ist statische Karte × globaler Skalar. Das macht den Rangtest in §9 schärfer —
+wenn nichts Zeitabhängiges räumliche Struktur einträgt, kann das Feld kaum
+hochrangig sein.
 
-### 3c. Statische Karten — konstant, ~14 Kanäle
+### 3c. Statische Karten — 17 Kanäle
 
-Konstant über Zeit *und* über alle OPs, also einmal berechnet und
-durchgereicht. Alles schon in `data._grid_arrays` / `_static_features` da:
+Konstant über Zeit *und* über alle OPs, einmal berechnet und durchgereicht.
+Alles liegt in `data._grid_arrays` schon vor:
 
-| Block | Kanäle | Anmerkung |
+| Block | Kanäle | |
 |---|---|---|
-| α (Temperaturleitfähigkeit) | 3 | z-scored, wie heute |
-| λ_xx, λ_yy, λ_zz | 9 | die Anisotropie, je x-Ebene |
-| ρ·Cp | 3 | |
-| y-, z-Koordinatenkarte | 2 | gegen die Translationsäquivarianz am Rand |
-| `region` (CC/JR1/Housing) | **0** | **redundant** — das ist der Kanalindex |
+| `λ_xx, λ_yy, λ_zz, λ_xy` | 12 | vier Komponenten × drei Ebenen. `λ_xy ≠ 0` nur auf JR1 — siehe §5 |
+| `ρ · Cp` | 3 | |
+| y-, z-Koordinatenkarte | 2 | bricht die Translationsäquivarianz am Rand |
 
-`region` fällt weg, weil x in den Kanälen steckt. Ein Beispiel dafür, dass das
-Layout Features spart statt welche zu kosten.
+**Zwei Dinge fallen bewusst weg:**
+
+* **`α` (Temperaturleitfähigkeit).** Sie ist `λ_iso / (ρCp)` — aus den beiden
+  Blöcken oben ableitbar. Ein redundanter Kanal ist bei elf Trajektorien kein
+  harmloser Kanal.
+* **`region` und `q_mask`.** Beide sind identisch mit dem x-Ebenenindex. Das
+  Layout spart sie, statt sie zu kosten.
+
+> **Statische Karten sind hier Pflicht, nicht Kür.** Weil der Kernel über (y, z)
+> geteilt wird, *kann* das Netz Position nicht auswendig lernen. Das punktweise
+> MLP bekommt `(x, y, z)` und darf — daher stammt vermutlich ein Teil seiner
+> guten In-Sample-Zahlen bei mäßiger Verallgemeinerung. Der CNN muss räumliche
+> Struktur über die Materialkarten begründen. Das ist der schärfere Prior, und
+> es ist der Grund, warum diese 17 Kanäle nicht wegoptimiert werden dürfen.
 
 ### 3d. Globale Treiber — 18 Skalare
 
-Die `n_config = 7` (`CONFIG_ORDER`) plus `n_forcing = 11` (`q_dot_z` + fünf
-Treiber × zwei kausale Rate-Lags) aus `data.py`, unverändert.
+Unverändert aus `data.py` übernommen:
 
-**Zwei Wege, sie einzuspeisen:**
+| Block | Kanäle | was |
+|---|---|---|
+| `CONFIG_ORDER` | 7 | `c_rate`, `cell_current`, `fluid_initial_temp`, `fluid_inlet_temp`, `fluid_mass_flow`, `soc_start`, `solid_initial_temp` |
+| forcing | 11 | `q_dot_z` + fünf Treiber × zwei kausale Rate-Lags (5 s, 20 s) |
 
-1. **Broadcasten** als konstante 11×11-Kanäle. Fünf Zeilen, und bei 121 Pixeln
-   kostet es nichts. **Für die erste Version.**
-2. **FiLM-Konditionierung**: ein kleines MLP bildet die 18 Skalare auf (γ, β)
-   je Feature-Kanal ab, die nach jedem Conv skalieren und verschieben.
-   Ausdrucksstärker, kaum mehr Code. **Als erste dokumentierte Erweiterung**,
-   damit sie eine eigene Sweep-Achse ist und nicht mit der Architektur vermischt.
+> ⚠ **Einer davon ist ein Nullkanal.** `soc_start` ist über alle sechzehn OPs
+> konstant 10 % (O5), `coverage_report` meldet `DEAD -> forced to 0`. Und zwei
+> weitere, `solid_initial_temp` und `fluid_initial_temp`, sind im Training
+> **perfekt konfundiert** — in 11 von 11 OPs mit konstantem Fluid gilt
+> `T0 = T_fluid`. Das Modell kann die beiden nicht trennen, und kein Report
+> meldet es heute. Ausführlich in [`README_OPS.md`](README_OPS.md).
 
-**Zwei davon gehen zusaetzlich woanders hin.** `fluid_inlet_temp` und
-`fluid_mass_flow` sind nicht nur globale Skalare -- sie sind die
-Gehaeusewand-Randbedingung (§5, §6). Sie werden also *auch* broadcastet, aber
+**Zwei Skalare gehen zusätzlich woanders hin.** `fluid_inlet_temp` und
+`fluid_mass_flow` sind nicht nur globale Eingänge — sie *sind* die
+Gehäusewand-Randbedingung (§5, §6). Sie werden also auch gebroadcastet, aber
 ihre eigentliche Wirkung hat der Wandterm.
 
-**Nicht drin: die absolute Zeit.** Bewusst. Ein `t / T_span`-Kanal lädt das Netz
-ein, die Uhr der Trajektorie auswendig zu lernen statt Dynamik — bei elf
-Trajektorien wäre das der billigste Weg zu guten In-Sample-Zahlen und die
-teuerste Art, OP06 zu verfehlen.
+**Einspeisung:** erst broadcasten (fünf Zeilen, bei 121 Pixeln kostenlos), FiLM
+als dokumentierte Erweiterung und **eigene Sweep-Achse** — nicht vermischt mit
+der Architekturfrage.
+
+### 3e. Was der Wandterm zusätzlich zieht
+
+Nicht Teil des Conv-Eingangs, sondern der Randbedingung (§6):
+
+| Größe | Herkunft | zur Laufzeit da? |
+|---|---|---|
+| `T₂` | der Zustand selbst, äußerste x-Ebene | ja |
+| `ṁ`, `T_fluid_in` | Treiber | ja |
+| `Cp_fluid` | Konstante aus `fluid_props` | ja |
+| `U(V̇)` | offline kalibriert am gemessenen `Q̇(t)` | ja, als feste Funktion |
+
+### 3f. Was ausdrücklich NICHT hineingeht
+
+| | warum |
+|---|---|
+| **die absolute Zeit** `t / T_span` | lädt das Netz ein, die Uhr der Trajektorie auswendig zu lernen statt Dynamik. Bei elf Trajektorien der billigste Weg zu guten In-Sample-Zahlen und die teuerste Art, OP06 zu verfehlen |
+| **`Q̇(t)` gemessen** | Simulationsergebnis, zur Laufzeit nicht verfügbar. Aufsicht (`L_wall`), nie Eingang — §6 |
+| **`Tmfavg_fluid_out(t)`** | dito. Gegenprobe, nie Eingang |
+| **`Qsrc` als Feld je Zeitschritt** | trägt keine zeitabhängige Ortsstruktur, §3b |
 
 ### Summe
 
 | | Kanäle |
 |---|---|
-| Zustand + Historie | 6–9 |
-| Quelle | 3 |
-| Statik | 14 |
-| Treiber (broadcast) | 18 |
-| **Input gesamt** | **41–44** |
+| Zustand + Historie | 9 |
+| statische Karten | 17 |
+| Treiber, gebroadcastet | 18 |
+| **Conv-Eingang gesamt** | **44** |
+| mit FiLM statt Broadcast | 26 |
 
-Bei 11×11 ist das nichts. Mit FiLM statt Broadcast: 23–26.
-
----
+Bei 11 × 11 Pixeln ist das nichts — der Eingang ist nicht der Engpass. Elf
+Trajektorien sind es.
 
 ## 4. Die Rekurrenz
 
