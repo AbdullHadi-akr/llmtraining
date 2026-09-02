@@ -1,9 +1,11 @@
 # GridCNN — das Feld auf einmal, statt Punkt für Punkt
 
-> **Status: Entwurf, kein Code.** Diese Datei ist die Design-Diskussion. Sie
-> wird erst zu Code, wenn der Input-Block und die Rekurrenz unten abgenickt
-> sind. Offene Fragen stehen am Ende und sind als solche markiert — nichts
-> davon ist stillschweigend entschieden.
+> **Status: Entwurf, kein Code.** Diese Datei ist die Design-Diskussion.
+>
+> **02.09. — die Geometriefragen sind beantwortet** (Auskunft aus der Doku, plus
+> Nachprüfung im Code). Damit stehen die Randbedingungen und das x-Layout
+> (§5), und der Wandterm ist als *die* fehlende Bilanzhälfte bestätigt (§6).
+> Offen ist nur noch, wie groß `f` sein muss — dafür der Rangtest in §8.
 
 Ein zweiter, **unabhängiger** Modellansatz neben
 [`PINNmodulusTwo/`](../PINNmodulusTwo/). Nicht dessen Ersatz: dasselbe Datum,
@@ -33,6 +35,13 @@ Alle drei Layer haben **exakt dieselben 11 y- und 11 z-Werte**, äquidistant:
 * Δy = 19.809 mm (−98.91 mm … +99.18 mm)
 * Δz = 10.444 mm (−52.26 mm … +52.18 mm)
 * in x: 10.786 mm und 11.114 mm — 3 % Unterschied, also fast äquidistant
+
+**Und der äußere Ring ist die Domänengrenze.** Der `legacy`-PINN-README sagt
+*„Face spans `dy=0.198 m`, `dz=0.104 m`"*; das Raster spannt gemessen
+0.198089 m × 0.104441 m — beides exakt die README-Werte auf drei Stellen. Das
+Raster liegt also **Kante auf Kante auf der Zellfläche**, nicht irgendwo innen
+drin. Damit gilt am Randring eine echte Randbedingung, und Padding ist das
+richtige Mittel (§5).
 
 Also ein **3 × 11 × 11 Tensorgitter, identisch über alle sechzehn OPs**.
 `data.Tn` ist `(n_t, 363)` und wird mit *einem* `reshape` zu `(n_t, 3, 11, 11)`.
@@ -97,15 +106,29 @@ Das ist bewusst die **Hybrid-Historie aus `model.py`** (1 Anker + eine Rate je
 Lag), nur feldweise statt punktweise. Damit ist der Vergleich zum bestehenden
 Modell eine Architekturfrage und keine Featurefrage.
 
-### 3b. Zeitabhängige Feldgrößen — 3 Kanäle
+### 3b. Die Quelle — 0 zeitabhängige Kanäle
 
-| Block | Kanäle | was |
-|---|---|---|
-| `Qsrc_t` | 3 | die volumetrische Quelle, `(n_t, 363)` in `data.py` |
+`data.py:594` baut sie so:
 
-Der wichtigste Input nach `T` selbst: die Quelle ist **räumlich strukturiert**
-(sie sitzt auf der JR1-Maske), sie ist der Forcing-Term der PDE, und sie liegt
-schon punktweise vor.
+```python
+Qsrc = r["q_dot"][:, None] * q_mask[None, :] * T_span_ref / (rho * Cp * T_sigma)
+```
+
+`q_dot(t)` ist **ein Skalar je Zeitschritt** (JR1-Gesamtleistung / V_JR1),
+`q_mask` ist die JR1-Ebene, `ρCp` ist statisch. Also:
+
+> **`Qsrc` = Skalar(t) × feste Ortskarte.** Das räumliche Muster ist über die
+> ganze Trajektorie konstant, nur die Amplitude bewegt sich.
+
+Damit fällt der Block auf **eine statische Karte** (`q_mask/(ρCp)`) plus den
+Skalar `q_dot_z(t)`, der ohnehin schon in `n_forcing` steckt. Keine
+zeitabhängigen Feldkanäle.
+
+**Die Folge ist größer als die eingesparten drei Kanäle:** der *einzige*
+räumlich strukturierte und gleichzeitig zeitabhängige Input ist `T` selbst.
+Alles andere ist statische Karte × globaler Skalar. Das macht den Rangtest in
+§8 noch schärfer — wenn nichts Zeitabhängiges räumliche Struktur einträgt,
+kann das Feld kaum hochrangig sein.
 
 ### 3c. Statische Karten — konstant, ~14 Kanäle
 
@@ -230,59 +253,84 @@ Die Δ-Form mit explizitem Stencil ist explizites Euler, also CFL-gebunden.
 
 ---
 
-## 5. Randbedingungen — und was das fuers Layout heisst
+## 5. Randbedingungen — geklaert (02.09.)
 
-`dT/dx = 0` gilt **nur an der Zellmitte**, nicht an der Gehaeusewand. Das ist
-verifiziert und es ist auch das, was PINNmodulusTwo tut: `train.py:603` setzt
-`bc_mask = |x| < 1e-6`, also genau die 121 Cell-Center-Punkte, und
-`boundary_condition_loss` wertet `dT/dx` per Autograd ausschliesslich dort aus.
+Beantwortet aus der Doku (`legacy/battery_surrogate_agenticWorkflow_PINN/README.md`)
+plus Nachpruefung im Code. Alle drei Flaechen sind jetzt entschieden.
 
-> Nicht verwechseln: die `bc_pairs = 242` aus Schritt 4 sind **kein** zweiter
-> BC-Ort. `data._measure_bc_scale` misst damit nur den Normierungs-Divisor --
-> den RMS-x-Gradienten ueber alle Nachbarpaare -- damit `L_bc` als Bruchteil der
-> in den Daten vorhandenen Gradienten lesbar ist.
-
-Damit sind die beiden x-Flaechen **verschieden**:
-
-| x | | |
+| Flaeche | was gilt | im CNN |
 |---|---|---|
-| 0.0 Cell Center | Symmetrieebene. `dT/dx = 0` gilt, weil auf den Rest der Batterie gespiegelt wird | exakt, strukturell erzwingbar |
-| 0.0219 Gehaeusewand | **hier tritt Waerme aus.** Kein Nullgradient, sondern ein konvektiver Fluss zum Fluid | braucht einen echten Term |
+| x = 0, Zellmitte | **Symmetrieebene.** Der README sagt *„Half-model of a prismatic cell"*, Domaene `Box([0,ymin,zmin],[0.0219,ymax,zmax])`. x = 0 … 0.0219 ist die halbe Zelldicke | `ghost_lo := T1` — Spiegelung, exakt |
+| x = 0.0219, Gehaeusewand | **Domaenengrenze, hier tritt Waerme aus.** Kuehlplatten liegen auf den ±x-Flaechen bei x = ±0.0238, also 1.9 mm dahinter | `ghost_hi` aus dem konvektiven Fluss (§6) |
+| y/z-Umfang | **adiabat / Symmetrie.** Die Kuehlung sitzt nur auf ±x; die Coolant-Inlets bei y = −0.1265 / +0.14605 liegen im Fluidkanal der Kuehlplatte, nicht an der Zellseitenflaeche. Im Modul liegt seitlich die Nachbarzelle | **`reflect`-Padding** |
 
-### Die Folge fuers Layout: x kann nicht einfach in die Kanaele
+Und, weil §1 es misst: der Randring liegt **auf** der Flaechenkante
+(0.198089 × 0.104441 m gegen `dy=0.198`, `dz=0.104` im README). Der Randknoten
+sitzt also auf der Grenze, nicht davor.
 
-In §1 stand "x in die Kanaele, gefaltet ueber (y,z)". Das ist bequem, hat aber
-eine Konsequenz, die mir erst mit der Korrektur klar wurde: **liegt x in den
-Kanaelen, gibt es in x kein Padding** -- die x-Kopplung ist eine gelernte
-3x3-Kanalmischung. Dann ist *keine* der beiden Bedingungen strukturell, und die
-Symmetrie muesste als Strafterm zurueckkommen, genau wie heute. Der unter §2c
-behauptete Gewinn waere weg.
+> **Korrektur an der Auskunft.** Die Antwort auf Frage 1 lautete „vermutlich ein
+> separates Probe-Raster, nicht die Domaenengrenze", begruendet damit, dass die
+> Coolant-Flaechen bei y = −0.1265 / +0.14605 weit ausserhalb des Rasters
+> liegen. Das stimmt, ist aber kein Beleg: diese Flaechen gehoeren zum
+> **Fluidkanal in der Kuehlplatte**, der als Zu- und Ablauf ueber die Zelle
+> hinausragt — nicht zur Zellkontur. Die Zellkontur steht zwei Absaetze weiter
+> oben im selben README und stimmt mit dem Raster ueberein.
 
-Die Alternative behandelt x als **kurze echte Achse mit Geisterschichten**:
+### Warum `reflect` und nicht `replicate`
+
+Weil der Randknoten **auf** der Grenze liegt und dort `dT/dn = 0` gilt:
+
+* `reflect` spiegelt um den Randknoten, Geist := erster innerer Knoten. Die
+  zentrale Differenz ueber den Randknoten wird damit **exakt null**. Das ist die
+  uebliche Art, eine Neumann-0-Bedingung auf einem knotenzentrierten Gitter zu
+  setzen.
+* `replicate` setzt Geist := Randwert. Das ist ein *einseitiger* Nullgradient,
+  eine groebere und andere Diskretisierung derselben Bedingung.
+
+Mein Vorschlag aus der letzten Runde (`replicate`) war die vorsichtige Wahl
+unter Unwissen. Mit der geklaerten Geometrie ist `reflect` die richtige.
+
+### Das Layout ist damit entschieden: x als kurze Achse
+
+Laege x in den Kanaelen, gaebe es in x kein Padding und **keine** der beiden
+x-Bedingungen waere strukturell — die Symmetrie muesste als Strafterm
+zurueckkommen, wie heute. Also:
 
 ```
 x-Stapel, 5 tief:   [ghost_lo,  T0(Mitte),  T1(JR1),  T2(Wand),  ghost_hi]
 
-ghost_lo := T1                                  # Spiegelung an x=0 -- exakt,
-                                                # das IST die Symmetrie
+ghost_lo := T1                                  # Spiegelung an x=0 -- exakt
+ghost_hi := T2 - (dx2 / lam_xx) * q_wall        # konvektiver Austritt
+q_wall   := h(V_dot) * (T2 - T_fluid(t))
 
-ghost_hi := T2 - (dx / lam_xx) * q_wall
-q_wall   := h(V_dot) * (T2 - T_fluid(t))        # konvektiver Austritt
+y/z:  reflect-Padding, beide Richtungen
 ```
 
-Damit ist die Symmetrie **strukturell und exakt** (kein `w_bc`), und der
-Waermeaustritt sitzt dort, wo er physikalisch hingehoert. Gefaltet wird
-weiterhin ueber (y,z); in x laeuft ein expliziter 3-Punkt-Stencil ueber den
-gepaddeten Stapel. Drei Ebenen sind zu flach zum Stapeln -- also ein
-Stencil-Schritt in x je Block, kein tiefes Conv3d.
+Gefaltet wird ueber (y, z); in x laeuft ein expliziter 3-Punkt-Stencil ueber den
+gepaddeten Stapel, ein Schritt je Block (drei Ebenen sind zu flach zum Stapeln).
 
-**Empfehlung: die Geisterschicht-Variante.** Sie kostet ein paar Zeilen mehr und
-kauft beide Randbedingungen strukturell statt als Gewicht. Die Kanal-Variante
-bleibt als Vergleichsschalter stehen, weil sie die einfachere Nullhypothese ist.
+### Zwei Details, die man nicht naiv machen darf
 
-> **Offene Frage 1 -- der y/z-Rand.** Dazu weiss ich weiterhin nichts, und es
-> sind **40 von 121 Pixeln** je Ebene. Vorschlag bis auf Widerruf: `replicate`
-> (nullgradient). Sitzt dort auch Kuehlung, ist es falsch.
+**Der x-Abstand ist nicht aequidistant.** Δx₁ = 10.786 mm (Mitte→JR1),
+Δx₂ = 11.114 mm (JR1→Wand), 3 % Unterschied. An Ebene 0 ist der gespiegelte
+Stencil *uniform* (Δx₁ beidseitig), an Ebene 2 per Konstruktion auch (Δx₂). Nur
+**Ebene 1 braucht die nicht-aequidistante Zweite-Ableitungs-Formel** — die
+naive Form `(T₀ − 2T₁ + T₂)/Δx²` mischt dort einen Erste-Ableitungs-Anteil von
+~3 % ein.
+
+**λ_XY ist auf JR1 nicht null.** Der README fuehrt fuer JR1 `XX/XY/YY` aus CSV
+(nur `XZ = YZ = 0`), und `physics.py:171` kontrahiert entsprechend voll:
+
+```python
+aniso = fo00*Txx + fo11*Tyy + fo22*Tzz + 2*(fo01*Txy + fo02*Txz + fo12*Tyz)
+```
+
+`Txy` ist eine **gemischte Ableitung ueber die kurze x-Achse und eine
+Faltungsachse**. Als FD ist das ein Kreuz-Stencil ueber den ghost-gepaddeten
+Stapel — machbar, aber es ist die eine Stelle, an der die FD-Variante fummeliger
+ist als der Autograd-Hessian, den sie ersetzt. Nicht vergessen und nicht
+stillschweigend weglassen: `fo01` ist genau auf der geheizten Ebene ungleich
+null.
 
 ## 6. Der Wandterm ist keine Zutat, er ist die fehlende BC
 
@@ -310,14 +358,19 @@ Physik enthaelt als das bestehende Modell.
 > Abdeckung, nicht Physik. Der Wandterm ist eine echte Luecke, aber ihm sind die
 > 6.270 C nicht anzuhaengen.
 
-> **Offene Frage 2 -- `h(V_dot)`.** Eine kleine gelernte Funktion, oder eine
-> Korrelation aus der Literatur? Gelernt ist ehrlicher (wir haben die Geometrie
-> des Kuehlkanals nicht), aber es ist ein weiterer freier Parameter bei elf
-> Trajektorien.
+**`h(V_dot)` wird gelernt** -- entschieden, nicht gewaehlt: die Auskunft vom
+02.09. sagt, der StarCCM+-interne Waermeuebergangskoeffizient ist nirgends
+exportiert und steckt in den Original-Projektdateien ausserhalb dieses Repos.
+Es gibt also keine Korrelation zum Nachschlagen. Eine kleine monotone Funktion
+(z. B. `softplus(a) * V_dot**b + c`, drei Parameter) ist der sparsamste Ansatz;
+bei elf Trajektorien ist jeder freie Parameter einer zu viel, aber drei fuer den
+einzigen Senkenpfad des Modells sind vertretbar.
 
-> **Offene Frage 3 -- kuehlt nur die Gehaeusewand?** Falls das Fluid auch an
-> y/z-Flaechen anliegt, gehoert `q_conv` auch dorthin und Frage 1 wird zur
-> selben Frage.
+**Und es gibt keinen zweiten Senkenpfad.** Die Kuehlung sitzt nur auf ±x (§5),
+y/z sind adiabat. Damit ist `ghost_hi` *der* Weg, auf dem Energie das Gebiet
+verlaesst -- was genau zu `energy_balance_report` passt: V_dot = 0 -> 0.9x
+(fast nichts geht raus), V_dot = 0.0026 -> 0.5x. Der Term ist nicht eine
+Verbesserung unter mehreren, er ist die fehlende Haelfte der Bilanz.
 
 ## 7. Was von PINNmodulusTwo übernommen wird
 
