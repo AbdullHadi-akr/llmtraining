@@ -32,6 +32,30 @@ So each OP is scored with:
   a TRAINING OP it is in-sample unless training ran with ``--holdout-tail``,
   because the data loss covers the whole rollout. ``late_is_holdout`` carries
   that distinction so no report has to guess.
+* ``bias_early`` / ``bias_mid`` / ``bias_end`` and ``late_bias`` --
+  the SIGNED mean error, over equal thirds and over the same window as
+  ``late_mae``. See below.
+
+Why a signed error as well as an absolute one (O13)
+---------------------------------------------------
+The error on this model roughly doubles towards the end of a trajectory: OP06 is
+at 6.270 C over the whole rollout and 13.248 C after ``split_t``, and OP03 and
+OP16 show the same shape. Two very different faults produce that, and every
+number above is an ABSOLUTE error, so they look identical in all of them:
+
+* **Drift.** ``field`` predicts ``level(t - delta_grid) + net(...)``, where
+  ``level`` is the spatial mean of the model's OWN previous prediction. Over
+  ~7000 rollout steps that is an integrator of gain 1: a small systematic bias
+  is added at every step and nothing pulls it back. The late error is then
+  signed -- consistently too warm or consistently too cold.
+* **A genuinely harder regime.** The end of a charge is the hottest phase with
+  the steepest gradients, and the pooled statistics are fitted on ``[:split_t]``
+  only. The late error is then large but UNSIGNED -- wrong in both directions.
+
+The two call for opposite responses, so the report has to tell them apart.
+``late_bias_frac = |late_bias| / late_mae`` is the one number that does: near 1
+the late error is almost entirely directional (drift), near 0 it is scatter.
+Nothing here decides O13 on its own -- it makes the run able to answer it.
 """
 
 from __future__ import annotations
@@ -99,14 +123,24 @@ def op_metrics(pred: np.ndarray, op, *, late_is_holdout: bool) -> Dict[str, floa
     """
     true = np.asarray(op.T_lab, dtype=np.float64)
     pred = np.asarray(pred, dtype=np.float64)
-    err = np.abs(pred - true)[1:]
-    diff2 = ((pred - true) ** 2)[1:]
+    resid = (pred - true)[1:]          # SIGNED: positive = prediction too warm
+    err = np.abs(resid)
+    diff2 = resid ** 2
     transient = np.asarray(op.transient, dtype=bool)
     transient = transient[1:] if transient.size == op.n_t else np.zeros(len(err), bool)
     split = max(int(op.split_t) - 1, 1)
 
     def _mean(a):
         return float(a.mean()) if a.size else float("nan")
+
+    # Equal thirds rather than the split_t boundary: the shape of the bias over
+    # time is what separates an integrator running away (monotone in one
+    # direction) from a hard final phase (no ordering). ``late_bias`` then uses
+    # the SAME window as ``late_mae`` so the pair can be read as a ratio.
+    n_err = err.shape[0]
+    third = max(n_err // 3, 1)
+    late_mae = _mean(err[split:])
+    late_bias = _mean(resid[split:])
 
     return {
         "mae": _mean(err),
@@ -120,8 +154,17 @@ def op_metrics(pred: np.ndarray, op, *, late_is_holdout: bool) -> Dict[str, floa
         "mae_transient": _mean(err[transient]),
         "mae_quiescent": _mean(err[~transient]),
         "transient_frac": float(transient.mean()) if transient.size else 0.0,
-        "late_mae": _mean(err[split:]),
+        "late_mae": late_mae,
         "late_is_holdout": bool(late_is_holdout),
+        # Signed means. A sign flip between thirds is scatter; the same sign
+        # growing in magnitude is an integrator.
+        "bias_early": _mean(resid[:third]),
+        "bias_mid": _mean(resid[third:2 * third]),
+        "bias_end": _mean(resid[2 * third:]),
+        "late_bias": late_bias,
+        # In [0, 1] by construction: |mean| can never exceed mean|.|.
+        "late_bias_frac": (abs(late_bias) / late_mae
+                           if late_mae and np.isfinite(late_mae) else float("nan")),
     }
 
 
@@ -134,4 +177,6 @@ def format_op_metrics(op_id: str, tier: str, m: Dict[str, float]) -> str:
         f"  max={m['max_abs_err']:.3f} C  peak_err={m['peak_err']:.3f} C"
         f"{tr}  quiescent={m['mae_quiescent']:.3f}"
         f"  late({late})={m['late_mae']:.3f}"
+        f"  late_bias={m['late_bias']:+.3f} ({m['late_bias_frac']:.0%} of it)"
+        f"  bias/3={m['bias_early']:+.2f}/{m['bias_mid']:+.2f}/{m['bias_end']:+.2f}"
     )

@@ -94,9 +94,9 @@ Schritt 6 hat dafür gerade das Lehrstück geliefert: nach drei Epochen stand
 | # | Achse | warum in dieser Reihenfolge |
 |---|---|---|
 | **0** | **`--w-phys 0 --w-bc 0` über 60 Epochen** — ein Lauf, kein Sweep | **Die Überschrift dieser Sitzung steht auf drei Epochen.** „Der Physik-Term trägt" kommt aus 5b, und derselbe 5b-Lauf sagte auch „der `spread` kollabiert" — das war falsch (§11.3). Bis das A/B bei 60 Epochen wiederholt ist, ist die Kernaussage ungeprüft. Zwei Stunden, und sie entscheidet, ob die Achsen 1–3 überhaupt die richtigen sind |
-| 1 | **δ (`--delta-phys`)**, O8 | sauber isoliert (speist im Hybrid-Modus nur `L_phys`), und der `[CFL WARN]` steht bei jedem Lauf: 1.0 s gegen Δt_max 0.24 s. Punkte: 1.0 (Default), 0.2 (= Datengitter). **Der einzige bekannt falsche Parameter** |
-| 2 | **`w_bc`**, O12 | der BC-Term ist auf `ratio 0.0178` gefallen. Tut er überhaupt etwas? Dazu `--batch-bc` auf 121 statt 128 |
-| 3 | **`w_phys`**, O6 | erst wenn 1 und 2 stehen — sonst misst man δ mit dem Gewicht |
+| 1 | **δ (`--delta-phys`)**, O8 | sauber isoliert (speist im Hybrid-Modus nur `L_phys`), und der `[CFL WARN]` steht bei jedem Lauf: 1.0 s gegen Δt_max 0.24 s. **Drei Punkte: 1.0 (Default), 0.4, 0.2.** 0.2 ist das Datengitter und zugleich der Boden — darunter interpoliert `history_at` nur noch linear zwischen zwei Gitterzeilen, die Ableitung wird davon nicht genauer. **Der einzige bekannt falsche Parameter** |
+| 2 | **`w_bc`**, ehemals O12 | **02.09.: die ursprüngliche Begründung ist weggefallen** — `ratio_bc` zeigt über 30 Epochen keinen Abfall (Median 0.0581, die 0.0178 waren eine Epoche), und `--batch-bc 121` rechnet dieselbe Zeile wie 128. Die Achse bleibt als bewusste Gegenprobe stehen, nicht mehr als Verdacht. Kann gestrichen werden, wenn Rechenzeit knapp wird. §11.6 |
+| 3 | **`w_phys`**, O6 | erst wenn 1 und 2 stehen — sonst misst man δ mit dem Gewicht. **Und erst nach O15:** solange die Divisoren eingefroren sind, misst ein `w_phys`-Sweep den Anker des ersten Optimiererschritts mit |
 
 > **Achse 0 braucht `sweep.py` nicht** und kann sofort laufen:
 >
@@ -109,12 +109,31 @@ Schritt 6 hat dafür gerade das Lehrstück geliefert: nach drei Epochen stand
 > ~11.6 / 8.5 C heraus wie in 5b, ist die Aussage bestätigt und der Rest steht
 > auf festem Grund.
 
+## Was am 02.09. dazugekommen ist
+
+Zwei Werkzeuge und ein Test, alle klein, alle sofort nutzbar:
+
+```bash
+# Nach JEDEM Lauf, statt die letzte Zeile abzulesen:
+python3 PINNmodulusTwo/tools/analyse_history.py PINNmodulusTwo/artifacts/history.csv
+```
+
+| was | wo | wofür |
+|---|---|---|
+| `tools/analyse_history.py` | neu | Median und Streuung über die letzten *k* Epochen statt der letzten Zeile. Meldet von sich aus: `[LAST-LINE]` (der Fehler, aus dem O12 entstand), `[O15]` (Divisor im freien Fall), `[SPREAD]`, `[EXCURSION]`. Nur Standardbibliothek — läuft auch ohne die Trainingsumgebung |
+| `late_bias`, `late_bias_frac`, `bias_early/mid/end` | `op_metrics.py` | der **signierte** Fehler. `late_bias_frac` nahe 1 heißt Drift, nahe 0 heißt Streuung — **das ist die Messung, die O13 entscheidet.** Steht ab dem nächsten Lauf in jeder OP-Zeile und in `metrics.txt` |
+| `test_the_divisor_tracks_its_loss_within_one_run` | `tests/` | O15 als `xfail` festgehalten. **Schlägt der Test eines Tages fehl, weil er besteht**, ist O15 behoben — dann Marker entfernen und den Punkt schließen |
+
+Noch nicht gebaut: `evaluate.py` (Checkpoint zurückladen) und `sweep.py` (die
+Seed-Schleife). Beide stehen weiter oben unter „Was gebaut wird".
+
 ## Die Auswahlregeln stehen fest
 
 Siehe §10 in Teil II. Kurz: Mittel über `--val-ops`, nie ein einzelner OP · nach
 Tier getrennt berichten · Kriterium ist MAE, nie `L_data` · **`spread` als
 Nebenbedingung in [0.7, 1.3]** · Spanne zwischen Konfigurationen < Spanne zwischen
-Seeds → keine Rangfolge.
+Seeds → keine Rangfolge · **kein Befund aus der letzten Epoche** (neu 02.09.,
+§11.6): Median über die letzten k Epochen, nie die letzte Zeile.
 
 ## Offene Punkte — nach Zuständigkeit
 
@@ -124,7 +143,7 @@ Seeds → keine Rangfolge.
 > einer Nachricht nach Wochen noch stimmt. Offene stehen hier, geschlossene in
 > Teil III unter „Geschlossene Punkte".
 
-### Index: alle Punkte, O1 bis O14
+### Index: alle Punkte, O1 bis O15
 
 | # | worum es geht | Zustand |
 |---|---|---|
@@ -132,31 +151,32 @@ Seeds → keine Rangfolge.
 | O2 | Schritt 5b war nie gelaufen | ✅ gelaufen, grün |
 | O3 | OP15: `cell_current` fehlt im Bündel | ✅ nie exportiert |
 | O4 | OP12: Profil endet bei 1440 s, Trajektorie bis 1605 s | ✅ Solver hielt den Wert |
-| **O5** | **tote Eingangskanäle** (`soc_start`, Rate-Kanäle) | **offen** |
-| **O6** | **kein Gewicht auf Basis von Messungen gesetzt** | **offen** |
+| **O5** | **tote Eingangskanäle** (`soc_start`, Rate-Kanäle) | **offen — Envelope-Grenze**, kein MAE-Hebel (02.09. geklärt) |
+| **O6** | **kein Gewicht auf Basis von Messungen gesetzt** | **offen — erstmals messbar**, aber blockiert durch O15 |
 | O7 | Energiebilanz ging um ~147x nicht auf | ✅ der 121er, behoben |
-| **O8** | **BDF-Stencil δ = 1.0 s gegen Δt_max 0.24 s** | **offen** |
+| **O8** | **BDF-Stencil δ = 1.0 s gegen Δt_max 0.24 s** | **offen — entschieden: messen**, δ = 1.0 / 0.4 / 0.2 |
 | O9 | dämpft der Physik-Term nur, statt Dynamik zu lernen? | ✅ **widerlegt** — `spread` → 0.968 |
 | **O10** | **OP14s 0 °C sind geplant — nicht „reparieren"** | **stehende Warnung** |
-| **O11** | **OP19 wird schlechter, je besser das Modell wird** | **offen** |
-| **O12** | **BC-Term trägt fast nichts** (`ratio` 0.0178) | **offen** |
-| **O13** | **Fehler wächst zum Trajektorienende** | **offen** |
-| **O14** | **Volumenstrom ist die Schwierigkeitsachse** | **offen** |
+| **O11** | **OP19 wird schlechter, je besser das Modell wird** | **dauerhafte Envelope-Grenze** (Datensatz ist fix) |
+| O12 | BC-Term trägt fast nichts (`ratio` 0.0178) | ✅ **widerlegt** — 0.0178 war eine Epoche, Median 0.0581 |
+| **O13** | **Fehler wächst zum Trajektorienende** | **offen** — und **kein** Verallgemeinerungsproblem |
+| **O14** | **Volumenstrom ist die Schwierigkeitsachse** | **dauerhafte Envelope-Grenze** (Datensatz ist fix) |
+| **O15** | **NEU: das Loss-Balancing greift nach 60 Epochen nicht** | **offen** — blockiert O6 |
 
-Die offenen im Detail:
+Die offenen im Detail, nach Dringlichkeit:
 
 | # | offen | wer / wann |
 |---|---|---|
-| **O14** | **NEU 01.09. Volumenstrom ist die Schwierigkeitsachse, nicht der Tier.** V̇=0 im Mittel 5.374 C gegen 2.928 C mit Kühlung; alle drei No-Flow-OPs unter den letzten vier. Das Extrapolations-Tier (OP13/16) **schlägt** den Interpolations-OP OP06 — weil OP06 der einzige ausgehaltene OP ohne Kühlung ist. Nur 2 von 11 Trainings-OPs haben V̇=0, und beide sind Temperatur-Extremfälle: das Regime „keine Kühlung bei mittlerer Starttemperatur" wird nie trainiert. §11.5 | Envelope-Frage, mit O5 |
-| **O11** | **NEU 01.09. OP19 wird schlechter, je besser das Modell wird.** 5b: 10.334 C sind 88 % **schlechter** als die 5.507 C nach drei Epochen — während jeder andere OP sich verbessert hat. Erwartbar bei 16.7 σ Extrapolation, aber es heißt: die Simulations-MAE sagt über den Prüfstand nichts, sie sagt es sogar mit wachsender Überzeugung falsch. §11.4 | vor jedem Messvergleich klären |
-| **O12** | **NEU 01.09. Der BC-Term trägt fast nichts.** `ratio bc` fällt über den Lauf auf **0.0178** — knapp 2 % der Größe des Datenterms. Dazu die stehende Warnung: 121 BC-Punkte gegen `--batch-bc 128`. Ob `w_bc` überhaupt etwas tut, ist eine Sweep-Frage | erste Sweep-Achsen |
-| **O13** | **NEU 01.09. Der Fehler sitzt am Ende der Trajektorie.** OP06: MAE 6.270 C, aber `late(held out)` = **13.248 C** — doppelt. Gleiches Muster auf OP03 (3.341 / 7.371) und OP16 (3.476 / 6.959). Der Rollout driftet spät, obwohl `spread` gesund ist | zu untersuchen |
-| **O8** | Der BDF-Stencil nutzt δ = 1.0 s gegen Δt_max ≈ 0.24 s (`[CFL WARN]` bei jedem Lauf). Knopf ist da (`--delta-phys`), Default bleibt 1.0 bis gemessen. Seit O7 die erste freie Sweep-Achse. §11.2 | nach Schritt 6 |
-| **O6** | Kein Gewicht auf Basis von Messungen gesetzt — weiterhin bewusst, §10a | nach Schritt 6 |
-| **O5** | **Tote Eingangskanäle.** `soc_start` ist über alle OPs konstant 10 % (`DEAD -> forced to 0`), die Rate-Kanäle von `c_rate` und `fluid_mass_flow` sind im Training tot — auf OP15/OP16/OP19 aber lebendig. OP19 fährt `soc_start` = 77 % gegen trainierte 10 %, und das Netz erfährt davon nichts. Seit 01.09. meldet `coverage_report` es wenigstens. Die **Entscheidung** (Kanal streichen? Envelope erweitern?) ist offen, §10 | zu entscheiden |
+| **O15** | **NEU 02.09. Das Loss-Balancing hat nach 60 Epochen noch nicht eingesetzt.** Alle drei Divisoren fallen mit exakt 0.9000/Epoche — reiner geometrischer Zerfall, der aktuelle Loss trägt 0.009 % bei. `div_data/div_phys` ist damit über den ganzen Lauf **konstant**, das Balancing wirkt wie `fixed` mit Divisoren, die der erste Optimiererschritt gesetzt hat. Gemessen: `ratio_phys` = 0.586, wo `w_phys = 0.1` nominell 0.1 verspricht. Seit 02.09. als `xfail`-Test festgehalten und von `analyse_history.py` bei jedem Lauf gemeldet. §11.6 | **blockiert O6** |
+| **O8** | Der BDF-Stencil nutzt δ = 1.0 s gegen Δt_max ≈ 0.24 s (`[CFL WARN]` bei jedem Lauf). **02.09. entschieden: wird gemessen, drei Punkte 1.0 / 0.4 / 0.2.** Nicht einfach richtiggestellt, weil es ein Zielkonflikt ist und kein Einheitenfehler — der Zähler `3T − 4T₋₁ + T₋₂` schrumpft mit δ, der Eigenfehler des Rollouts nicht. δ = 0.2 ist zugleich der Boden: darunter liest `history_at` nur noch die Gerade zwischen zwei Gitterpunkten. §11.2 | **Sweep-Achse 1** |
+| **O13** | **Der Fehler sitzt am Ende der Trajektorie.** OP06: MAE 6.270 C, aber `late(held out)` = **13.248 C** — doppelt. Gleiches Muster auf OP03 (3.341 / 7.371) und OP16 (3.476 / 6.959). **02.09.: OP03 ist ein Trainings-OP und `--holdout-tail` ist aus — das Modell hat diese späten Zeitschritte mit Beschriftung gesehen und verdoppelt dort trotzdem seinen Fehler. O13 ist also kein Verallgemeinerungsproblem, sondern mechanisch.** §11.7 | **Messung gebaut 02.09.**, läuft beim nächsten Lauf mit |
+| **O6** | Kein Gewicht auf Basis von Messungen gesetzt. **02.09.: der Grund hat sich geändert.** Die fünf Gründe aus §10a (CFL-Verletzung, degenerierter Anker, saturierter Rollout, nie arbeitende Loss-Balance, 121er-Quelle) sind alle behoben — O6 ist nicht mehr „bewusst offen", sondern **erstmals messbar**. Nur nicht jetzt: solange O15 gilt, misst ein `w_phys`-Sweep den eingefrorenen Divisor mit | **nach O15** |
+| **O5** | **Tote Eingangskanäle — 02.09. umgewidmet.** `soc_start` ist über alle OPs konstant 10 % (`DEAD -> forced to 0`), die Rate-Kanäle von `c_rate` und `fluid_mass_flow` sind im Training tot, auf OP15/OP16/OP19 aber lebendig. **Das ist kein MAE-Hebel:** eine Spalte ohne Varianz kann nichts erklären, und die SOC-Wirkung steckt über `q_dot` ohnehin schon im Modell. Der Punkt ist eine **Envelope-Grenze** und damit Vorbedingung für O11, nicht eine Code-Änderung. Kein Kanal wird gestrichen. §10a | dokumentiert, nichts zu tun |
+| **O14** | **Volumenstrom ist die Schwierigkeitsachse, nicht der Tier.** V̇=0 im Mittel 5.374 C gegen 2.928 C mit Kühlung; alle drei No-Flow-OPs unter den letzten vier. Nur 2 von 11 Trainings-OPs haben V̇=0 (OP07 bei T0 = 10 °C, OP14 bei 0 °C), OP06 fährt 25 °C — das Regime „keine Kühlung bei mittlerer Starttemperatur" kommt im Training nicht vor. **02.09.: der Datensatz ist fix, es kommen keine OPs dazu.** Damit ist O14 keine Aufgabe mehr, sondern eine **dauerhafte Grenze**: nach V̇ getrennt berichten, nie als Modellfehler lesen. §11.5 | dauerhaft, nur berichten |
+| **O11** | **OP19 wird schlechter, je besser das Modell wird.** 10.334 C sind 88 % schlechter als die 5.507 C nach drei Epochen, während jeder Simulations-OP sich verbessert hat. 16.7 σ unter dem trainierten `c_rate` (OP19 ist ein Fahrzyklus, OP01–OP16 sind ausnahmslos Ladungen), `soc_start` 77 % gegen 10 % über einen toten Kanal (O5). **02.09.: da der Datensatz fix ist und OP17/OP18 nie simuliert wurden, ist der Envelope nicht erweiterbar.** Jede Code-Änderung, die OP19 besser aussehen ließe, wäre eine Anpassung an die eine vorhandene Messung — wovor `op_registry.py:185` ausdrücklich warnt. §11.4 | dauerhaft, nie Auswahlkriterium |
 | **O10** | **Warnung, kein Punkt.** OP14 startet über alle Punkte bei 0 °C. Das sieht nach Füllwert aus, ist aber die geplante Anfangsbedingung (`op_registry.py:123`: T0 = 0 °C, „coldest start in the set"). **Nicht maskieren, nicht ersetzen, OP14 nicht entfernen** — es ist einer von nur zwei OPs mit V̇ = 0, und die binden die Energiebilanz | nichts tun |
 
-**Geschlossen am 01.09.:** O1, O2, O3, O4, O7. Siehe Teil III.
+**Geschlossen am 01.09.:** O1, O2, O3, O4, O7, O9. **Am 02.09.:** O12. Siehe Teil III.
 
 ---
 
@@ -361,6 +381,12 @@ sind das Einzige daraus, was übernommen wird:
   hat), sondern als Tor davor. Siehe §11.3.
 * **Seed-Rausch-Urteil.** Spanne zwischen Konfigurationen < Spanne zwischen Seeds
   → keine Rangfolge.
+* **Kein Befund aus der letzten Epoche** (neu, 02.09.). Jede Größe, die je Epoche
+  mitgeschrieben wird, ist über den Lauf verrauscht: `ratio_bc` streut mit 59 %
+  relativ, `L_phys` springt in fünf von sechzig Epochen um ein bis zwei
+  Größenordnungen. Ein Wert aus der letzten Zeile ist eine Stichprobe, kein
+  Ergebnis — und genau so ist O12 entstanden. Berichtet wird der **Median über
+  die letzten k Epochen**, mit der Streuung daneben. §11.6
 
 ### Was du dafür noch liefern musst: **einmal Schritt 5b oder 6 auswerten.**
 
@@ -612,7 +638,7 @@ Archiv: abgehakte Schritte, gemessene Zahlen, geschlossene Befunde.
 | `06_lauf.txt` | das volle Log von Schritt 6 (im Repo-Wurzelverzeichnis, dorthin `tee`t das Kommando) |
 | `PINNmodulusTwo/artifacts/metrics.txt` | die MAE-Tabelle je OP mit Baselines und Coverage |
 | `PINNmodulusTwo/artifacts/history.csv` | **eine Zeile je Epoche** — `L_data`, die balancierten Terme, `spread_space`, `spread_time`, `delta`, die Betas. Daraus kommt die `spread`-Kurve in §11.3 |
-| `PINNmodulusTwo/artifacts/model.pt` | Checkpoint, alle 10 Epochen geschrieben |
+| `PINNmodulusTwo/artifacts/model.pt` | Checkpoint, alle 10 Epochen geschrieben. **Jeder neue Lauf überschreibt sie** — vor Achse 0 wegkopieren, wenn der Schritt-6-Stand erhalten bleiben soll. Es gibt bisher **keinen Weg, sie zurückzuladen** (§11.7) |
 | `PINNmodulusTwo/artifacts/*.png` | die Plots |
 
 **Im Fahrplan** stehen die Zahlen an vier Stellen, und die sind versioniert:
@@ -623,6 +649,8 @@ Archiv: abgehakte Schritte, gemessene Zahlen, geschlossene Befunde.
 | **§11.3** | die `spread`-Kurve über 60 Epochen — O9 widerlegt |
 | **§11.4** | OP19 wird schlechter — O11 |
 | **§11.5** | die Einordnung: in-sample gegen ausgehalten, V̇ als Schwierigkeitsachse — O14 |
+| **§11.6** | die volle Auswertung der `history.csv` — O12 widerlegt, **O15 neu** |
+| **§11.7** | warum O13 mechanisch ist und nicht eine Frage der Verallgemeinerung |
 
 ## Geschlossene Punkte
 
@@ -633,6 +661,8 @@ Archiv: abgehakte Schritte, gemessene Zahlen, geschlossene Befunde.
 | **O3** | OP15: `cell_current` fehlt im Bündel | Rohexport hat **keine** `CellCurrent(t).csv`. Nie exportiert, also stimmt das Plansheet für OP15 nicht. Blockiert nichts (Berichts-OP). §9a.1, Q2 | 01.09. |
 | **O4** | OP12: Profil endet bei 1440 s, Trajektorie bis 1605 s | Kein Knick in `dT/dt` an der Nahtstelle → der Solver hat den letzten Wert gehalten, `np.interp` tut dasselbe. Keine Rückfrage nötig. §9a.2, Q1 | 01.09. |
 | **O7** | Energiebilanz ging um ~147x nicht auf | Codefehler: `jr1_w` wurde zusätzlich durch die 121 JR1-Gitterpunkte geteilt. Behoben, mit Tests, und auf echten Daten bestätigt. §11.1 | 01.09. |
+| **O9** | dämpft der Physik-Term nur, statt Dynamik zu lernen? | **Widerlegt.** `spread_time` steigt von 0.201 (Ep 3) auf 0.968 (Ep 60), während die MAE weiter fällt. Am 02.09. gegen die volle `history.csv` gehalten: Median über Ep31–60 = 0.922 bei Std 0.119 — die Aussage steht auf dreißig Epochen, nicht auf einer. §11.3, §11.6 | 01.09. |
+| **O12** | BC-Term trägt fast nichts (`ratio bc` = 0.0178) | **Widerlegt, beide Hälften.** (a) Die 0.0178 sind der Wert **einer** Epoche einer Reihe mit 59 % relativer Streuung; Median Ep31–60 = 0.0581, Ep21–40 → Ep41–60 = 0.0540 → 0.0582, also kein Abfall. Der Term liegt bei 58 % seines nominellen `w_bc/w_data = 0.1` — unauffällig. (b) `--batch-bc 121` ändert nichts: `boundary_condition_loss` zieht `min(121, batch_bc)`, und `min(121,128) == min(121,121)`. §11.6 | 02.09. |
 
 ## Der Weg dahin (alles erledigt)
 
@@ -1401,6 +1431,173 @@ der, an dem es gewinnt.
 
 ---
 
+### 11.6 Was die `history.csv` sagt — O12 widerlegt, O15 neu (02.09.)
+
+Bis zum 02.09. stand jede Aussage über den Lauf auf der **letzten** Zeile von
+`artifacts/history.csv`. Die Datei hat 60 Zeilen. Ausgewertet wurden sie zum
+ersten Mal am 02.09., und zwei der Aussagen halten das nicht aus.
+
+> Damit das nicht wieder von der Sorgfalt eines einzelnen Nachmittags abhängt,
+> macht `tools/analyse_history.py` es jetzt von selbst. Es liest dieselbe Datei
+> und meldet die vier Muster, die unten hergeleitet werden.
+
+#### O12 ist widerlegt: 0.0178 war eine Epoche, kein Trend
+
+| `ratio_bc` | Wert |
+|---|---|
+| letzte Epoche (die Zahl, die bis 02.09. im Fahrplan stand) | 0.0178 |
+| **Median Ep31–60** | **0.0581** |
+| Streuung Ep31–60 | Std 0.0332 auf Mittel 0.0564 — **59 % relativ** |
+| Median Ep21–40 → Ep41–60 | 0.0540 → 0.0582 — **kein Abfall** |
+| Epochen unter dem Endwert | 5 von 30 |
+
+Der BC-Term liegt stabil bei ~0.058 gegen den nominellen `w_bc/w_data = 0.1`,
+also bei 58 % seines Sollwerts. Er ist nicht „auf 0.0178 gefallen"; die letzte
+Epoche war zufällig eine der fünf niedrigsten von dreißig.
+
+Die zweite Hälfte von O12 löst sich im Code auf: `boundary_condition_loss` zieht
+`n_samples = min(len(bc_indices), len(tn_q))`, und `min(121, 128)` ist dasselbe
+wie `min(121, 121)`. `--batch-bc 121` lässt die Warnung verschwinden und ändert
+an der Mathematik nichts. **O12 ist damit geschlossen, ohne einen einzigen Lauf.**
+
+> **Das ist dasselbe Muster ein zweites Mal.** 5b las einen Trend aus drei
+> Epochen (`spread` = 0.201) — Schritt 6 hat ihn widerlegt. Hier wurde einer aus
+> **einer** Epoche gelesen. Regel ab sofort: **kein Befund aus der letzten
+> Zeile.** Median und Streuung über die letzten dreißig Epochen, oder gar nichts.
+
+#### O15: das Balancing hat nach 60 Epochen noch nicht eingesetzt
+
+Alle drei Divisoren fallen mit exakt derselben Rate:
+
+| | Start | Ende | Faktor | pro Epoche |
+|---|---|---|---|---|
+| `div_data` | 2.94e4 | 58.7 | 500.1 | **0.9000** |
+| `div_phys` | 7.34e9 | 1.48e7 | 495.9 | **0.9002** |
+| `div_bc` | 4.80e-4 | 9.59e-7 | 500.5 | **0.9000** |
+
+`0.9^59 = 1/501`. Das ist reiner geometrischer Zerfall: der aktuelle Loss trägt
+zum Divisor nichts bei. Nachgerechnet an Epoche 60 — der EMA-Schritt ist
+`div ← 0.9·div + 0.1·L`, also `0.9 × 65.27 = 58.74` gegen einen Beitrag von
+`0.1 × 0.0515 = 0.005`, das sind **0.009 %**.
+
+Der Grund steht in `train.py:462`: beim ersten Aufruf ist `prev is None`, also
+`ema = value` — der Divisor wird auf den Loss des **allerersten
+Optimiererschritts** verankert. Der lag bei ~3.3e4, das Epochenmittel von
+Epoche 1 bei 100.5, also rund **325× darüber**. Bei einem Horizont von zehn
+Epochen (`ema_decay: 0.9`) braucht allein der Abbau dieser Verankerung
+`10·ln(325) ≈ 58` Epochen. Genau so lange lief der Lauf.
+
+**Die Folge:** weil alle drei gleich schnell zerfallen, ist ihr *Verhältnis*
+über den ganzen Lauf konstant. Das Balancing ist damit nicht adaptiv, sondern
+faktisch `fixed` — mit Divisoren, die der Zufall des ersten Schritts gesetzt hat.
+Gemessen kommt `ratio_phys` = **0.586** heraus (Median Ep31–60), wo `w_phys = 0.1`
+nominell 0.1 verspricht: ein Faktor 6, den niemand gewählt hat.
+
+Unter Adam (`train.py:591`) kürzt sich ein gemeinsamer Skalenfaktor weitgehend
+heraus — deshalb hat Schritt 6 trotzdem sauber trainiert. Was **nicht**
+weggeht, ist das eingefrorene Verhältnis, und genau das ist die Größe, die ein
+Gewichts-Sweep messen soll. **Solange O15 gilt, misst ein `w_phys`-Sweep den
+ersten Optimiererschritt mit.** Deshalb blockiert O15 den Punkt O6.
+
+#### Warum kein Test das gefangen hat
+
+`test_balanced_loss_is_the_raw_loss_over_the_recorded_divisor` prüft, dass
+`div_phys` derselbe Divisor ist, der `L_phys_bal` erzeugt hat — die Buchhaltung
+also stimmt. Sein Docstring nennt den Zweck ausdrücklich: *„which is the exact
+question 'is the divisor stale or did the term really fall?' needs answered."*
+Die Instrumentierung wurde also gebaut, damit die Frage beantwortbar ist.
+**Gestellt hat sie danach niemand.**
+
+Der fehlende Test ist nicht schwer: nach N Epochen eines Kurzlaufs muss `div_*`
+innerhalb eines Faktors von `L_*` liegen. Wäre er da gewesen, hätte er O15 am
+ersten Tag gemeldet statt nach sechzig Epochen. Er gehört zum ersten Schritt,
+der O15 anfasst.
+
+`--w-phys 0 --w-bc 0` ist davon nicht betroffen: bei `zero_weight_terms: skip`
+werden beide Terme gar nicht berechnet (`train.py:708`). **Achse 0 bleibt
+gültig und bleibt der erste Schritt.**
+
+#### Was die Datei bestätigt
+
+`spread_time`: Median Ep31–60 = **0.922**, Std 0.119, letzte Epoche 0.968.
+`spread_space`: Median **1.118**. Die Überschrift „der `spread` ist gesund, O9
+ist widerlegt" steht damit auf dreißig Epochen und nicht auf einer — sie hält.
+
+Auch die Konsistenz stimmt: `delta` steht konstant bei 0.000622975 in normierter
+Zeit, also `T_span_ref = 1605.2 s` — genau das Trajektorienende von OP12 aus O4.
+
+#### Nebenbefund: das Training ist nicht glatt
+
+In den Epochen 4, 14, 25, 36 und 38 springt `L_phys` um ein bis zwei
+Größenordnungen (Ep 25: 1.26e7 gegen einen Median von 8.3e4), `spread_time`
+schießt auf 6.5 bzw. 4.2 und fällt zurück. Für `sweep.py` heißt das: **die
+Auswertung mittelt über die letzten k Epochen**, sie liest nicht die letzte. Ein
+Lauf, der zufällig auf einer solchen Epoche endet, liefert sonst Unsinn — und
+zwar Unsinn, der aussieht wie ein Ergebnis.
+
+---
+
+### 11.7 O13 ist mechanisch, nicht eine Frage der Verallgemeinerung (02.09.)
+
+`split_t = 0.8 · n_t` (`config.yaml:72`), `late_mae` ist also schlicht der
+mittlere Fehler über das letzte Fünftel der Trajektorie (`op_metrics.py:123`).
+
+Der entscheidende Punkt stand am 01.09. schon in den Zahlen, ist aber nicht
+ausgesprochen worden: **OP03 ist ein Trainings-OP, und `--holdout-tail` steht
+auf `False`** (`train.py:307`). Der Datenverlust deckt die ganze Trajektorie ab —
+das Modell hat diese späten Zeitschritte **mit Beschriftung gesehen** und
+verdoppelt dort trotzdem seinen Fehler (3.341 → 7.371 C). Damit ist O13 kein
+Verallgemeinerungsproblem. Das Modell scheitert an Punkten, die es auswendig
+kennen könnte.
+
+Drei Mechanismen kommen in Frage:
+
+1. **Der Level-Integrator.** `field` sagt nicht absolut vorher, sondern
+   `T(t) = level(t − delta_grid) + Netz(...)`, wobei `level` der räumliche
+   Mittelwert der **eigenen vorherigen Vorhersage** ist (`model.py:450–484`).
+   Über ~7000 Rollout-Schritte ist das ein Integrator mit Verstärkung 1: eine
+   noch so kleine systematische Schieflage wird bei jedem Schritt aufaddiert, und
+   es gibt keine rückstellende Kraft. Der Docstring nennt diese Konstruktion
+   ausdrücklich das, was das Weglaufen verhindert — sie verhindert Weglaufen der
+   *Form*, ist aber zugleich der perfekte Sammler für einen *Bias*.
+2. **Es ist am Ende wirklich schwerer.** Ende des Ladezyklus heißt heißeste
+   Phase, größte Gradienten, bei Profil-OPs der CV-Übergang.
+3. **Die Normierung kennt das letzte Fünftel nicht.** `T_mu`, `T_sigma`,
+   `q_mu/sigma`, `Qsrc_scale`, `phys_scale` werden über `[:split_t]` gepoolt
+   (`data.py:674–679`, `753–756`). Das ist richtig so — Testdaten dürfen nicht in
+   die Statistik lecken — bedeutet aber, dass die späten, heißesten Zustände am
+   oberen Rand der kalibrierten Skala liegen.
+
+**Eine Messung trennt 1 von 2 und 3, und sie braucht kein neues Training:** ist
+der späte Fehler **vorzeichenbehaftet** (immer dieselbe Richtung → Drift,
+Mechanismus 1) oder **ungerichtet** (Mechanismus 2/3)? Heute lässt sich das nicht
+sagen, weil `op_metrics.py` bis zum 02.09. nur mit `np.abs` gerechnet hat — Drift
+und Rauschen sahen identisch aus.
+
+**Seit 02.09. ist die Messung gebaut.** `op_metrics` liefert zusätzlich
+`late_bias` (signiertes Mittel über dasselbe Fenster wie `late_mae`),
+`late_bias_frac = |late_bias| / late_mae` und die drei Drittel
+`bias_early / bias_mid / bias_end`. Zu lesen ist es so:
+
+| `late_bias_frac` | Vorzeichen der Drittel | heißt |
+|---|---|---|
+| nahe **1** | gleich, wachsend | **Mechanismus 1**: der Level-Integrator läuft weg. Dann ist der Hebel der Anker, nicht das Gewicht |
+| nahe **0** | wechselnd | **Mechanismus 2 oder 3**: das späte Regime ist wirklich schwerer. Dann helfen Daten oder Normierung, kein Anker |
+| dazwischen | — | beides, und die Aufteilung sagt zu welchen Teilen |
+
+Es braucht dafür **keinen eigenen Lauf** — die Zahlen fallen bei Achse 0 mit ab.
+
+> **Was dafür fehlt, ist weniger als es aussieht.** `save_checkpoint` schreibt
+> `model.pt` samt `model_config` (`train.py:1140`), und
+> `test_checkpoint_round_trips_without_config_yaml` lädt es bereits zurück:
+> `RecurrentField(**ckpt["model_config"])` plus `load_state_dict(..., strict=True)`
+> ist getestet und funktioniert. Was **fehlt, ist nur der Einstiegspunkt** — kein
+> `--resume`, kein Auswertungs-Kommando. Ein `evaluate.py` (Checkpoint laden,
+> Rollout rechnen, Metriken berichten) ist damit wenige Zeilen und macht aus zwei
+> Stunden Minuten. Zu beachten: **jeder Lauf überschreibt `artifacts/model.pt`.**
+
+---
+
 ### 11.4 OP19 wird schlechter, je besser das Modell wird (O11, 01.09.)
 
 | | 5b (3 Epochen) | Schritt 6 (60 Epochen) |
@@ -1618,6 +1815,37 @@ nicht schadet — das wäre der schlechtere Tausch.
 
 ---
 
+## 0b. Was sich am 02.09. geändert hat
+
+**Kein Lauf, keine Code-Änderung.** Diese Sitzung hat die offenen Punkte
+durchgesprochen und die vorhandenen Daten zum ersten Mal vollständig ausgewertet.
+Das hat mehr geändert als erwartet.
+
+| | |
+|---|---|
+| **O12 widerlegt** | Die `history.csv` hat 60 Zeilen; die Aussage stand auf der letzten. Median Ep31–60 = 0.0581, kein Abfall, 59 % relative Streuung. Dazu: `--batch-bc 121` rechnet dieselbe Zeile wie 128. Beide Hälften erledigt, §11.6 |
+| **O15 neu** | Alle drei Loss-Divisoren fallen mit exakt 0.9000/Epoche — reiner Zerfall, der Loss trägt 0.009 % bei. Das Balancing wirkt wie `fixed` mit Divisoren aus dem ersten Optimiererschritt. **Blockiert O6**, §11.6 |
+| **O13 geschärft** | OP03 ist ein Trainings-OP und `--holdout-tail` ist aus — der späte Fehler tritt auf Daten auf, die das Modell mit Beschriftung gesehen hat. O13 ist mechanisch, nicht eine Frage der Verallgemeinerung, §11.7 |
+| **O8 entschieden** | Wird gemessen, drei Punkte 1.0 / 0.4 / 0.2. Nicht einfach auf 0.2 gesetzt, weil der Zähler mit δ schrumpft und der Rollout-Eigenfehler nicht — ein Zielkonflikt, kein Einheitenfehler |
+| **O5 umgewidmet** | Kein MAE-Hebel: eine Spalte ohne Varianz kann nichts erklären, und die SOC-Wirkung steckt über `q_dot` schon im Modell. Bleibt als Envelope-Grenze stehen, kein Kanal wird gestrichen |
+| **O11 und O14 sind dauerhaft** | Der Datensatz ist fix — es kommen keine OPs dazu, OP17/OP18 sind nie simuliert worden. Beide Punkte werden nicht mehr „gelöst", sondern berichtet |
+| **O6 neu bewertet** | Die fünf Gründe aus §10a sind alle behoben. O6 ist nicht mehr bewusst offen, sondern erstmals messbar — nur nicht vor O15 |
+
+### Die eine Lehre, und sie ist die zweite ihrer Art
+
+5b las einen Trend aus drei Epochen, O12 aus **einer**. Beide Male sah eine Zahl
+nach Befund aus, weil niemand die Streuung daneben gestellt hat. Beim `spread`
+ist die Aussage nachträglich doch bestätigt worden (Median 0.922 über dreißig
+Epochen), beim BC-Term nicht.
+
+**Regel:** kein Befund aus der letzten Zeile. Median und Streuung über die
+letzten dreißig Epochen, oder gar nichts. Für `sweep.py` heißt das, dass die
+Auswertung über die letzten *k* Epochen mittelt — die Epochen 4, 14, 25, 36 und
+38 zeigen Ausschläge von ein bis zwei Größenordnungen in `L_phys`, und ein Lauf,
+der zufällig auf einer davon endet, liefert Unsinn, der aussieht wie ein Ergebnis.
+
+---
+
 ## 0a. Was sich am 01.09. geändert hat
 
 **Ein Fehler, gefunden und behoben; zwei Berichte, die ihn künftig sehen.**
@@ -1708,6 +1936,10 @@ weder `L_spread` noch Gradient-Balancing noch adaptives `w_phys` einzubauen. All
 drei wären Umbauten gegen ein Problem gewesen, das es nicht gibt.
 
 ## Offene Punkte
+
+> Diese Tabelle ist der Stand vom **01.09.** Der aktuelle Stand steht in Teil I
+> („Index: alle Punkte, O1 bis O15") — am 02.09. sind O12 geschlossen, O15 neu,
+> und O5/O11/O14 haben ihren Charakter geändert. Siehe **§0b**.
 
 | # | | wer / wann |
 |---|---|---|
