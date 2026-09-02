@@ -14,74 +14,37 @@ eigenes Modell, eigenes Training, eigener Verlust.
 
 ---
 
-# ▶ TODO für dich — sechs Punkte, dann kann ich schreiben
+# ▶ Stand der offenen Punkte
 
-Zu jedem steht meine Empfehlung. Wo du einverstanden bist, reicht „ja"; wo
-nicht, ändert deine Antwort etwas Konkretes am Code.
+Alle sechs vom 02.09. sind beantwortet. Was jetzt noch offen ist, steht in §12.
 
-## Entscheidungen
+| # | Frage | Antwort |
+|---|---|---|
+| 1 | Rangtest oder `model.py` zuerst? | **Rangtest.** `tools/spatial_rank.py` ist geschrieben und getestet — läuft bei dir in Sekunden, braucht nur numpy. §8 |
+| 2 | Läuft PINNmodulusTwo parallel? | **Ja**, Achse 0 läuft/lief. Ich brauche die Zahl, siehe §12 |
+| 3 | Name `GridCNN`? | bleibt |
+| 4 | `subsample_time` 2 oder 1? | **2.** Zwei Gründe: ~20 % Luft zum CFL-Limit (0.2 gegen 0.241 s), und Schritt 6 lief auf `2` — nur so ist der Vergleich gegen die 6.270 / 3.585 C ein Vergleich. `1` ist die Gegenprobe, falls `L_phys` sich auffällig verhält |
+| 5 | Wand-BC in den Fahrplan? | erklärt unten |
+| 6 | Fluidtemperatur an der Wand | **beides.** Bilanz im Modell, gemessene Werte als Aufsicht und Gegenprobe. §5/§6 — und dort steht auch die Falle |
 
-**1. Was zuerst — der Rangtest oder `model.py`?**
-> *Empfehlung: Rangtest.* `GridCNN/tools/spatial_rank.py`, ~40 Zeilen, kein
-> Torch, läuft bei dir in Sekunden auf dem Cache. Er sagt, ob `f` 8 oder 32
-> Kanäle braucht — und bei elf Trajektorien ist „so klein wie möglich" keine
-> Nebenfrage. §8.
+## Zu 5: was ich damit meinte
 
-**2. Läuft `PINNmodulusTwo` parallel weiter?**
-> *Empfehlung: ja, weiterlaufen lassen.* Teil I des Fahrplans steht auf Achse 0
-> (`--w-phys 0 --w-bc 0`, 60 Epochen, ~2 h). Die Frage dahinter — trägt der
-> Datenterm allein? — ist **architekturunabhängig** und gilt für GridCNN
-> genauso. Die zwei Stunden laufen nebenher, und wenn die Antwort „der
-> Physik-Term trägt nicht" lautet, spart sie mir hier den halben Aufwand um
-> `ghost_hi` und den FD-Stencil.
+Es geht **nicht** um GridCNN, sondern um einen Befund über **`PINNmodulusTwo`**.
 
-**3. Heißt es `GridCNN`?**
-> Ein `git mv` kostet nichts. Wenn dir was Besseres einfällt, jetzt ist der
-> billigste Moment.
+`grep -rin "convect|robin|htc|h_conv|wall.*flux"` über `physics.py`, `model.py`
+und `train.py` findet nichts. `heat_residual` ist reine Leitung plus Quelle,
+ohne Senke, und der einzige BC-Term sitzt per `bc_mask = |x| < 1e-6` an der
+Symmetrieebene. Also: **die Gehäusewand hat gar keine Randbedingung.** Der
+Wärmeaustritt ist physikalisch unbeschränkt und wird allein aus dem Datenterm
+gelernt — obwohl dort laut Energiebilanz bis zu die Hälfte der Quellenergie
+hinausgeht.
 
-**4. `subsample_time` für GridCNN — 2 oder 1?**
-> *Empfehlung: erst 2 (dt = 0.2 s, ~20 % Luft zum CFL-Limit von 0.241 s), 1 als
-> Gegenprobe.* Die Δ-Form mit explizitem Stencil ist explizites Euler und damit
-> CFL-gebunden. `1` ist sicher, kostet aber die doppelte Rollout-Länge — bei
-> ~7400 Schritten ist das nicht nichts. §4.
-
-**5. Kommt die fehlende Gehäusewand-BC in den Fahrplan?**
-> Das ist ein Befund über **`PINNmodulusTwo`**, nicht über GridCNN: `grep` über
-> `physics.py`/`model.py`/`train.py` findet keinen konvektiven Term, die
-> Gehäusewand hat gar keine Randbedingung, der Wärmeaustritt wird allein aus
-> dem Datenterm gelernt. Gehört als offener Punkt hinein (O16?), **mit** der
-> Einschränkung, dass er die val-Fehler *nicht* erklärt — §11.5 sagt, V̇ = 0 ist
-> der schwierigere Fall, also bleibt es dafür bei O14. Sag Nummer und Ort, dann
-> trage ich es ein.
-
-## Eine Sachfrage, die ich nicht selbst beantworten kann
-
-**6. Welche Fluidtemperatur sieht die Gehäusewand?**
-
-`ghost_hi` braucht `T_fluid` **an der Wand**. Vorhanden ist nur
-`fluid_inlet_temp`. Und das Kühlmittel fließt entlang **+y** (Inlet
-`y = −0.1265`, Outlet `y = +0.14605`), erwärmt sich also unterwegs — die Wand
-sieht bei kleinem y kälteres Fluid als bei großem. Auf einem 11-Punkte-y-Gitter
-ist das kein Rundungsfehler.
-
-`*_Fluidstoffwerte.csv` hilft nicht: laut
-`legacy/.../docs/opbundle_contract.md` ist das eine `(1, 3)`-Zeile mit den
-**Stoffwerten** des Fluids (ρ, Cp, λ), keine Zeitreihe.
-
-> **Gibt es irgendwo eine Auslass- oder mittlere Fluidtemperatur** — im
-> StarCCM+-Export, in den Original-Projektdateien, oder als Monitor?
-
-Je nach Antwort:
-
-| | dann |
-|---|---|
-| **ja, Auslasstemperatur existiert** | linear zwischen Ein- und Auslass über y interpolieren. Ein Kanal, kein freier Parameter, physikalisch richtig herum |
-| **nein** | **Bilanz statt Messung:** `ΔT_fluid(y) = Q̇_kumuliert(y) / (ṁ · Cp_fluid)`. `ṁ` ist ein Treiber, `Cp_fluid` steht in `fluid_props`, `Q̇` rechnet das Modell selbst — es schließt sich also. Ein Integral entlang y, kein zusätzlicher Parameter |
-| **egal, erst mal ignorieren** | `T_fluid := T_inlet` überall. Das Netz hat die y-Koordinatenkarte (§3c) und kann eine y-Abhängigkeit selbst lernen — aber dann steckt sie in Gewichten statt in einer Bilanz |
-
-*Meine Empfehlung: die mittlere Spalte,* auch wenn eine Auslasstemperatur
-auftaucht — sie ist geschlossen, hat keinen freien Parameter, und sie erzwingt,
-dass die abgeführte Wärme und die Fluiderwärmung dieselbe Größe sind.
+Das ist ein offener Punkt in *deinem* Fahrplan, nicht in meinem Entwurf. Mein
+Vorschlag: als **O16** in Teil I, mit der Einschränkung dazu, dass er die
+val-Fehler **nicht** erklärt (§11.5 sagt, V̇ = 0 ist der *schwierigere* Fall,
+also bleibt es dafür bei O14). Sag „ja", dann trage ich ihn in
+`PINNmodulusTwo/FAHRPLAN.md` ein — es ist deine Datei und die O-Nummern sind
+deine Buchführung, deshalb frage ich statt es zu tun.
 
 ---
 
@@ -376,7 +339,7 @@ x-Stapel, 5 tief:   [ghost_lo,  T0(Mitte),  T1(JR1),  T2(Wand),  ghost_hi]
 
 ghost_lo := T1                                  # Spiegelung an x=0 -- exakt
 ghost_hi := T2 - (dx2 / lam_xx) * q_wall        # konvektiver Austritt
-q_wall   := h(V_dot) * (T2 - T_fluid(t))
+q_wall   := h(V_dot) * (T2 - T_fluid(y, t))     # y, nicht nur t -- siehe unten
 
 y/z:  reflect-Padding, beide Richtungen
 ```
@@ -407,47 +370,177 @@ ist als der Autograd-Hessian, den sie ersetzt. Nicht vergessen und nicht
 stillschweigend weglassen: `fo01` ist genau auf der geheizten Ebene ungleich
 null.
 
-## 6. Der Wandterm ist keine Zutat, er ist die fehlende BC
+## 6. Der Wandterm — und die Falle darin
 
 `grep -rin "convect|robin|htc|h_conv|wall.*flux"` ueber `PINNmodulusTwo/*.py`
 findet **nichts**. `heat_residual` ist reine Leitung plus Quelle, ohne Senke,
 und der einzige BC-Term sitzt an der Symmetrieebene. Der Waermeaustritt an der
-Gehaeusewand ist physikalisch voellig unbeschraenkt -- das Netz lernt ihn allein
-aus dem Datenterm.
+Gehaeusewand ist voellig unbeschraenkt -- er wird allein aus dem Datenterm
+gelernt.
 
-Genau das sieht der `energy_balance_report`: **0.5-0.9x, und es folgt dem
-Volumenstrom.** V_dot = 0 -> 0.9x (fast geschlossen, fast adiabat).
-V_dot = 0.0026 -> 0.5x, also die halbe Quellenergie verlaesst das System durch
-eine Wand, an der die PDE nichts stehen hat.
+Genau das sieht `energy_balance_report`: **0.5-0.9x, und es folgt dem
+Volumenstrom.** V_dot = 0 -> 0.9x (fast nichts geht raus), V_dot = 0.0026 ->
+0.5x. Und weil die Kuehlung nur auf ±x sitzt (§5), ist `ghost_hi` **der**
+einzige Weg, auf dem Energie das Gebiet verlaesst. Der Term ist keine
+Verbesserung unter mehreren, er ist die fehlende Haelfte der Bilanz.
 
-Auf dem Gitter ist der Term hinschreibbar (§5, `ghost_hi`), und er setzt die
-Fluid-Treiber `fluid_inlet_temp` / `fluid_mass_flow` **dorthin, wo sie wirken**,
-statt sie als globale Skalare gleichverteilt einzustreuen. Das ist der einzige
-Punkt des Entwurfs, an dem der CNN nicht nur anders rechnet, sondern mehr
-Physik enthaelt als das bestehende Modell.
+### Was der 02.09. dazu geliefert hat
+
+Die Auskunft (`030`) hat vier Groessen im **Rohexport** gefunden, die in keiner
+Cache-Pipeline referenziert sind:
+
+| Datei | Spalte | was |
+|---|---|---|
+| `*_Temperaturen.csv` | `Tmfavg_fluid_out Monitor (C)` | massenstromgemittelte **Auslasstemperatur**, gleiche Zeitachse (dt = 0.1 s) |
+| `*_Heat Transfer.csv` | `Heat Transfer: solid to fluid Monitor (W)` | **der gemessene Waermestrom Festkoerper -> Fluid, `Q̇(t)`** |
+| `*_Fluidstoffwerte.csv` | `Specific Heat Monitor (J/kg-K)` | `Cp_fluid` (OP04: 3374.09) |
+| `*_Input Signale.csv` | `Fluid Mass Flow Monitor (kg/s)` | `ṁ` |
+
+Die zweite Zeile ist der eigentliche Fund. **`Q̇(t)` ist gemessen** — genau die
+Groesse, die `ghost_hi` berechnet.
+
+### ⚠ Die Falle: das sind keine Eingaben
+
+`Q̇(t)` und `Tmfavg_fluid_out(t)` sind **Ergebnisse der Simulation**, nicht
+Treiber. Ein Surrogat, das die Simulation ersetzen soll, hat sie zur Laufzeit
+**nicht**. Sie als Modelleingang zu fuehren waere ein Leck: hervorragende
+val-Zahlen und ein Modell, das im Einsatz nichts kann.
+
+Also sauber getrennt:
+
+| Groesse | Rolle | zur Laufzeit verfuegbar? |
+|---|---|---|
+| `ṁ`, `T_fluid_in`, `Cp_fluid` | **Eingang** | ja, sind Treiber bzw. Konstante |
+| `Q̇(t)` gemessen | **Aufsicht im Training** (`L_wall`) und Kalibrierung von `h` | nein — steht nur im Training zur Verfuegung |
+| `Tmfavg_fluid_out(t)` | **Gegenprobe** der Bilanz | nein |
+
+### Was das Modell tatsaechlich rechnet
+
+Geschlossen, ohne einen einzigen freien Parameter im Fluidpfad:
+
+```
+# 1. Fluidtemperatur laengs der Wand -- Enthalpiebilanz entlang +y.
+#    Das Kuehlmittel fliesst entlang +y und erwaermt sich dabei, die Wand
+#    sieht also bei kleinem y kaelteres Fluid als bei grossem.
+T_fluid(y, t) = T_in(t) + Q_kumuliert(y, t) / (mdot(t) * Cp_fluid)
+                          ^ Integral der Wandwaerme von y_min bis y
+
+# 2. Wandfluss aus der lokalen Differenz
+q_wall(y, z, t) = h(t) * (T2(y, z, t) - T_fluid(y, t))
+
+# 3. Geisterschicht daraus
+ghost_hi = T2 - (dx2 / lam_xx) * q_wall
+```
+
+`h` ist dabei **kalibriert, nicht geraten und nicht frei gelernt**: aus dem
+gemessenen `Q̇(t)`, der Wandtemperatur und `T_fluid` faellt
+
+```
+h_eff(t) = Q̇(t) / (A * (T2_mittel(t) - T_fluid_mittel(t)))
+```
+
+direkt heraus. Einmal offline ueber alle OPs gerechnet, gegen `V_dot`
+aufgetragen, ergibt das eine **feste Funktion `h(V_dot)`**, die zur Laufzeit
+verfuegbar ist. Kein freier Parameter, und bei elf Trajektorien zaehlt jeder,
+den man nicht braucht.
+
+> Falls die Punktwolke `h_eff` gegen `V_dot` nicht auf einer Kurve liegt, ist
+> `h` nicht allein flussabhaengig. Dann -- und nur dann -- wird `h` gelernt,
+> aber weiterhin mit `L_wall` gegen `Q̇` beaufsichtigt.
+
+### Die zwei Gegenproben, die dadurch gratis sind
+
+```
+L_wall  :  Summe(q_wall * dA)  gegen  Q̇_gemessen(t)      # Verlustterm
+Probe   :  T_fluid(y_max, t)   gegen  Tmfavg_fluid_out(t) # nur Diagnose
+```
+
+Der zweite laeuft ohne Modell: beide Seiten kommen aus denselben Rohdaten. Er
+sagt vor dem ersten Training, ob die Bilanz ueberhaupt aufgeht.
 
 > **Was das NICHT erklaert.** §11.5 sagt, V_dot = 0 sei der *schwierigere* Fall
 > (Mittel 5.374 C gegen 2.928 C bei V_dot > 0), und der schlechteste
 > ausgehaltene OP ist OP06 -- ohne Kuehlung. Waere der fehlende Wandterm die
-> Ursache der val-Fehler, muesste es andersherum sein. Es bleibt also bei O14:
-> Abdeckung, nicht Physik. Der Wandterm ist eine echte Luecke, aber ihm sind die
-> 6.270 C nicht anzuhaengen.
+> Ursache der val-Fehler, muesste es andersherum sein. Es bleibt bei O14:
+> Abdeckung, nicht Physik.
 
-**`h(V_dot)` wird gelernt** -- entschieden, nicht gewaehlt: die Auskunft vom
-02.09. sagt, der StarCCM+-interne Waermeuebergangskoeffizient ist nirgends
-exportiert und steckt in den Original-Projektdateien ausserhalb dieses Repos.
-Es gibt also keine Korrelation zum Nachschlagen. Eine kleine monotone Funktion
-(z. B. `softplus(a) * V_dot**b + c`, drei Parameter) ist der sparsamste Ansatz;
-bei elf Trajektorien ist jeder freie Parameter einer zu viel, aber drei fuer den
-einzigen Senkenpfad des Modells sind vertretbar.
+### Kostet einen Cache-Umbau
 
-**Und es gibt keinen zweiten Senkenpfad.** Die Kuehlung sitzt nur auf ±x (§5),
-y/z sind adiabat. Damit ist `ghost_hi` *der* Weg, auf dem Energie das Gebiet
-verlaesst -- was genau zu `energy_balance_report` passt: V_dot = 0 -> 0.9x
-(fast nichts geht raus), V_dot = 0.0026 -> 0.5x. Der Term ist nicht eine
-Verbesserung unter mehreren, er ist die fehlende Haelfte der Bilanz.
+Die vier Groessen liegen roh vor, aber nicht im `.npz`. Fuer die reine
+Gegenprobe reicht direktes Einlesen der CSVs; fuer das **Training** muessen
+`Q̇(t)`, `T_fluid_out(t)`, `Cp_fluid` und `mdot` ins Buendel — also
+`schema_version` hoch, `opbundle_contract.md` erweitern, alle sechzehn OPs neu
+bauen (10-30 min). Das ist ein Eingriff in geteilte Infrastruktur und gehoert
+in den Plan, nicht nebenbei erledigt. Siehe [`GridCNN/FAHRPLAN.md`](FAHRPLAN.md), Stufe 2.
 
-## 7. Was von PINNmodulusTwo übernommen wird
+## 7. Das Flussdiagramm
+
+### Ein Rollout-Schritt
+
+```mermaid
+flowchart TD
+    T["T_t &mdash; 3 x 11 x 11"]
+    R["Historie: Raten ueber 2 Lags"]
+    S["statische Karten, 14 Stueck<br/>alpha, lambda, rhoCp, y- und z-Karte, Quellkarte"]
+    G["globale Skalare, 18 Stueck<br/>c_rate, Strom, T_fluid_in, mdot, deren Raten"]
+    W["Wandterm<br/>T_fluid y,t aus Enthalpiebilanz entlang +y<br/>q_wall = h mal T2 minus T_fluid"]
+    P["Padding<br/>y und z: reflect &mdash; adiabat<br/>ghost_lo = T1 &mdash; Spiegelung an x=0<br/>ghost_hi aus q_wall &mdash; Kuehlwand"]
+    N["Conv-Stapel, 4 Bloecke<br/>3x3 ueber y,z &nbsp; + &nbsp; 3-Punkt-Stencil in x"]
+    D["dT/dt &mdash; 3 x 11 x 11"]
+    E["T_t+1 = T_t + dt mal dT/dt"]
+
+    T --> P
+    R --> P
+    T --> W
+    G --> W
+    W --> P
+    P --> N
+    S --> N
+    G --> N
+    N --> D
+    D --> E
+    E -. "Rueckkopplung, frei laufend" .-> T
+```
+
+Drei Dinge, die das Bild sagen soll:
+
+* **Die Randbedingungen sitzen VOR dem Netz, nicht in einem Verlustterm.** Was
+  aus `P` herauskommt, erfuellt Symmetrie und Kuehlwand bereits — das Netz kann
+  sie nicht verletzen und muss sie nicht lernen.
+* **Der Wandterm haengt an `T_t` selbst**, nicht nur an den Treibern. Er ist
+  eine Rueckkopplung: heisse Wand, mehr Abfuhr.
+* **Die Rueckkopplung ist frei laufend.** Kein Teacher Forcing, genau wie in
+  `PINNmodulusTwo`.
+
+### Der Trainingsschritt
+
+```mermaid
+flowchart LR
+    IC["T_0 gemessen"] --> S1
+    subgraph FEN["ein Fenster von k Schritten"]
+        direction LR
+        S1["t"] --> S2["t+1"] --> SD["..."] --> SK["t+k"]
+    end
+    SK --> LD["L_data<br/>gegen T_label"]
+    SK --> LP["L_phys<br/>FD-Residuum"]
+    SK --> LW["L_wall<br/>Summe q_wall gegen Qdot gemessen"]
+    LD --> SUM["gewichtete Summe"]
+    LP --> SUM
+    LW --> SUM
+    SUM -. "Gradient durch alle k Schritte" .-> S1
+    SK -. "detach, naechstes Fenster" .-> IC
+```
+
+Der Unterschied zu `PINNmodulusTwo` steckt im gestrichelten Pfeil links: dort
+laeuft der Gradient **einen** Schritt weit (`train.py:772` rollt unter
+`no_grad` aus und trainiert dann Ein-Schritt-Paare gegen die eingefrorene
+Trajektorie), hier `k`. Das ist der Hebel auf O13 — §4.
+
+`L_wall` ist der dritte Term und der einzige mit einem **gemessenen** Ziel:
+`Q̇(t)` aus dem Rohexport. Er ist im Training verfuegbar und zur Laufzeit nicht,
+was genau richtig ist — §6.
+
+## 8. Was von PINNmodulusTwo übernommen wird
 
 Unabhängiges **Modell**, geteilter **Datenpfad**. Das ist Absicht:
 
@@ -470,23 +563,47 @@ OP16), sonst ist der Vergleich wertlos.
 
 ---
 
-## 8. Vor dem ersten Code: der Rangtest
+## 9. Der Rangtest — das Werkzeug steht
 
-Steht weiter aus und ist in Minuten erledigt: **POD/SVD auf `Tn`.** 121 Punkte
-je Ebene, ein diffusives Feld, getrieben von glatten globalen Skalaren.
+[`tools/spatial_rank.py`](tools/spatial_rank.py), geschrieben und gegen ein
+nachgebautes Buendel getestet. Braucht **nur numpy** — kein Torch, kein pandas,
+keine `material_properties/`, weil es `T`, `xyz` und `layer` roh aus dem `.npz`
+liest.
 
-* Kommen ~4 Moden auf 99.9 %, ist der Raum trivial und der ganze Fehler sitzt
-  in der Zeit-Abbildung. Dann ist ein **5-Moden-ROM** die ehrlichere Antwort als
-  ein CNN, und es wäre um Größenordnungen billiger.
-* Braucht es 30+ Moden, hat der CNN echte Struktur zu holen.
+```bash
+python3 GridCNN/tools/spatial_rank.py
+```
 
-Das entscheidet nicht, *ob* wir das hier bauen — die Argumente (a)–(e) in §2
-hängen nicht daran. Es entscheidet, **wie groß** `f` sein muss, und das ist bei
-elf Trajektorien keine Nebenfrage.
+Es rechnet drei POD-Zerlegungen, weil sie drei verschiedene Fragen beantworten:
 
----
+| | Frage |
+|---|---|
+| `T` − Zeitmittel je Punkt | wie viele Moden beschreiben die Dynamik? |
+| `T` − **Orts**mittel je Zeit | wie viel bleibt, wenn man „die ganze Zelle wird waermer" abzieht? **Daran haengt die Faltung.** |
+| dasselbe **gepoolt** ueber alle OPs | traegt EINE Basis alle OPs? Das ist die Zahl, die zaehlt — ein Modell, das je OP eine eigene Basis braeuchte, verallgemeinert nicht |
 
-## 9. Was der CNN nicht repariert
+Dazu zwei Kontrollen, die nichts extra kosten: die **Gitterprobe** (der
+`reshape` auf `3 x 11 x 11` wird aus den Koordinaten *abgeleitet*, nicht
+geraten) und das **Wandgefaelle je OP** neben dem Volumenstrom — waechst es mit
+`V_dot`, sitzt die Senke wirklich an der Gehaeusewand, wie `ghost_hi` annimmt.
+
+Die Lesart:
+
+| gepoolte Ortsstruktur bei 99.9 % | heisst |
+|---|---|
+| **≤ ~5 Moden** | der Raum ist trivial. Ein 5-Moden-ROM ist die ehrlichere Antwort als ein CNN, und `f` darf sehr klein sein |
+| **~30+ Moden** | echte Ortsstruktur, die Faltung hat etwas zu holen |
+
+> Eine Fussangel steht auch im Skript: sobald der `uniform`-Anteil nahe 100 %
+> liegt, ist die Ortsstruktur selbst klein und die letzten 0.01 % sind
+> Rauschen. Eine dreistellige Modenzahl in der 99.99-%-Spalte zaehlt dann
+> Rauschen, nicht Physik — immer neben dem `uniform`-Anteil lesen.
+
+Der Test entscheidet nicht, *ob* GridCNN gebaut wird — die Argumente in §2
+haengen nicht daran. Er entscheidet, **wie gross `f` sein muss**, und bei elf
+Trajektorien ist das keine Nebenfrage.
+
+## 10. Was der CNN nicht repariert
 
 Damit es geschrieben steht und nicht später als Überraschung auftaucht:
 
@@ -496,3 +613,159 @@ Damit es geschrieben steht und nicht später als Überraschung auftaucht:
 * **O11 / OP19.** Der Sim-vs-Messung-Abstand wird davon nicht kleiner.
 * **Das ~1 K-Ziel.** Wenn der Engpass die Abdeckung ist und nicht die
   Architektur, verschiebt der CNN die Zahl, aber nicht die Ursache.
+
+---
+
+## 11. Was gegen diese Idee spricht
+
+Selbstpruefung, weil danach gefragt wurde — und weil ein Entwurf, der nur seine
+eigenen Argumente auffuehrt, keiner ist.
+
+### 11.1 Der groesste Einwand: die meisten Gewinne sind KEINE CNN-Gewinne
+
+Ich habe in §2 sechs Punkte fuer den CNN aufgezaehlt. Beim Nachrechnen halten
+nur zwei davon der Frage stand *„braucht das wirklich eine Faltung?"*:
+
+| Gewinn | braucht dafuer wirklich einen CNN? |
+|---|---|
+| `reflect`-Padding, exakte Symmetrie | **nein** — braucht das *Gitter* |
+| `ghost_hi` / Wandterm | **nein** — braucht das *Gitter* |
+| FD-Stencil statt Autograd-Hessian | **nein** — braucht das *Gitter* |
+| bezahlbares truncated BPTT | **nein** — braucht *Feld auf einmal* |
+| statische Karten werden Pflicht | ja, das ist Gewichtsteilung |
+| Diffusion als Architektur (3x3 = Stencil) | ja |
+
+**Vier von sechs bekommt man genauso mit einem dichten Netz auf dem
+363-Vektor** — oder mit einem ROM. Ich habe „nutze die Gitterstruktur" als
+„nutze einen CNN" verpackt, und das sind zwei verschiedene Behauptungen. Die
+Faltung selbst ist der am schwaechsten begruendete Teil des Vorschlags.
+
+### 11.2 Der Rangtest kann genau die Faltung erledigen
+
+Und das ist nicht unwahrscheinlich. Drei Befunde zeigen in dieselbe Richtung:
+
+* das Feld ist diffusiv und wird von glatten globalen Skalaren getrieben,
+* `Qsrc` ist Skalar(t) x fester Karte (§3b) — die Quelle traegt **null**
+  zeitabhaengige Ortsstruktur,
+* damit ist `T` selbst der einzige raeumlich strukturierte zeitabhaengige
+  Input.
+
+Wenn dabei fuenf Moden herauskommen, ist ein CNN mit vierzehn statischen Karten
+zum Brechen der Translationsaequivarianz ein umstaendlicher Weg, ein
+5-dimensionales Problem auszudruecken. Dann ist das ROM nicht die
+Sparvariante, sondern die richtige Antwort.
+
+### 11.3 Die wertvollste Aenderung braucht GridCNN gar nicht
+
+Der Wandterm ist der einzige Punkt, an dem hier **mehr Physik** im Modell steckt
+als in `PINNmodulusTwo` — und er ist **portierbar**. Die fehlende
+Gehaeusewand-BC in `physics.py` zu schliessen und `L_wall` gegen das gemessene
+`Q̇(t)` zu stellen, sind geschaetzt 80-120 Zeilen im *bestehenden* Projekt. Es
+behebt eine nachgewiesene Luecke, wird von gemessenen Daten beaufsichtigt, und
+es ist in Tagen messbar statt in Wochen.
+
+**Aufwand gegen Ertrag ist dort besser als bei einem neuen Modell.** Das gehoert
+gesagt, auch wenn ein neues Modell das ist, was bestellt wurde.
+
+### 11.4 Elf Trajektorien binden alles
+
+Ein Conv-Stapel mit 4 x 64 Kanaelen hat grob 100k Parameter — dieselbe
+Groessenordnung wie das heutige MLP, auf elf Trajektorien. §11.5 des Fahrplans
+sagt, der schlechteste ausgehaltene OP (OP06, 6.270 C) scheitert an einem
+Regime mit **null** Trainingsbeispielen. Keine Architektur erfindet Daten, und
+GridCNN aendert an dieser Diagnose nichts.
+
+### 11.5 Zwei handfeste Kosten
+
+* **`lam_XY` ist auf JR1 nicht null** (§5). Die gemischte Ableitung ueber die
+  kurze x-Achse und eine Faltungsachse ist als FD ein Kreuz-Stencil ueber den
+  gepaddeten Stapel. Der Autograd-Hessian bekam sie geschenkt.
+* **Die Fehlersuche faengt teilweise von vorne an.** Der Wert von
+  `PINNmodulusTwo` steckt zu einem guten Teil in der Liste der schon gefundenen
+  Fehler — die 121x-Quelle, die `delta`-Normierung, die Residuenskalierung, die
+  kollabierenden `learn_gains`. Ein neues Modell hat seine eigene Ernte davon.
+
+### 11.6 Und was trotzdem traegt
+
+* Der Wandterm ist eine **echte, verifizierte Luecke**, und `Q̇(t)` liegt
+  gemessen vor. Das ist der stabilste Punkt des ganzen Entwurfs.
+* Die Randbedingungen **strukturell statt als Gewicht** streichen eine
+  Sweep-Achse und eine Fehlerquelle. Das ist kein Nullsummenspiel.
+* Truncated BPTT erreicht **O13**, den die heutige Trainingsschleife
+  strukturell nicht erreichen kann. Das ist keine Geschmacksfrage.
+
+### 11.7 Unterm Strich
+
+Die ehrliche Fassung dieser Idee heisst nicht *„CNN statt PINN"*, sondern:
+
+> **Gitterstruktur und Wandrandbedingung ins Modell holen — und den Rangtest
+> entscheiden lassen, wie viel Netz obendrauf noch noetig ist.**
+
+Deshalb ist [`GridCNN/FAHRPLAN.md`](FAHRPLAN.md) eine **Leiter**, keine gerade Linie: das
+Billigste und Sicherste zuerst, der CNN erst, wenn die Messung ihn rechtfertigt.
+Wenn Stufe 1 sagt „fuenf Moden", baue ich das ROM und sage es dir, statt den
+CNN trotzdem zu bauen, weil er im Entwurf steht.
+
+---
+
+## 12. Was ich noch brauche
+
+Vier Punkte. Die ersten beiden blockieren [`GridCNN/FAHRPLAN.md`](FAHRPLAN.md)
+Stufe 2, die anderen nicht.
+
+**12.1 — Die Zahl aus Achse 0.** Du sagtest, der Lauf ist fertig. Ich brauche
+val OP06 / OP09 aus `06b_ohne_physik.txt`. Warum es hier zaehlt: liegt sie nahe
+6.270 / 3.585 C, traegt der Physik-Term nicht, und dann sind der FD-Stencil,
+`L_phys` und ein guter Teil von §11.5 hier Aufwand fuer nichts — die Leiter
+wuerde sich umsortieren.
+
+**12.2 — Liegt `data_raw/` auf der Maschine?** Der Wandterm braucht
+`Tmfavg_fluid_out`, `Heat Transfer: solid to fluid`, `Cp_fluid` und `mdot`, und
+die stehen nur in den Roh-CSVs, nicht im `.npz`. Ohne `data_raw/` faellt Stufe 2
+aus.
+
+**12.3 — Cache-Schema anfassen oder nicht?** Zwei Wege, und es ist deine
+Entscheidung, weil der erste geteilte Infrastruktur beruehrt:
+
+| | |
+|---|---|
+| **a) sauber** | `generate_cache.py` + `opbundle_contract.md` erweitern, `schema_version` hoch, alle sechzehn OPs neu bauen (10-30 min). `PINNmodulusTwo` bekommt die Groessen damit auch — und es *braucht* sie, wenn §11.3 stimmt |
+| **b) leicht** | GridCNN liest die vier Groessen lokal aus den Roh-CSVs neben dem `.npz`. Nichts Bestehendes wackelt, aber es entsteht ein zweiter Datenpfad — genau die Doppelung, wegen der am 31.08. zusammengelegt wurde |
+
+*Empfehlung: a.* Die Doppelung ist teurer als der Rebuild.
+
+**12.4 — Eine Frage an den lokalen Bot, Faktor-2-Risiko.** Formuliert in §12.5.
+Sie ist genau die Sorte, die das Projekt schon einmal 121x gekostet hat.
+
+### 12.5 Zum Kopieren, falls du den lokalen Bot fragen willst
+
+```
+Anschluss an 030. Drei Praezisierungen zum Waermestrom, bevor ich ihn als
+Randbedingung einbaue -- es geht um Vorzeichen, Bezugsflaeche und den
+Halbmodell-Faktor.
+
+1) Bezieht sich "Heat Transfer: solid to fluid Monitor (W)" auf das
+   HALBMODELL (also eine Kuehlplatte, x = 0 .. 0.0219) oder auf die ganze
+   Zelle (beide ±x-Platten)? Ein Faktor 2 an dieser Stelle ist genau die
+   Sorte Fehler, die dieses Projekt schon einmal um 121x danebenliegen
+   liess.
+
+2) Welche Flaeche A liegt dem zugrunde? Die Rechnung h = Qdot / (A * dT)
+   braucht sie. Ist es die 0.198 x 0.104 m grosse Zellflaeche
+   (= 0.0206 m^2), die Kuehlplattenflaeche, oder eine benetzte Flaeche im
+   Kuehlkanal?
+
+3) Vorzeichenkonvention: ist der Monitor positiv, wenn Waerme VOM
+   Festkoerper INS Fluid geht? Und passt sein Zeitintegral quantitativ zu
+   dem, was energy_balance_report als Fehlbetrag sieht (V_dot = 0 -> 0.9x,
+   V_dot = 0.0026 -> 0.5x der Quellenergie)?
+
+Wenn dabei ohnehin ein Skript entsteht: bitte fuer OP04/OP05 (hoher Fluss)
+und OP07/OP14 (kein Fluss) beide Seiten der Bilanz gegenueberstellen --
+
+  dT_fluid_gemessen(t) = Tmfavg_fluid_out(t) - fluid_inlet_temp(t)
+  dT_fluid_bilanz(t)   = integral(Qdot dt) / (mdot * Cp_fluid)
+
+Das ist die Gegenprobe aus 030, sie braucht kein Modell, und sie sagt vor
+dem ersten Training, ob die Bilanz aufgeht.
+```
