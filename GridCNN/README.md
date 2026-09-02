@@ -12,6 +12,81 @@ Ein zweiter, **unabhängiger** Modellansatz neben
 derselbe Split, dieselben Metriken, damit die beiden vergleichbar sind — aber
 eigenes Modell, eigenes Training, eigener Verlust.
 
+---
+
+# ▶ TODO für dich — sechs Punkte, dann kann ich schreiben
+
+Zu jedem steht meine Empfehlung. Wo du einverstanden bist, reicht „ja"; wo
+nicht, ändert deine Antwort etwas Konkretes am Code.
+
+## Entscheidungen
+
+**1. Was zuerst — der Rangtest oder `model.py`?**
+> *Empfehlung: Rangtest.* `GridCNN/tools/spatial_rank.py`, ~40 Zeilen, kein
+> Torch, läuft bei dir in Sekunden auf dem Cache. Er sagt, ob `f` 8 oder 32
+> Kanäle braucht — und bei elf Trajektorien ist „so klein wie möglich" keine
+> Nebenfrage. §8.
+
+**2. Läuft `PINNmodulusTwo` parallel weiter?**
+> *Empfehlung: ja, weiterlaufen lassen.* Teil I des Fahrplans steht auf Achse 0
+> (`--w-phys 0 --w-bc 0`, 60 Epochen, ~2 h). Die Frage dahinter — trägt der
+> Datenterm allein? — ist **architekturunabhängig** und gilt für GridCNN
+> genauso. Die zwei Stunden laufen nebenher, und wenn die Antwort „der
+> Physik-Term trägt nicht" lautet, spart sie mir hier den halben Aufwand um
+> `ghost_hi` und den FD-Stencil.
+
+**3. Heißt es `GridCNN`?**
+> Ein `git mv` kostet nichts. Wenn dir was Besseres einfällt, jetzt ist der
+> billigste Moment.
+
+**4. `subsample_time` für GridCNN — 2 oder 1?**
+> *Empfehlung: erst 2 (dt = 0.2 s, ~20 % Luft zum CFL-Limit von 0.241 s), 1 als
+> Gegenprobe.* Die Δ-Form mit explizitem Stencil ist explizites Euler und damit
+> CFL-gebunden. `1` ist sicher, kostet aber die doppelte Rollout-Länge — bei
+> ~7400 Schritten ist das nicht nichts. §4.
+
+**5. Kommt die fehlende Gehäusewand-BC in den Fahrplan?**
+> Das ist ein Befund über **`PINNmodulusTwo`**, nicht über GridCNN: `grep` über
+> `physics.py`/`model.py`/`train.py` findet keinen konvektiven Term, die
+> Gehäusewand hat gar keine Randbedingung, der Wärmeaustritt wird allein aus
+> dem Datenterm gelernt. Gehört als offener Punkt hinein (O16?), **mit** der
+> Einschränkung, dass er die val-Fehler *nicht* erklärt — §11.5 sagt, V̇ = 0 ist
+> der schwierigere Fall, also bleibt es dafür bei O14. Sag Nummer und Ort, dann
+> trage ich es ein.
+
+## Eine Sachfrage, die ich nicht selbst beantworten kann
+
+**6. Welche Fluidtemperatur sieht die Gehäusewand?**
+
+`ghost_hi` braucht `T_fluid` **an der Wand**. Vorhanden ist nur
+`fluid_inlet_temp`. Und das Kühlmittel fließt entlang **+y** (Inlet
+`y = −0.1265`, Outlet `y = +0.14605`), erwärmt sich also unterwegs — die Wand
+sieht bei kleinem y kälteres Fluid als bei großem. Auf einem 11-Punkte-y-Gitter
+ist das kein Rundungsfehler.
+
+`*_Fluidstoffwerte.csv` hilft nicht: laut
+`legacy/.../docs/opbundle_contract.md` ist das eine `(1, 3)`-Zeile mit den
+**Stoffwerten** des Fluids (ρ, Cp, λ), keine Zeitreihe.
+
+> **Gibt es irgendwo eine Auslass- oder mittlere Fluidtemperatur** — im
+> StarCCM+-Export, in den Original-Projektdateien, oder als Monitor?
+
+Je nach Antwort:
+
+| | dann |
+|---|---|
+| **ja, Auslasstemperatur existiert** | linear zwischen Ein- und Auslass über y interpolieren. Ein Kanal, kein freier Parameter, physikalisch richtig herum |
+| **nein** | **Bilanz statt Messung:** `ΔT_fluid(y) = Q̇_kumuliert(y) / (ṁ · Cp_fluid)`. `ṁ` ist ein Treiber, `Cp_fluid` steht in `fluid_props`, `Q̇` rechnet das Modell selbst — es schließt sich also. Ein Integral entlang y, kein zusätzlicher Parameter |
+| **egal, erst mal ignorieren** | `T_fluid := T_inlet` überall. Das Netz hat die y-Koordinatenkarte (§3c) und kann eine y-Abhängigkeit selbst lernen — aber dann steckt sie in Gewichten statt in einer Bilanz |
+
+*Meine Empfehlung: die mittlere Spalte,* auch wenn eine Auslasstemperatur
+auftaucht — sie ist geschlossen, hat keinen freien Parameter, und sie erzwingt,
+dass die abgeführte Wärme und die Fluiderwärmung dieselbe Größe sind.
+
+---
+
+# Der Entwurf
+
 ## Warum der Name
 
 `Grid`, weil das die tragende Eigenschaft ist (siehe unten: das Gitter ist
