@@ -24,6 +24,18 @@
 > Seeds** — nicht δ. Ohne die Streuung steht das Hauptergebnis dieses Projekts
 > auf einem einzelnen Lauf, und genau daran ist 5b zweimal gescheitert.
 >
+> **`sweep.py` ist seit 02.09. gebaut.** Das Kommando:
+>
+> ```bash
+> python3 PINNmodulusTwo/sweep.py --axis w_phys --values 0 0.1 --seeds 0 1 2 --epochs 60
+> ```
+>
+> Sechs Läufe, ~12 h auf CPU. Zeilen werden nach **jedem** fertigen Lauf an
+> `artifacts/sweep.csv` angehängt und bereits vorhandene übersprungen — ein
+> Absturz in Stunde neun kostet einen Lauf, nicht neun. Am Ende druckt es genau
+> den Vergleich, um den es geht: **Spanne zwischen Konfigurationen gegen Spanne
+> zwischen Seeds**, mit dem Urteil aus §10.
+>
 > Zwei Dinge sind dabei mitgemessen worden und stehen fest:
 > **O13 ist beantwortet** (Drift, `bias_frac` Median 0.994 — §11.9) und
 > **O15 ist unabhängig bestätigt** (zweiter Lauf, `div_data` 4 878× zu hoch,
@@ -117,8 +129,19 @@ python3 PINNmodulusTwo/tools/analyse_history.py PINNmodulusTwo/artifacts/history
 | `late_bias`, `late_bias_frac`, `bias_early/mid/end` | `op_metrics.py` | der **signierte** Fehler. `late_bias_frac` nahe 1 heißt Drift, nahe 0 heißt Streuung — **das ist die Messung, die O13 entscheidet.** Steht ab dem nächsten Lauf in jeder OP-Zeile und in `metrics.txt` |
 | `test_the_divisor_tracks_its_loss_within_one_run` | `tests/` | O15 als `xfail` festgehalten. **Schlägt der Test eines Tages fehl, weil er besteht**, ist O15 behoben — dann Marker entfernen und den Punkt schließen |
 
-Noch nicht gebaut: `evaluate.py` (Checkpoint zurückladen) und `sweep.py` (die
-Seed-Schleife). Beide stehen weiter oben unter „Was gebaut wird".
+**Am 02.09. abends dazu:**
+
+| was | wo | wofür |
+|---|---|---|
+| `sweep.py` | neu | die Seed-Schleife. Eine Achse über mehrere Seeds, `artifacts/sweep.csv` je (Wert, Seed), am Ende **Spanne zwischen Konfigurationen gegen Spanne zwischen Seeds** und das Urteil aus §10. Hängt jede Zeile sofort an und überspringt, was schon dasteht. Legt die `history.csv` jedes Laufs unter `artifacts/sweep_runs/` ab, sonst überschriebe sie sich selbst |
+| `evaluate.py` | neu | einen gespeicherten Checkpoint bewerten, **ohne zu trainieren**. Baut das Bündel aus dem `preprocessing`-Abschnitt der Datei wieder auf, damit die Normierung die des Laufs ist. Der nächste Nutzen: der O13-Gegencheck aus `model_schritt6.pt` |
+
+> **Beim Bauen aufgefallen:** der Checkpoint **speichert die Loss-Gewichte
+> nicht**. `model_schritt6.pt` kann also nicht sagen, ob es mit `w_phys = 0.1`
+> entstanden ist — ausgerechnet die Frage, um die es gerade geht. `evaluate.py`
+> sagt das offen an, statt `None` zu drucken. Ein Zusatz von drei Zeilen in
+> `save_checkpoint` würde es beheben und alte Dateien nicht brechen; er ist
+> **nicht** gemacht, weil er das Dateiformat ändert.
 
 ## Die Auswahlregeln stehen fest
 

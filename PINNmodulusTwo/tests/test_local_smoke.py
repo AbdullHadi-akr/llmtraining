@@ -859,3 +859,169 @@ def test_every_op_gets_the_signed_metrics(synthetic_cache):
         assert key in m, key
     # and the formatter has to survive them
     assert "late_bias" in op_metrics_mod.format_op_metrics(op.op_id, "T0-in-time", m)
+
+
+# --------------------------------------------------------------------------
+# sweep.py -- the seed loop
+# --------------------------------------------------------------------------
+
+def test_sweep_runs_an_axis_and_records_one_row_per_seed(synthetic_cache, tmp_path):
+    """Two values, two seeds, four rows -- and the CSV written as they finish.
+
+    The fixture is tiny (1 epoch, width 8), so this is a wiring test, not a
+    measurement: what it holds is that the loop varies the axis, varies the
+    seed, scores the HELD-OUT OP and writes a row for every combination.
+    """
+    import sweep as sweep_mod
+
+    out = tmp_path / "sweep.csv"
+    argv = ["--axis", "w_phys", "--values", "0", "0.1", "--seeds", "0", "1",
+            "--out", str(out),
+            "--ops", "OP01", "--val-ops", "OP02", "--test-ops",
+            "--epochs", "1", "--subsample", "40", "--inner-steps", "1",
+            "--batch-data", "64", "--batch-phys", "16", "--batch-bc", "8",
+            "--width", "8", "--depth", "2", "--device", "cpu",
+            "--no-residual-output"]
+    assert sweep_mod.main(argv) == 0
+
+    import csv as csv_mod
+    rows = list(csv_mod.DictReader(out.open(newline="", encoding="utf-8")))
+    assert len(rows) == 4
+    assert {r["value"] for r in rows} == {"0", "0.1"}
+    assert {r["seed"] for r in rows} == {"0", "1"}
+    # the held-out OP is scored, the training OP is not
+    assert all(r["mae_OP02"] for r in rows)
+    assert "mae_OP01" not in rows[0]
+
+
+def test_sweep_skips_rows_it_already_has(synthetic_cache, tmp_path, capsys):
+    """A crash at hour nine must cost one run, not nine.
+
+    Six 60-epoch runs are twelve hours. Appending on completion and skipping
+    what is already recorded is the difference between restarting and starting
+    over -- and it is the only bookkeeping this file is allowed to carry.
+    """
+    import sweep as sweep_mod
+
+    out = tmp_path / "sweep.csv"
+    base = ["--axis", "w_phys", "--values", "0", "--seeds", "0",
+            "--out", str(out),
+            "--ops", "OP01", "--val-ops", "OP02", "--test-ops",
+            "--epochs", "1", "--subsample", "40", "--inner-steps", "1",
+            "--batch-data", "64", "--batch-phys", "16", "--batch-bc", "8",
+            "--width", "8", "--depth", "2", "--device", "cpu",
+            "--no-residual-output"]
+    sweep_mod.main(base)
+    capsys.readouterr()
+
+    sweep_mod.main(base)                      # same call again
+    assert "0 to go" in capsys.readouterr().out
+
+    import csv as csv_mod
+    rows = list(csv_mod.DictReader(out.open(newline="", encoding="utf-8")))
+    assert len(rows) == 1, "the second call must not duplicate the row"
+
+
+def test_sweep_refuses_to_score_on_training_ops(synthetic_cache, tmp_path):
+    """Without --val-ops there is nothing to select on.
+
+    Scoring a sweep on the OPs it trained on ranks memorisation. Failing fast
+    is the point: the alternative is twelve hours producing a table that means
+    nothing.
+    """
+    import sweep as sweep_mod
+
+    with pytest.raises(SystemExit, match="nothing to select on"):
+        sweep_mod.main(["--axis", "w_phys", "--values", "0", "--seeds", "0",
+                        "--out", str(tmp_path / "s.csv"),
+                        "--ops", "OP01", "--val-ops", "--test-ops",
+                        "--epochs", "1", "--device", "cpu"])
+
+
+def test_sweep_rejects_an_axis_that_is_not_a_flag(synthetic_cache, tmp_path):
+    """A typo in --axis must not silently sweep nothing.
+
+    ``setattr`` on an argparse namespace accepts any name, so an unchecked axis
+    would run the whole grid at the default value and report a clean, wrong
+    'no difference between configurations'.
+    """
+    import sweep as sweep_mod
+
+    with pytest.raises(SystemExit, match="not a train.py argument"):
+        sweep_mod.main(["--axis", "w_phsy", "--values", "0", "--seeds", "0",
+                        "--out", str(tmp_path / "s.csv"),
+                        "--ops", "OP01", "--val-ops", "OP02", "--test-ops",
+                        "--epochs", "1", "--device", "cpu"])
+
+
+# --------------------------------------------------------------------------
+# evaluate.py -- the load half of save_checkpoint
+# --------------------------------------------------------------------------
+
+def test_evaluate_scores_a_checkpoint_without_training(synthetic_cache, tmp_path,
+                                                       capsys):
+    """Train once, save, and score from the file alone.
+
+    The claim is narrow and load-bearing: the bundle evaluate.py rebuilds has to
+    be the one the weights were trained under. It reads train_frac, resample and
+    the rate lags from the checkpoint's ``preprocessing`` section -- they are not
+    in ``run``, and taking them from the wrong place would quietly fall back to
+    config.yaml and score the model against a normalisation it never saw.
+    """
+    import evaluate as eval_mod
+
+    args = _tiny_args(synthetic_cache, val_ops=["OP02"])
+    model, bundle, _ops, dtn, hist = train_mod.fit(args)
+    path = tmp_path / "model.pt"
+    train_mod.save_checkpoint(model, bundle, args, dtn, hist, path)
+
+    assert eval_mod.main([str(path), "--device", "cpu"]) == 0
+    out = capsys.readouterr().out
+    assert "OP02" in out and "late_bias" in out
+    # and it must not pretend to know the weights, which the file does not carry
+    assert "loss weights: not recorded" in out
+
+
+def test_evaluate_rebuilds_the_runs_own_normalisation(synthetic_cache, tmp_path):
+    """The reloaded bundle matches the trained one, not config.yaml's defaults.
+
+    T_sigma is the number every MAE is expressed in. A checkpoint scored against
+    re-fitted statistics would be an easier problem than the one the model
+    solved, and its MAE would not be comparable to the run it came from.
+    """
+    import evaluate as eval_mod
+
+    args = _tiny_args(synthetic_cache, val_ops=["OP02"], train_frac=0.6)
+    model, bundle, _ops, dtn, hist = train_mod.fit(args)
+    path = tmp_path / "model.pt"
+    train_mod.save_checkpoint(model, bundle, args, dtn, hist, path)
+
+    _m, reloaded, run, _ckpt = eval_mod.load_checkpoint(path, "cpu")
+
+    assert reloaded.T_sigma == pytest.approx(bundle.T_sigma)
+    assert reloaded.T_mu == pytest.approx(bundle.T_mu)
+    assert reloaded.ops[0].split_t == bundle.ops[0].split_t   # train_frac travelled
+    assert run["ops"] == list(args.ops)
+
+
+def test_evaluate_scores_an_unlisted_op_without_crashing(synthetic_cache, tmp_path,
+                                                         capsys):
+    """OP19 is not in the OP01-OP16 plan sheet, and tier_of raises for it.
+
+    The measurement OP is exactly the one somebody will point this at, so the
+    label has to degrade to 'unlisted' instead of ending the run.
+    """
+    import evaluate as eval_mod
+    import op_registry
+
+    args = _tiny_args(synthetic_cache, val_ops=["OP02"])
+    model, bundle, _ops, dtn, hist = train_mod.fit(args)
+    path = tmp_path / "model.pt"
+    train_mod.save_checkpoint(model, bundle, args, dtn, hist, path)
+
+    with pytest.raises(Exception):
+        op_registry.tier_of("OP19")          # the raising one
+    assert op_registry.tier_or_unknown("OP19") == op_registry.TIER_UNKNOWN
+
+    assert eval_mod.main([str(path), "--ops", "OP02", "--device", "cpu"]) == 0
+    assert "OP02" in capsys.readouterr().out
