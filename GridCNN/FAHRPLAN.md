@@ -25,11 +25,16 @@ cd /mnt/c/Users/M0245635/batterysurrogatemodell
 git checkout claude/cnn-problem-discussion-24ct9g && git pull
 source modulus_env/bin/activate
 
-python3 GridCNN/tools/spatial_rank.py 2>&1 | tee 07_rang.txt
+python3 GridCNN/tools/spatial_rank.py   2>&1 | tee 07_rang.txt
+python3 GridCNN/tools/balance_check.py  2>&1 | tee 08_bilanz.txt
 ```
 
-Sekunden, kein GPU, kein Torch. Danach wissen wir, wie groß `f` sein muss — und
-ob er überhaupt gebraucht wird.
+Zusammen Sekunden bis Minuten, kein GPU, kein Torch, kein pandas. Danach wissen
+wir, wie groß `f` sein muss — und ob der Wandterm überhaupt trägt.
+
+> Beim ersten Lauf auf einer neuen Maschine zuerst
+> `balance_check.py --ops OP04 --list-columns`: die Monitornamen stammen aus
+> einem StarCCM+-Export und müssen nicht überall gleich heißen.
 
 ---
 
@@ -38,7 +43,7 @@ ob er überhaupt gebraucht wird.
 | Stufe | was | Dauer | Tor |
 |---|---|---|---|
 | **0** | Rangtest | Sekunden | wie groß muss `f` sein — oder reicht ein ROM? |
-| **1** | Bilanz-Gegenprobe auf den Rohdaten | Minuten | geht die Wärmebilanz auf? |
+| **1** | Bilanz-Gegenprobe auf den Rohdaten ✔ gebaut | Minuten | geht die Wärmebilanz auf? |
 | **2** | vier Größen in den Cache | 30 min | Reports weiter grün? |
 | **3** | **Physik ohne Netz** — der Nullmodell-Lauf | Stunden Bauzeit | schlägt reine Physik die trivialen Vorhersager? |
 | **4** | das Netz dazu, Ein-Schritt-Training | Tage | schlägt es Stufe 3? |
@@ -72,40 +77,54 @@ statt bestätigend.
 
 # Stufe 1 — Geht die Bilanz auf?
 
-**Zu bauen:** `tools/balance_check.py`, ~80 Zeilen, nur numpy + csv.
+**Gebaut:** [`tools/balance_check.py`](tools/balance_check.py) ✔ (getestet gegen
+einen nachgebauten Rohdatensatz). Liest die Roh-CSVs direkt — **kein
+Cache-Umbau nötig** — mit `csv` und `cp1252`, derselben Konvention wie die
+legacy-Assembly. Nur numpy.
 
-Liest die Roh-CSVs direkt (**kein** Cache-Umbau nötig) und stellt für
-OP04/OP05 (hoher Fluss) und OP07/OP14 (kein Fluss) gegenüber:
+Vier Prüfungen:
+
+**1. Der Halbmodell-Faktor, aus den Daten statt aus einer Nachfrage.**
+`*_Heat Source.csv` führt `jr1_w`, `jr2_w` **und** `total_w` nebeneinander. Ist
+`total/jr1 ≈ 2` und `jr2/jr1 ≈ 1`, hat die Zelle zwei Wickel, das Halbmodell
+(x = 0 … 0.0219) enthält genau einen, und `jr1_w` **ist** die
+Halbmodell-Leistung. Damit ist die Frage beantwortet, ohne jemanden zu fragen.
+
+**2. Die Fluidbilanz.**
 
 ```
-ΔT_fluid_gemessen(t) = Tmfavg_fluid_out(t) − fluid_inlet_temp(t)
-ΔT_fluid_bilanz(t)   = ∫ Q̇_solid_to_fluid dt / (ṁ · Cp_fluid)
+ΔT_fluid = Q̇ / (ṁ · Cp_fluid)      gegen      Tmfavg_fluid_out − T_fluid_in
 ```
 
-und trägt zusätzlich `h_eff = Q̇ / (A · ΔT_wand→fluid)` gegen `V̇` auf.
+> ⚠ **Korrektur an Dokument 030.** Dort steht `∫Q̇dt / (ṁ·Cp)`. Das ist
+> dimensionell **K·s, nicht K** — die Integralform gilt für ein *geschlossenes*
+> Fluidvolumen, das sich aufheizt, nicht für einen Durchfluss. Ein Test gegen
+> die falsche Formel würde fehlschlagen, ohne dass an der Physik etwas falsch
+> wäre. Das Werkzeug rechnet die Durchflussform.
 
-### Warum vor allem Modellcode
+**3. Der Energieanteil über die Wand.** `∫Q̇dt` gegen `∫jr1_w dt` — das
+Gegenstück zu den 0.5–0.9× aus `energy_balance_report`. Bei `ṁ = 0` (OP07,
+OP14) muss der Anteil **nahe 0** liegen; tut er es nicht, fließt Wärme auf einem
+Weg ab, den der Entwurf nicht kennt.
 
-Der Wandterm ist der einzige Punkt, an dem GridCNN mehr Physik enthält als
-`PINNmodulusTwo` (README §11.6). Wenn seine Bilanz nicht aufgeht, ist er
-falsch formuliert — und das jetzt zu wissen kostet Minuten statt Wochen.
+**4. `h_eff` gegen den Volumenstrom.** Braucht die Wandtemperatur, also den
+`.npz`-Cache; ohne ihn wird der Teil übersprungen statt zu scheitern.
 
 ### Das Tor
 
 | Ergebnis | Folge |
 |---|---|
-| beide Seiten stimmen auf ~10 % | 🟢 `ghost_hi` steht, `h(V̇)` ist kalibrierbar |
-| `h_eff` gegen `V̇` liegt auf einer Kurve | 🟢 `h` wird **feste Funktion**, null freie Parameter |
+| Fluidbilanz-Verhältnis ≈ 1.0 | 🟢 `ghost_hi` steht |
+| `h_eff` gegen `V̇` auf einer Kurve | 🟢 `h` wird **feste Funktion**, null freie Parameter |
 | `h_eff` streut breit | 🟡 `h` wird gelernt, aber mit `L_wall` gegen `Q̇` beaufsichtigt |
-| Bilanz geht um Faktor ~2 nicht auf | 🔴 **halt.** Halbmodell-Faktor (README §12.5, Frage 1) klären, bevor irgendetwas gebaut wird |
+| Verhältnis ≈ 2.0 oder ≈ 0.5 | 🔴 **halt.** Halbmodell-Faktor — Prüfung 1 sagt, auf welcher Seite. Kein Physikfehler, und nicht als solcher zu behandeln |
+| bei `ṁ = 0` fließt Energie ab | 🔴 der Entwurf hat einen Pfad übersehen |
 
-> Der letzte Fall ist kein hypothetisches Risiko: dieses Projekt hat schon
+> Der Faktor-2-Fall ist kein hypothetisches Risiko: dieses Projekt hat schon
 > einmal einen Faktor 121 an genau dieser Sorte Buchhaltung verloren
-> (FAHRPLAN §11.1).
+> (FAHRPLAN §11.1). Deshalb steht Prüfung 1 vor allen anderen.
 
-**Blockiert von:** README §12.2 (liegt `data_raw/` auf der Maschine?).
-
----
+**Nicht mehr blockiert:** `data_raw/` liegt auf der Maschine (02.09.).
 
 # Stufe 2 — Die vier Größen in den Cache
 
@@ -288,7 +307,9 @@ Wird beim Abhaken ausgefüllt. Leer = noch nicht gemessen.
 | 0 | gepoolte Ortsstruktur @ 99.9 % | | |
 | 0 | `uniform`-Anteil je OP | | |
 | 0 | Wandgefälle wächst mit V̇ | | |
-| 1 | Bilanz gemessen vs. gerechnet | | |
+| 1 | Halbmodell-Faktor `total/jr1` | | |
+| 1 | Fluidbilanz, Verhältnis | | |
+| 1 | Wandanteil bei V̇ = 0 (muss ~0 sein) | | |
 | 1 | `h_eff(V̇)` auf einer Kurve? | | |
 | 2 | Reports unverändert | | |
 | 3 | Löser stabil bei dt = 0.2 s | | |

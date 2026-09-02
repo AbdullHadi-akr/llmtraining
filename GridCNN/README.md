@@ -715,24 +715,43 @@ Empfehlung — wo du einverstanden bist, reicht „ja".
 
 ### 12.1 An dich — Fakten
 
-**F1. Die Zahl aus Achse 0.** val OP06 / OP09 aus `06b_ohne_physik.txt`
-(`--w-phys 0 --w-bc 0`, 60 Epochen). Du sagtest, der Lauf ist durch.
+**F1. Die Zahl aus Achse 0.** val OP06 / OP09 aus `06b_ohne_physik.txt`.
 
-> **Warum es hier zaehlt:** liegt sie nahe 6.270 / 3.585 C, traegt der
-> Physik-Term nicht. Dann sind der FD-Stencil, `L_phys` und ein guter Teil von
-> Stufe 3 Aufwand fuer nichts, und die Leiter sortiert sich um: der Wandterm
-> bliebe, das Residuum floege raus. Es ist die einzige Zahl, die den Plan noch
-> umwerfen kann.
+*Was das ist:* der Lauf, der in `PINNmodulusTwo/FAHRPLAN.md` ganz oben unter
+„▶ Das Nächste" steht —
 
-**F2. Liegt `data_raw/` auf der Maschine?** Der Wandterm braucht
-`Tmfavg_fluid_out`, `Heat Transfer: solid to fluid`, `Cp_fluid` und `mdot` —
-die stehen nur in den Roh-CSVs, nicht im `.npz`. Ohne sie faellt Stufe 1 und 2
-aus und GridCNN startet ohne Wandterm, also ohne seinen besten Teil.
+```bash
+python3 PINNmodulusTwo/train.py --epochs 60 --w-phys 0 --w-bc 0 2>&1 | tee 06b_ohne_physik.txt
+```
 
-**F3. Wo laeuft GridCNN — CPU lokal oder GPU-Server?** Bestimmt drei Dinge
-konkret: die Groesse von `f`, das BPTT-Fenster `k` (Stufe 5) und wie viele
-Seeds pro Konfiguration realistisch sind. Auf der CPU waeren 3 Seeds x 3
-Konfigurationen schon ein Tag.
+Vergleichslauf zu Schritt 6 mit genau **einer** Variablen: Physik- und BC-Term
+aus. Schritt 6 (mit Physik) ergab **6.270 / 3.585 C**. Kommt ohne Physik etwas
+Ähnliches heraus, trägt der Term nicht; kommt ~11.6 / 8.5 C heraus, trägt er.
+
+*Was es hier ändert — und was nicht:*
+
+> **Nur, ob `L_phys` in GridCNN ein Verlustterm wird. Nicht, ob der Stencil
+> gebaut wird.** Der Stencil ist hier kein Strafterm, sondern der **Löser, den
+> `f` korrigiert** (Stufe 3 → 4). Der bleibt in jedem Fall, und Stufe 3 bleibt
+> genauso wertvoll — sie ist Korrektheitsprüfung für Padding und Wandterm plus
+> Physik-Latte, kein Gewicht.
+>
+> *(Eine frühere Fassung dieser Datei behauptete, bei „trägt nicht" fielen
+> Stencil und Stufe 3 weg. Das war zu weit gegriffen.)*
+>
+> Dazu kommt: der heutige `L_phys` läuft mit `delta_phys` = 1.0 s gegen ein
+> Δt_max von 0.24 s, ist also **nachweislich 4.1× zu grob** (O8, `[CFL WARN]`).
+> Ein derart fehlerhaft diskretisierter Strafterm, der nichts beiträgt, ist
+> schwaches Zeugnis gegen Physik allgemein.
+
+**F2. Liegt `data_raw/` auf der Maschine?** ✅ **ja** (02.09.). Stufe 1 und 2
+sind damit frei; [`tools/balance_check.py`](tools/balance_check.py) ist gebaut.
+
+**F3. Wo läuft GridCNN?** ✅ **variabel**, je nach Maschine. Wird wie in
+`PINNmodulusTwo` gelöst: `device: ask` in einer eigenen `config.yaml`, und
+Netzbreite, Tiefe sowie das BPTT-Fenster `k` sind Konfigurations- und
+CLI-Parameter mit gerätabhängigen Vorgaben — auf der CPU klein, auf dem Server
+groß.
 
 ### 12.2 An dich — Entscheidungen
 
@@ -794,7 +813,11 @@ und zweimal um einen moeglichen Faktor 2.
    HALBMODELL (eine Kuehlplatte, x = 0 .. 0.0219) oder auf die ganze Zelle
    (beide ±x-Platten)?
 
-2) Und dieselbe Frage fuer die Quelle: ist die JR1-Leistung, die
+2) Und dieselbe Frage fuer die Quelle -- moeglicherweise beantwortet die
+   schon GridCNN/tools/balance_check.py aus *_Heat Source.csv selbst
+   (jr1_w, jr2_w und total_w stehen dort nebeneinander; total/jr1 ~ 2 hiesse
+   zwei Wickel und jr1_w = Halbmodell). Falls das eindeutig ist, bleibt nur
+   die Frage nach dem Waermestrom-Monitor: ist die JR1-Leistung, die
    PINNmodulusTwo als q_source[:,0] liest, ebenfalls Halbmodell — oder
    ganze Zelle? Beide muessen dieselbe Konvention haben, sonst geht die
    Bilanz um Faktor 2 nicht auf. Falls das nirgends dokumentiert ist:
