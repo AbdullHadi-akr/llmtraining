@@ -30,6 +30,7 @@ sys.path.insert(0, str(PKG_DIR / "tools"))
 import data as data_mod  # noqa: E402
 import make_synthetic_cache as msc  # noqa: E402
 import train as train_mod  # noqa: E402
+import op_metrics as op_metrics_mod  # noqa: E402
 
 
 # --------------------------------------------------------------------------
@@ -660,3 +661,201 @@ def test_delta_phys_reaches_the_model(synthetic_cache):
     args = _tiny_args(synthetic_cache, delta_phys=0.25)
     model, bundle, _packed, _dtn, _hist = train_mod.fit(args)
     assert float(model.delta) == pytest.approx(0.25 / bundle.T_span_ref, rel=1e-6)
+
+
+# --------------------------------------------------------------------------
+# the loss balancer (O15) -- and why the divisor is watched, not just recorded
+# --------------------------------------------------------------------------
+
+def _feed(balancer, key, values):
+    """Push a series through the balancer, returning the divisor it handed out."""
+    out = []
+    for v in values:
+        out.append(balancer.divisor(key, v))
+        balancer.end_step()
+    return out
+
+
+def _balancer(decay_per_epoch=0.9, steps_per_epoch=100):
+    return train_mod._LossBalancer(
+        mode="ema", decay=decay_per_epoch ** (1.0 / steps_per_epoch),
+        warmup_steps=1, phys_norm=0.0, bc_norm=0.0, data_floor=1e-12)
+
+
+def test_the_divisor_converges_on_a_constant_loss():
+    """The EMA has to move towards the value it is fed, monotonically.
+
+    This is the mechanism O15 turns on, so it is worth holding separately from
+    the outcome: if the update itself ever breaks, every ratio in history.csv
+    becomes unreadable and nothing else in the suite would notice.
+    """
+    bal = _balancer()
+    # 100 epochs at 100 steps: 0.9**100 = 2.7e-5, so a factor-100 anchor is fully
+    # unwound and what is left is the value being fed. That it takes that long is
+    # the subject of the next test.
+    seen = _feed(bal, "phys", [100.0] + [1.0] * (100 * 100))
+
+    assert seen[0] == pytest.approx(100.0)      # first call anchors on the value
+    assert seen[-1] < seen[len(seen) // 2] < seen[1]   # and then only falls
+    assert seen[-1] == pytest.approx(1.0, rel=0.05)
+
+
+@pytest.mark.xfail(strict=True, reason=(
+    "O15: the EMA is anchored on the FIRST optimiser step, whose loss is ~325x "
+    "the epoch-1 mean, and at ema_decay 0.9/epoch unwinding that anchor alone "
+    "takes ~10*ln(325) = 58 epochs. Step 6 ran 60, so div_* was still 960-10000x "
+    "above its own term and all three divisors fell at exactly 0.9000/epoch. "
+    "See FAHRPLAN.md §11.6. When this XPASSes, O15 is fixed: drop the marker and "
+    "close the point."))
+def test_the_divisor_tracks_its_loss_within_one_run():
+    """After a realistic run length, div_* must be an estimate of L_*.
+
+    Not a style point: ``w_data:w_phys:w_bc`` is documented as a ratio between
+    TERMS (config.yaml, "loss balancing"), and that claim holds only while each
+    divisor is close to the term it divides. While it is not, the weights mean
+    something nobody chose, and a weight sweep measures the offset rather than
+    the physics -- which is why O15 blocks O6.
+
+    The first value is the spike a randomly initialised net produces on step 1;
+    the rest is a converged loss. 60 epochs at 100 steps each is Step 6.
+    """
+    bal = _balancer()
+    seen = _feed(bal, "phys", [3.3e4] + [0.1] * (60 * 100))
+
+    assert seen[-1] == pytest.approx(0.1, rel=10.0)
+
+
+def test_analyse_history_flags_a_divisor_in_free_fall():
+    """The reporting side of O15, on a CSV that reproduces the pattern.
+
+    The tool is the thing that would have caught O15 on day one, so it gets a
+    fixture that decays exactly like Step 6 did and one that does not.
+    """
+    import analyse_history as ah
+
+    # The losses fall FASTER than 0.9/epoch -- that is the whole mechanism: an
+    # EMA at 0.9 cannot keep up, so the gap widens instead of closing.
+    def rows_for(gap_of_epoch):
+        out = []
+        for e in range(1, 61):
+            ld, lp, lb = 0.5 * 0.85 ** e, 5e5 * 0.85 ** e, 5e-9 * 0.85 ** e
+            g = gap_of_epoch(e)
+            out.append({"epoch": float(e), "L_data": ld, "L_phys": lp, "L_bc": lb,
+                        "L_phys_bal": 1e-3, "L_bc_bal": 1e-4,
+                        "ratio_phys": 0.5, "ratio_bc": 0.05,
+                        "div_data": ld * g, "div_phys": lp * g, "div_bc": lb * g,
+                        "spread_space": 1.1, "spread_time": 0.92,
+                        "delta": 6.23e-4})
+        return out
+
+    # Step 6: divisors at 0.9/epoch against losses at 0.85 -> the gap grows.
+    stale = ah.analyse(rows_for(lambda e: 300.0 * (0.9 / 0.85) ** e))[1]
+    assert any(n.startswith("[O15]") and "div_phys" in n for n in stale)
+    assert any("RATIO is frozen" in n for n in stale)
+
+    # a divisor that sits on its term raises nothing -- not even the frozen-ratio
+    # note, although the three rates agree there too
+    healthy = ah.analyse(rows_for(lambda e: 1.0))[1]
+    assert not [n for n in healthy if n.startswith("[O15]")]
+
+
+def test_analyse_history_calls_out_the_last_line_but_not_a_trend():
+    """The O12 mistake, and the case that must NOT be flagged as one.
+
+    ``ratio_bc`` scatters, so its final epoch is a sample; ``div_*`` falls
+    monotonically, so its final epoch is the state. Flagging both would bury the
+    first under the second -- which is why the monotone exemption exists.
+    """
+    import analyse_history as ah
+
+    noisy = [0.06, 0.02, 0.11, 0.04, 0.09, 0.03, 0.10, 0.05, 0.08, 0.0178]
+    rows = [{"epoch": float(i + 1), "ratio_bc": v, "div_phys": 1e9 * 0.9 ** i,
+             "L_phys": 5e4, "spread_time": 0.9, "spread_space": 1.1}
+            for i, v in enumerate(noisy * 3)]
+
+    notes = ah.analyse(rows, last=30)[1]
+    assert any(n.startswith("[LAST-LINE]") and "ratio_bc" in n for n in notes)
+    assert not [n for n in notes if "[LAST-LINE]" in n and "div_phys" in n]
+
+
+# --------------------------------------------------------------------------
+# the signed late error (O13)
+# --------------------------------------------------------------------------
+
+def _ramp_op(n_t=100, n_p=3, split_t=80):
+    true = np.linspace(20.0, 50.0, n_t)[:, None] * np.ones((1, n_p))
+    return SimpleNamespace(T_lab=true, n_t=n_t, split_t=split_t,
+                           transient=np.zeros(n_t, bool))
+
+
+def test_a_late_offset_reads_as_drift_not_scatter():
+    """Same |error|, opposite diagnosis -- which is the point of the metric.
+
+    ``late_mae`` is 2.0 C in both halves of this test. Only the sign separates a
+    rollout whose level has walked away (O13, mechanism 1) from one that is
+    merely imprecise in a hard regime, and they call for opposite responses.
+    """
+    op = _ramp_op()
+    drift = op.T_lab.copy()
+    drift[80:] += 2.0                       # consistently too warm, late
+    m = op_metrics_mod.op_metrics(drift, op, late_is_holdout=True)
+
+    assert m["late_mae"] == pytest.approx(2.0)
+    assert m["late_bias"] == pytest.approx(+2.0)
+    assert m["late_bias_frac"] == pytest.approx(1.0)
+    assert m["bias_end"] > m["bias_early"] == pytest.approx(0.0)
+
+    scatter = op.T_lab.copy()
+    scatter[80::2] += 2.0                   # same size, no direction
+    scatter[81::2] -= 2.0
+    m2 = op_metrics_mod.op_metrics(scatter, op, late_is_holdout=True)
+
+    assert m2["late_mae"] == pytest.approx(2.0)
+    assert abs(m2["late_bias"]) < 1e-9
+    assert m2["late_bias_frac"] == pytest.approx(0.0)
+
+
+def test_a_cold_drift_keeps_its_sign():
+    """+ is too warm, - is too cold. A metric that lost that would be an MAE."""
+    op = _ramp_op()
+    cold = op.T_lab.copy()
+    cold[80:] -= 3.5
+    m = op_metrics_mod.op_metrics(cold, op, late_is_holdout=True)
+
+    assert m["late_bias"] == pytest.approx(-3.5)
+    assert m["late_bias_frac"] == pytest.approx(1.0)   # magnitude only
+
+
+def test_the_bias_fraction_cannot_leave_the_unit_interval():
+    """|mean(x)| <= mean(|x|) is what makes the number readable as a fraction.
+
+    Asserted rather than assumed because every report prints it as a percentage,
+    and a value above 1 there would be read as a bug in the model rather than in
+    the metric.
+    """
+    rng = np.random.default_rng(0)
+    op = _ramp_op()
+    for scale in (0.01, 1.0, 25.0):
+        pred = op.T_lab + rng.normal(0.0, scale, op.T_lab.shape)
+        m = op_metrics_mod.op_metrics(pred, op, late_is_holdout=False)
+        assert 0.0 <= m["late_bias_frac"] <= 1.0
+
+
+def test_every_op_gets_the_signed_metrics(synthetic_cache):
+    """A real rollout, so the keys cannot drift away from what evaluate prints.
+
+    ``_report_op`` formats these for every OP in every role; a key renamed here
+    and not there raises a KeyError only once a full run reaches the report,
+    which is two hours in.
+    """
+    args = _tiny_args(synthetic_cache)
+    model, bundle, _packed, _dtn, _hist = train_mod.fit(args)
+    device = next(model.parameters()).device
+    op = bundle.ops[0]
+    pred = op_metrics_mod.rollout_phys(model, op, bundle, device)
+    m = op_metrics_mod.op_metrics(pred, op, late_is_holdout=False)
+
+    for key in ("bias_early", "bias_mid", "bias_end", "late_bias", "late_bias_frac"):
+        assert key in m, key
+    # and the formatter has to survive them
+    assert "late_bias" in op_metrics_mod.format_op_metrics(op.op_id, "T0-in-time", m)

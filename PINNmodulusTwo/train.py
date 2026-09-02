@@ -1421,13 +1421,14 @@ def evaluate(model, bundle, ops, dtn, device, history, args) -> None:
     lines += [""] + profile_report(bundle, held) + [""]
     lines.append(f"{'OP':<6} {'tier':<11} {'role':<8} {'MAE':>8} {'RMSE':>8} "
                  f"{'max':>8} {'peak_err':>9} {'transient':>10} {'quiescent':>10} "
-                 f"{'late':>8}")
+                 f"{'late':>8} {'late_bias':>10} {'bias_frac':>10}")
     for op_id, tier, role, m in rows:
         lines.append(
             f"{op_id:<6} {tier:<11} {role:<8} {m['mae']:>8.3f} {m['rmse']:>8.3f} "
             f"{m['max_abs_err']:>8.3f} {m['peak_err']:>9.3f} "
             f"{m['mae_transient']:>10.3f} {m['mae_quiescent']:>10.3f} "
-            f"{m['late_mae']:>8.3f}"
+            f"{m['late_mae']:>8.3f} {m['late_bias']:>+10.3f} "
+            f"{m['late_bias_frac']:>10.3f}"
         )
     lines.append("")
     lines.append("MAE/RMSE/max are over the free-running rollout, step 0 excluded "
@@ -1436,6 +1437,9 @@ def evaluate(model, bundle, ops, dtn, device, history, args) -> None:
                  "pooled training RMS rate; 'quiescent' = the rest.")
     lines.append(f"'late' = after split_t; for a TRAINING OP that is "
                  f"{'held out (--holdout-tail)' if late_is_holdout else 'IN-SAMPLE'}.")
+    lines.append("'late_bias' is the SIGNED mean over that same window (+ = too "
+                 "warm) and 'bias_frac' = |late_bias|/late; near 1 the late error "
+                 "is drift in one direction, near 0 it is scatter. O13.")
 
     # ---- plots --------------------------------------------------------------
     fig, ax = plt.subplots(1, 2, figsize=(11, 4))

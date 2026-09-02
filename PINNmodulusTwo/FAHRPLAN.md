@@ -109,6 +109,24 @@ Schritt 6 hat dafür gerade das Lehrstück geliefert: nach drei Epochen stand
 > ~11.6 / 8.5 C heraus wie in 5b, ist die Aussage bestätigt und der Rest steht
 > auf festem Grund.
 
+## Was am 02.09. dazugekommen ist
+
+Zwei Werkzeuge und ein Test, alle klein, alle sofort nutzbar:
+
+```bash
+# Nach JEDEM Lauf, statt die letzte Zeile abzulesen:
+python3 PINNmodulusTwo/tools/analyse_history.py PINNmodulusTwo/artifacts/history.csv
+```
+
+| was | wo | wofür |
+|---|---|---|
+| `tools/analyse_history.py` | neu | Median und Streuung über die letzten *k* Epochen statt der letzten Zeile. Meldet von sich aus: `[LAST-LINE]` (der Fehler, aus dem O12 entstand), `[O15]` (Divisor im freien Fall), `[SPREAD]`, `[EXCURSION]`. Nur Standardbibliothek — läuft auch ohne die Trainingsumgebung |
+| `late_bias`, `late_bias_frac`, `bias_early/mid/end` | `op_metrics.py` | der **signierte** Fehler. `late_bias_frac` nahe 1 heißt Drift, nahe 0 heißt Streuung — **das ist die Messung, die O13 entscheidet.** Steht ab dem nächsten Lauf in jeder OP-Zeile und in `metrics.txt` |
+| `test_the_divisor_tracks_its_loss_within_one_run` | `tests/` | O15 als `xfail` festgehalten. **Schlägt der Test eines Tages fehl, weil er besteht**, ist O15 behoben — dann Marker entfernen und den Punkt schließen |
+
+Noch nicht gebaut: `evaluate.py` (Checkpoint zurückladen) und `sweep.py` (die
+Seed-Schleife). Beide stehen weiter oben unter „Was gebaut wird".
+
 ## Die Auswahlregeln stehen fest
 
 Siehe §10 in Teil II. Kurz: Mittel über `--val-ops`, nie ein einzelner OP · nach
@@ -149,9 +167,9 @@ Die offenen im Detail, nach Dringlichkeit:
 
 | # | offen | wer / wann |
 |---|---|---|
-| **O15** | **NEU 02.09. Das Loss-Balancing hat nach 60 Epochen noch nicht eingesetzt.** Alle drei Divisoren fallen mit exakt 0.9000/Epoche — reiner geometrischer Zerfall, der aktuelle Loss trägt 0.009 % bei. `div_data/div_phys` ist damit über den ganzen Lauf **konstant**, das Balancing wirkt wie `fixed` mit Divisoren, die der erste Optimiererschritt gesetzt hat. Gemessen: `ratio_phys` = 0.586, wo `w_phys = 0.1` nominell 0.1 verspricht. §11.6 | **blockiert O6** |
+| **O15** | **NEU 02.09. Das Loss-Balancing hat nach 60 Epochen noch nicht eingesetzt.** Alle drei Divisoren fallen mit exakt 0.9000/Epoche — reiner geometrischer Zerfall, der aktuelle Loss trägt 0.009 % bei. `div_data/div_phys` ist damit über den ganzen Lauf **konstant**, das Balancing wirkt wie `fixed` mit Divisoren, die der erste Optimiererschritt gesetzt hat. Gemessen: `ratio_phys` = 0.586, wo `w_phys = 0.1` nominell 0.1 verspricht. Seit 02.09. als `xfail`-Test festgehalten und von `analyse_history.py` bei jedem Lauf gemeldet. §11.6 | **blockiert O6** |
 | **O8** | Der BDF-Stencil nutzt δ = 1.0 s gegen Δt_max ≈ 0.24 s (`[CFL WARN]` bei jedem Lauf). **02.09. entschieden: wird gemessen, drei Punkte 1.0 / 0.4 / 0.2.** Nicht einfach richtiggestellt, weil es ein Zielkonflikt ist und kein Einheitenfehler — der Zähler `3T − 4T₋₁ + T₋₂` schrumpft mit δ, der Eigenfehler des Rollouts nicht. δ = 0.2 ist zugleich der Boden: darunter liest `history_at` nur noch die Gerade zwischen zwei Gitterpunkten. §11.2 | **Sweep-Achse 1** |
-| **O13** | **Der Fehler sitzt am Ende der Trajektorie.** OP06: MAE 6.270 C, aber `late(held out)` = **13.248 C** — doppelt. Gleiches Muster auf OP03 (3.341 / 7.371) und OP16 (3.476 / 6.959). **02.09.: OP03 ist ein Trainings-OP und `--holdout-tail` ist aus — das Modell hat diese späten Zeitschritte mit Beschriftung gesehen und verdoppelt dort trotzdem seinen Fehler. O13 ist also kein Verallgemeinerungsproblem, sondern mechanisch.** §11.7 | **nächste Messung: Vorzeichen** |
+| **O13** | **Der Fehler sitzt am Ende der Trajektorie.** OP06: MAE 6.270 C, aber `late(held out)` = **13.248 C** — doppelt. Gleiches Muster auf OP03 (3.341 / 7.371) und OP16 (3.476 / 6.959). **02.09.: OP03 ist ein Trainings-OP und `--holdout-tail` ist aus — das Modell hat diese späten Zeitschritte mit Beschriftung gesehen und verdoppelt dort trotzdem seinen Fehler. O13 ist also kein Verallgemeinerungsproblem, sondern mechanisch.** §11.7 | **Messung gebaut 02.09.**, läuft beim nächsten Lauf mit |
 | **O6** | Kein Gewicht auf Basis von Messungen gesetzt. **02.09.: der Grund hat sich geändert.** Die fünf Gründe aus §10a (CFL-Verletzung, degenerierter Anker, saturierter Rollout, nie arbeitende Loss-Balance, 121er-Quelle) sind alle behoben — O6 ist nicht mehr „bewusst offen", sondern **erstmals messbar**. Nur nicht jetzt: solange O15 gilt, misst ein `w_phys`-Sweep den eingefrorenen Divisor mit | **nach O15** |
 | **O5** | **Tote Eingangskanäle — 02.09. umgewidmet.** `soc_start` ist über alle OPs konstant 10 % (`DEAD -> forced to 0`), die Rate-Kanäle von `c_rate` und `fluid_mass_flow` sind im Training tot, auf OP15/OP16/OP19 aber lebendig. **Das ist kein MAE-Hebel:** eine Spalte ohne Varianz kann nichts erklären, und die SOC-Wirkung steckt über `q_dot` ohnehin schon im Modell. Der Punkt ist eine **Envelope-Grenze** und damit Vorbedingung für O11, nicht eine Code-Änderung. Kein Kanal wird gestrichen. §10a | dokumentiert, nichts zu tun |
 | **O14** | **Volumenstrom ist die Schwierigkeitsachse, nicht der Tier.** V̇=0 im Mittel 5.374 C gegen 2.928 C mit Kühlung; alle drei No-Flow-OPs unter den letzten vier. Nur 2 von 11 Trainings-OPs haben V̇=0 (OP07 bei T0 = 10 °C, OP14 bei 0 °C), OP06 fährt 25 °C — das Regime „keine Kühlung bei mittlerer Starttemperatur" kommt im Training nicht vor. **02.09.: der Datensatz ist fix, es kommen keine OPs dazu.** Damit ist O14 keine Aufgabe mehr, sondern eine **dauerhafte Grenze**: nach V̇ getrennt berichten, nie als Modellfehler lesen. §11.5 | dauerhaft, nur berichten |
@@ -1419,6 +1437,10 @@ Bis zum 02.09. stand jede Aussage über den Lauf auf der **letzten** Zeile von
 `artifacts/history.csv`. Die Datei hat 60 Zeilen. Ausgewertet wurden sie zum
 ersten Mal am 02.09., und zwei der Aussagen halten das nicht aus.
 
+> Damit das nicht wieder von der Sorgfalt eines einzelnen Nachmittags abhängt,
+> macht `tools/analyse_history.py` es jetzt von selbst. Es liest dieselbe Datei
+> und meldet die vier Muster, die unten hergeleitet werden.
+
 #### O12 ist widerlegt: 0.0178 war eine Epoche, kein Trend
 
 | `ratio_bc` | Wert |
@@ -1549,9 +1571,21 @@ Drei Mechanismen kommen in Frage:
 **Eine Messung trennt 1 von 2 und 3, und sie braucht kein neues Training:** ist
 der späte Fehler **vorzeichenbehaftet** (immer dieselbe Richtung → Drift,
 Mechanismus 1) oder **ungerichtet** (Mechanismus 2/3)? Heute lässt sich das nicht
-sagen, weil `op_metrics.py:102` mit `np.abs` rechnet — Drift und Rauschen sehen
-identisch aus. Der nächste Schritt zu O13 ist deshalb ein signierter mittlerer
-Fehler je Zeitdrittel, nicht ein weiterer Lauf.
+sagen, weil `op_metrics.py` bis zum 02.09. nur mit `np.abs` gerechnet hat — Drift
+und Rauschen sahen identisch aus.
+
+**Seit 02.09. ist die Messung gebaut.** `op_metrics` liefert zusätzlich
+`late_bias` (signiertes Mittel über dasselbe Fenster wie `late_mae`),
+`late_bias_frac = |late_bias| / late_mae` und die drei Drittel
+`bias_early / bias_mid / bias_end`. Zu lesen ist es so:
+
+| `late_bias_frac` | Vorzeichen der Drittel | heißt |
+|---|---|---|
+| nahe **1** | gleich, wachsend | **Mechanismus 1**: der Level-Integrator läuft weg. Dann ist der Hebel der Anker, nicht das Gewicht |
+| nahe **0** | wechselnd | **Mechanismus 2 oder 3**: das späte Regime ist wirklich schwerer. Dann helfen Daten oder Normierung, kein Anker |
+| dazwischen | — | beides, und die Aufteilung sagt zu welchen Teilen |
+
+Es braucht dafür **keinen eigenen Lauf** — die Zahlen fallen bei Achse 0 mit ab.
 
 > **Was dafür fehlt, ist weniger als es aussieht.** `save_checkpoint` schreibt
 > `model.pt` samt `model_config` (`train.py:1140`), und
