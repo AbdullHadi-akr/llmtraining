@@ -1477,6 +1477,20 @@ weggeht, ist das eingefrorene Verhältnis, und genau das ist die Größe, die ei
 Gewichts-Sweep messen soll. **Solange O15 gilt, misst ein `w_phys`-Sweep den
 ersten Optimiererschritt mit.** Deshalb blockiert O15 den Punkt O6.
 
+#### Warum kein Test das gefangen hat
+
+`test_balanced_loss_is_the_raw_loss_over_the_recorded_divisor` prüft, dass
+`div_phys` derselbe Divisor ist, der `L_phys_bal` erzeugt hat — die Buchhaltung
+also stimmt. Sein Docstring nennt den Zweck ausdrücklich: *„which is the exact
+question 'is the divisor stale or did the term really fall?' needs answered."*
+Die Instrumentierung wurde also gebaut, damit die Frage beantwortbar ist.
+**Gestellt hat sie danach niemand.**
+
+Der fehlende Test ist nicht schwer: nach N Epochen eines Kurzlaufs muss `div_*`
+innerhalb eines Faktors von `L_*` liegen. Wäre er da gewesen, hätte er O15 am
+ersten Tag gemeldet statt nach sechzig Epochen. Er gehört zum ersten Schritt,
+der O15 anfasst.
+
 `--w-phys 0 --w-bc 0` ist davon nicht betroffen: bei `zero_weight_terms: skip`
 werden beide Terme gar nicht berechnet (`train.py:708`). **Achse 0 bleibt
 gültig und bleibt der erste Schritt.**
@@ -1539,12 +1553,14 @@ sagen, weil `op_metrics.py:102` mit `np.abs` rechnet — Drift und Rauschen sehe
 identisch aus. Der nächste Schritt zu O13 ist deshalb ein signierter mittlerer
 Fehler je Zeitdrittel, nicht ein weiterer Lauf.
 
-> **Was dafür fehlt:** `save_checkpoint` schreibt `model.pt` samt `model_config`
-> (`train.py:1140`), aber **nichts lädt es zurück** — kein `--resume`, kein
-> Auswertungs-Einstieg. Solange das so ist, kostet jede Nachfrage an ein
-> trainiertes Modell einen vollen Lauf. Ein kleines `evaluate.py` (Checkpoint
-> laden, Rollout rechnen, Metriken berichten) macht aus zwei Stunden Minuten.
-> Zu beachten: **jeder Lauf überschreibt `artifacts/model.pt`.**
+> **Was dafür fehlt, ist weniger als es aussieht.** `save_checkpoint` schreibt
+> `model.pt` samt `model_config` (`train.py:1140`), und
+> `test_checkpoint_round_trips_without_config_yaml` lädt es bereits zurück:
+> `RecurrentField(**ckpt["model_config"])` plus `load_state_dict(..., strict=True)`
+> ist getestet und funktioniert. Was **fehlt, ist nur der Einstiegspunkt** — kein
+> `--resume`, kein Auswertungs-Kommando. Ein `evaluate.py` (Checkpoint laden,
+> Rollout rechnen, Metriken berichten) ist damit wenige Zeilen und macht aus zwei
+> Stunden Minuten. Zu beachten: **jeder Lauf überschreibt `artifacts/model.pt`.**
 
 ---
 
