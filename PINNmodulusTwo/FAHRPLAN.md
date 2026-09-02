@@ -676,6 +676,20 @@ Archiv: abgehakte Schritte, gemessene Zahlen, geschlossene Befunde.
 | **§11.8** | **Achse 0: das Hauptergebnis** — und die Gegenhypothese, dass der Physik-Lauf Pech hatte |
 | **§11.9** | **O13 beantwortet**: Drift, `bias_frac` Median 0.994 |
 
+## Wo die Experimente stehen
+
+| Schritt | was gemessen wurde | Zahlen | Deutung |
+|---|---|---|---|
+| 1–3 | Code holen, Rauchtest, Cache bauen | Stand-Tabelle | — |
+| 4 | Stimmen die Daten? Energiebilanz | Stand-Tabelle | §11.1 |
+| 5 | Die Latte (überholt, nicht wiederholen) | Stand-Tabelle | §9.3 |
+| 5b | 3 Epochen, mit und ohne Physik | Stand-Tabelle | §9.3, §11.3 |
+| 6 | 60 Epochen **mit** Physik | Stand-Tabelle | §11.3, §11.4, §11.5 |
+| **7** | **60 Epochen ohne Physik (Achse 0)** | **Stand-Tabelle** | **§11.8, §11.9, §11.6** |
+
+Jeder Schritt hat unten einen eigenen Block mit dem Kommando, das ihn erzeugt
+hat, und dem, was herauskam. **Die Zahlen selbst stehen gesammelt in „Stand".**
+
 ## Geschlossene Punkte
 
 | # | war | wie geschlossen | wann |
@@ -705,6 +719,11 @@ Archiv: abgehakte Schritte, gemessene Zahlen, geschlossene Befunde.
 ## Stand
 
 Wird beim Abhaken ausgefüllt. Leer = noch nicht gemessen.
+
+> **Alle gemessenen Zahlen dieses Projekts stehen hier.** Ein Haken ohne Zahl ist
+> wertlos; „gelaufen" und „das Kriterium erfüllt" sind zwei Dinge. Die *Deutung*
+> jeder Zahl steht in §11.x, die Rohdateien liegen nur auf der Arbeitsmaschine
+> (siehe „Wo die Ergebnisse liegen" weiter oben).
 
 | Schritt | Kriterium | gemessen | Datum |
 |---|---|---|---|
@@ -742,6 +761,17 @@ Wird beim Abhaken ausgefüllt. Leer = noch nicht gemessen.
 | 6 | MAE OP13 / OP15 / OP16 | **4.097 / 4.809 / 3.476 C — alle drei beats**, 57 / 40 / 24 % besser als `train-mean` | **01.09.** |
 | 6 | MAE Trainings-OPs | 1.000 (OP01) … 5.656 (OP14), **alle beats** | 01.09. |
 | 6 | MAE OP19 (Messvergleich) | **10.334 C — LOSES TO** (persistence 1.376). Und 88 % **schlechter** als in 5b. Siehe O11 | **01.09.** |
+| **7** | `[ABORT]` | **kam nicht** | **02.09.** |
+| **7** | `[SATURATED]` letzte Epoche | **weg**, aber zäher als in Schritt 6: Zeilen bis **Ep50** (Schritt 6: ab Ep26 keine). Ep60 sauber | **02.09.** |
+| **7** | `spread s/t` | **1.21 / 0.941** (Median Ep31–60). In der Nebenbedingung [0.7, 1.3] | **02.09.** |
+| **7** | **MAE OP06 / OP09** | **5.531 / 3.334 C — beide beats.** Gegen 6.270 / 3.585 mit Physik: **val 10 % besser ohne** | **02.09.** |
+| **7** | **MAE OP13 / OP15 / OP16** | **6.744 / 4.775 / 3.922 C — alle drei beats.** Gegen 4.097 / 4.809 / 3.476 mit Physik: **test T3 24.7 % schlechter ohne**, OP13 allein 65 % | **02.09.** |
+| **7** | **Mittel über alle fünf ausgehaltenen** | **4.861 C ohne gegen 4.447 C mit Physik** → über alles Ausgehaltene ist **der Physik-Lauf 8.5 % besser**. §11.8 | **02.09.** |
+| **7** | MAE Trainings-OPs | 0.933 (OP10) … 9.181 (OP05). **OP05 verliert gegen `persistence`** (7.973) — in Schritt 6 verlor kein einziger OP | **02.09.** |
+| **7** | gegen die triviale Latte | **15 von 16** Simulations-OPs. Schritt 6: **16 von 16** | **02.09.** |
+| **7** | MAE OP19 (Messvergleich) | 7.780 C — **LOSES TO** (persistence 1.376), wie mit Physik. Der Umschlag entscheidet, nicht die Konfiguration | **02.09.** |
+| **7** | **`late_bias_frac`** | **Median 0.994** über 17 OPs, 12 davon ≥ 0.95 → **O13 beantwortet: Drift.** §11.9 | **02.09.** |
+| **7** | `div_data` gegen `L_data` | **4 878×** zu hoch, Zerfall exakt **0.9000/Epoche** → **O15 unabhängig bestätigt.** §11.6 | **02.09.** |
 | 6 | `L_data` | 100.5 → **0.0515** | 01.09. |
 | 6 | Loss-Balance | arbeitet jetzt: `ratio phys/bc` 2.17/0.782 → **0.605/0.0178**, betas [0.91 …] → [0.98 2.64 3.9 3.99] | 01.09. |
 
@@ -750,6 +780,41 @@ Alles läuft aus dem Repo-Wurzelverzeichnis:
 ```bash
 cd /mnt/c/Users/M0245635/batterysurrogatemodell
 source modulus_env/bin/activate
+```
+
+---
+
+### - [x] Schritt 7 — Achse 0: derselbe Lauf ohne Physik- und BC-Term
+
+> **02.09. gelaufen, ~2 h CPU.** Der erste Lauf dieses Projekts, der eine
+> Konfiguration gegen eine andere stellt. Zahlen in der Stand-Tabelle, Deutung
+> in **§11.8**; O13 und O15 sind darin mitbeantwortet worden (§11.9, §11.6).
+
+```bash
+cp PINNmodulusTwo/artifacts/model.pt PINNmodulusTwo/artifacts/model_schritt6.pt
+python3 PINNmodulusTwo/train.py --epochs 60 --w-phys 0 --w-bc 0 2>&1 | tee 06b_ohne_physik.txt
+```
+
+Genau eine Variable gegenüber Schritt 6: Physik- und BC-Term auf 0. Alles
+andere — Seed, Epochen, Split, Breite, Tiefe, δ — unverändert.
+
+| Frage | Antwort |
+|---|---|
+| Trägt der Physik-Term auf den **val**-OPs? | **Nein.** 4.928 → 4.433 C ohne ihn |
+| Trägt er auf **Extrapolation**? | **Ja, deutlich.** 4.127 → 5.147 C ohne ihn, OP13 allein +65 % |
+| Über **alle fünf ausgehaltenen** OPs? | **Ja.** 4.447 mit gegen 4.861 C ohne — Physik 8.5 % besser |
+| Gegen die triviale Latte | **16/16 mit, 15/16 ohne.** OP05, ein Trainings-OP, verliert ohne Physik |
+
+**Was der Lauf nicht kann:** ein Seed je Seite, keine Streuung. Die
+val-Differenz (0.74 / 0.25 C) ist genau die Größenordnung, in der §10 eine
+Rangfolge verbietet — „der Physik-Lauf hatte Pech" erklärt dieselben Zahlen.
+Deshalb steht als Nächstes `sweep.py` und nicht die nächste Achse.
+
+**Dateien:** `06b_ohne_physik.txt`, `artifacts/metrics.txt`,
+`artifacts/history.csv`. Auszuwerten mit:
+
+```bash
+python3 PINNmodulusTwo/tools/analyse_history.py PINNmodulusTwo/artifacts/history.csv
 ```
 
 ---
