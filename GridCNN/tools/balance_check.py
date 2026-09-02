@@ -11,12 +11,25 @@ Buchhaltungsfehler.
 
 Was geprueft wird
 -----------------
-1. **Der Halbmodell-Faktor.** ``*_Heat Source.csv`` fuehrt ``jr1_w``, ``jr2_w``
-   UND ``total_w``. Ist ``total_w ~ jr1_w + jr2_w`` und ``jr2_w ~ jr1_w``, dann
-   hat die Zelle zwei Wickel, das Halbmodell (x = 0 .. 0.0219) enthaelt genau
-   einen, und ``jr1_w`` ist die Halbmodell-Leistung. Damit ist die Frage
-   beantwortet, ohne jemanden zu fragen -- und die Konvention des
-   Waermestrom-Monitors laesst sich daran messen.
+1. **Der Halbmodell-Faktor des Waermestrom-Monitors.** Die Quellenseite ist
+   geklaert (Antwort-MD vom 02.09.): ``q_source[:,0]`` ist
+   ``Heat Source JR1 Monitor (W)``, eine Rolle, ueber ``V_JR1 = 4.394793e-04 m^3``
+   volumetrisch gemacht -- **Halbmodell**, dieselbe Konvention wie das Gitter.
+   Offen ist nur, ueber welche Flaeche StarCCM den Solid-to-Fluid-Monitor
+   integriert, und das entscheidet ``Q_ht / JR1`` im **spaeten Fenster**:
+
+   ===================  ====================  ==========================
+   ``Q_ht / JR1``       ``Q_ht / (JR1+JR2)``  Lesart
+   ===================  ====================  ==========================
+   ~ 1                  ~ 0.5                 eine Platte, gleiche Konvention
+   ~ 2                  ~ 1                   beide Platten, Faktor 2
+   ===================  ====================  ==========================
+
+   .. warning::
+      ``Heat Source Monitor (total)`` ist **nicht** ``JR1 + JR2``, sondern
+      groesser (Antwort-MD, Punkt 2). Es taugt daher **nicht** als
+      Halbmodell-Probe. Was taugt: ``jr2/jr1 ~ 1`` (zwei gleiche Rollen) und
+      ``Q_ht/JR1``.
 
 2. **Die Fluidbilanz.** Fuer einen Durchfluss gilt stationaer
 
@@ -33,14 +46,34 @@ Was geprueft wird
       fehlschlagen, ohne dass irgendetwas an der Physik falsch waere.
 
 3. **Die Energiebilanz ueber den ganzen Lauf.** ``integral(Qdot dt)`` gegen
-   ``integral(jr1_w dt)``: der Anteil der Quellenergie, der ueber die Kuehlwand
-   abfliesst. ``energy_balance_report`` sieht davon heute nur den Fehlbetrag
-   (0.5-0.9x, dem Volumenstrom folgend) -- hier steht die andere Seite.
+   ``integral(jr1_w dt)``.
 
-4. **``h_eff`` gegen den Volumenstrom.** Liegt es auf einer Kurve, ist ``h``
-   eine feste Funktion von ``V_dot`` und kostet im Modell keinen freien
-   Parameter. Braucht die Wandtemperatur, also den ``.npz``-Cache; ohne ihn
-   wird der Teil uebersprungen.
+   .. warning::
+      Das ist **nicht** das Gegenstueck zu ``energy_balance_report``. Der Report
+      sieht nur JR1: ``0.9x`` bei V_dot = 0 heisst *90 % der JR1-Quelle bleiben
+      in JR1*, die anderen 10 % gehen **ins Gehaeuse und ins Cell Center** --
+      nicht ins Fluid. ``integral(Q_ht) ~ (1 - 0.9) * integral(JR1)`` zu
+      erzwingen verdreht **Speicherung zu Kuehlung** (Antwort-MD, Punkt 4).
+
+   Was hier wirklich zu erwarten ist: bei V_dot = 0 muss ``Q_ht ~ 0`` sein
+   (kein konvektiver Abtransport). Bei hohem Fluss gross, aber **kleiner** als
+   ``0.5 * integral(JR1)``, weil Waerme im Gehaeuse gespeichert bleibt.
+
+4. **``U`` gegen den Volumenstrom.** Liegt es auf einer Kurve, ist ``U`` eine
+   feste Funktion von ``V_dot`` und kostet im Modell keinen freien Parameter.
+   Braucht die Wandtemperatur, also den ``.npz``-Cache; ohne ihn wird der Teil
+   uebersprungen.
+
+   .. note::
+      **``U``, nicht ``h_conv``.** Zwischen der Monitorebene ``x = 0.0219`` und
+      der Kuehlplatte ``x = 0.0238`` liegen 1.9 mm, die im Repo nicht zerlegt
+      sind (Restwand, TIM, Spalt). Was aus ``Q / (A * (T_wand - T_fluid))``
+      faellt, ist damit ein **Gesamtdurchgang von der Gitterebene bis in den
+      Fluidkern**, kein Filmkoeffizient an der Kanalwand. Der Widerstand der
+      Schicht steckt **in** ``U`` und darf nicht noch einmal aufgeschlagen
+      werden. Waeren die 1.9 mm reines Aluminium, waere ``lambda/L ~ 1e5
+      W/m^2K`` und ``U ~ h_conv`` -- aber das ist eine Abschaetzung, kein
+      Schnittbild.
 
 Bei ``mdot = 0`` (OP07, OP14) gibt es keinen Durchfluss. Dort ist 2. nicht
 definiert, aber 3. ist die schaerfste Probe des Satzes: ohne Kuehlung muss
@@ -196,8 +229,9 @@ def main() -> None:
     ap.add_argument("--list-columns", action="store_true",
                     help="nur die Spaltennamen jeder Datei ausgeben")
     ap.add_argument("--area", type=float, default=0.0206,
-                    help="gekuehlte Flaeche in m^2 fuer h_eff (Default: die "
-                         "0.198 x 0.104 m Zellflaeche)")
+                    help="gekuehlte Flaeche in m^2 fuer U. Default 0.0206 = die "
+                         "yz-Flaeche der +x-Gehaeusewand, EINE Seite "
+                         "(0.198 x 0.104 m), am Gitter ~0.0207 gemessen")
     args = ap.parse_args()
 
     raw = find_raw(args.raw)
@@ -266,20 +300,35 @@ def main() -> None:
         return
 
     # ---- 1. Halbmodell-Faktor ----------------------------------------------
-    print("== 1. Halbmodell-Faktor: was steht in *_Heat Source.csv? ==")
-    print(f"{'OP':<6} {'mean jr1_w':>12} {'mean jr2_w':>12} {'mean total_w':>13} "
-          f"{'total/jr1':>10} {'jr2/jr1':>9}")
+    print("== 1. Halbmodell-Konvention des Waermestrom-Monitors ==")
+    print("   Die QUELLE ist geklaert: jr1_w = eine Rolle = Halbmodell.")
+    print("   Offen ist nur der Solid-to-Fluid-Monitor. Entscheidend: Q_ht/JR1")
+    print("   im SPAETEN Fenster (letztes Drittel), wo Einschwingen vorbei ist.\n")
+    print(f"{'OP':<6} {'jr2/jr1':>9} {'Q_ht/JR1':>10} {'Q_ht/(JR1+JR2)':>16} "
+          f"{'Lesart':>16}")
     for r in rows:
-        j1 = float(np.nanmean(r["jr1"]))
-        j2 = float(np.nanmean(r["jr2"])) if r["jr2"] is not None else np.nan
-        tt = float(np.nanmean(r["tot"])) if r["tot"] is not None else np.nan
-        print(f"{r['op']:<6} {j1:>12.4g} {j2:>12.4g} {tt:>13.4g} "
-              f"{tt/j1 if j1 else np.nan:>10.4f} "
-              f"{j2/j1 if j1 else np.nan:>9.4f}")
-    print("   total/jr1 ~ 2 und jr2/jr1 ~ 1  ->  zwei Wickel, das Halbmodell")
-    print("   enthaelt einen, jr1_w IST die Halbmodell-Leistung.")
-    print("   total/jr1 ~ 1                  ->  ein Wickel; dann sagt Punkt 3,")
-    print("   ob der Waermestrom-Monitor dieselbe Konvention hat.\n")
+        j1 = r["jr1"]; j2 = r["jr2"]
+        late = slice(int(0.67 * len(r["t_q"])), None)
+        q_l = float(np.nanmean(r["q"][late]))
+        j1_l = float(np.nanmean(np.interp(r["t_q"], r["t"], j1)[late]))
+        j2_l = (float(np.nanmean(np.interp(r["t_q"], r["t"], j2)[late]))
+                if j2 is not None else np.nan)
+        rat1 = q_l / j1_l if j1_l else np.nan
+        rat2 = q_l / (j1_l + j2_l) if j1_l and not np.isnan(j2_l) else np.nan
+        if r["mdot"] <= 0:
+            verdict = "kein Fluss"
+        elif 0.75 < rat1 < 1.35:
+            verdict = "eine Platte"
+        elif 1.6 < rat1 < 2.6:
+            verdict = "BEIDE Platten"
+        else:
+            verdict = "unklar"
+        print(f"{r['op']:<6} {j2_l/j1_l if j1_l else np.nan:>9.4f} "
+              f"{rat1:>10.4f} {rat2:>16.4f} {verdict:>16}")
+    print("   'eine Platte' -> Q in JR1-Konvention, nichts anzupassen.")
+    print("   'BEIDE Platten' -> ENTWEDER Q halbieren ODER A verdoppeln, nie beides.")
+    print("   Achtung: 'Heat Source Monitor (total)' ist NICHT JR1+JR2, sondern")
+    print("   groesser -- es taugt nicht als Probe und wird hier nicht benutzt.\n")
 
     # ---- 2. Fluidbilanz -----------------------------------------------------
     print("== 2. Fluidbilanz:  dT = Qdot / (mdot * Cp)  gegen  T_out - T_in ==")
@@ -311,13 +360,17 @@ def main() -> None:
         e_s = float(_trapz(r["jr1"], r["t"]))
         print(f"{r['op']:<6} {e_q:>17.5g} {e_s:>18.5g} "
               f"{e_q/e_s if e_s else np.nan:>9.4f}")
-    print("   Gegenstueck zu energy_balance_report (0.5-0.9x, dem Volumenstrom")
-    print("   folgend). Bei mdot = 0 muss der Anteil nahe 0 liegen -- tut er es")
-    print("   nicht, fliesst Waerme auf einem Weg ab, den der Entwurf nicht hat.\n")
+    print("   NICHT mit energy_balance_report gleichsetzen: der sieht nur JR1.")
+    print("   0.9x dort heisst '90 % bleiben IN JR1', der Rest geht ins Gehaeuse")
+    print("   und ins Cell Center -- nicht ins Fluid. Erwartet wird hier:")
+    print("     mdot = 0     -> Anteil ~ 0   (kein konvektiver Abtransport)")
+    print("     hoher Fluss  -> gross, aber KLEINER als 0.5 (Gehaeusespeicher)\n")
 
     # ---- 4. h_eff gegen den Fluss ------------------------------------------
-    print(f"== 4. h_eff = Qdot / (A * dT),  A = {args.area} m^2 ==")
-    print(f"{'OP':<6} {'mdot':>9} {'h_eff [W/m2K]':>15}")
+    print(f"== 4. U = Qdot / (A * dT),  A = {args.area} m^2 ==")
+    print("   U ist ein GESAMTDURCHGANG Gitterebene -> Fluidkern, kein")
+    print("   Filmkoeffizient: die 1.9 mm zur Kuehlplatte stecken drin.")
+    print(f"{'OP':<6} {'mdot':>9} {'U [W/m2K]':>15}")
     any_wall = False
     for r in rows:
         Tw, tw = wall_temp_from_cache(r["op"])
@@ -334,8 +387,9 @@ def main() -> None:
     if not any_wall:
         print("   uebersprungen -- kein data_cache gefunden (braucht T an der Wand)")
     else:
-        print("   Liegen die Werte auf einer Kurve ueber mdot, ist h eine feste")
+        print("   Liegen die Werte auf einer Kurve ueber mdot, ist U eine feste")
         print("   Funktion von V_dot und kostet im Modell keinen freien Parameter.")
+        print("   Nicht 'h_conv' nennen -- siehe Kopf des Skripts.")
 
 
 if __name__ == "__main__":

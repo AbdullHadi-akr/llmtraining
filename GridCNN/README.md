@@ -2,10 +2,13 @@
 
 > **Status: Entwurf, kein Code.** Diese Datei ist die Design-Diskussion.
 >
-> **02.09. — die Geometriefragen sind beantwortet** (Auskunft aus der Doku, plus
-> Nachprüfung im Code). Damit stehen die Randbedingungen und das x-Layout
-> (§5), und der Wandterm ist als *die* fehlende Bilanzhälfte bestätigt (§6).
-> Offen ist nur noch, wie groß `f` sein muss — dafür der Rangtest in §8.
+> **02.09. — alle Geometrie- und Wärmestromfragen sind beantwortet.** Damit
+> stehen die Randbedingungen, das x-Layout (§5), der Wandterm mit `A = 0.0206 m²`
+> und `U(V̇)` (§6), und beide Werkzeuge der Stufen 0 und 1 sind gebaut.
+> **`L_phys` bleibt drin** — begründet in §12.
+>
+> Offen sind nur noch Messungen, keine Entscheidungen: der Rangtest (§9) und die
+> Bilanzprobe (`FAHRPLAN.md` Stufe 1).
 
 Ein zweiter, **unabhängiger** Modellansatz neben
 [`PINNmodulusTwo/`](../PINNmodulusTwo/). Nicht dessen Ersatz: dasselbe Datum,
@@ -339,7 +342,7 @@ x-Stapel, 5 tief:   [ghost_lo,  T0(Mitte),  T1(JR1),  T2(Wand),  ghost_hi]
 
 ghost_lo := T1                                  # Spiegelung an x=0 -- exakt
 ghost_hi := T2 - (dx2 / lam_xx) * q_wall        # konvektiver Austritt
-q_wall   := h(V_dot) * (T2 - T_fluid(y, t))     # y, nicht nur t -- siehe unten
+q_wall   := U(V_dot) * (T2 - T_fluid(y, t))     # U, nicht h -- siehe 6
 
 y/z:  reflect-Padding, beide Richtungen
 ```
@@ -426,27 +429,41 @@ T_fluid(y, t) = T_in(t) + Q_kumuliert(y, t) / (mdot(t) * Cp_fluid)
                           ^ Integral der Wandwaerme von y_min bis y
 
 # 2. Wandfluss aus der lokalen Differenz
-q_wall(y, z, t) = h(t) * (T2(y, z, t) - T_fluid(y, t))
+q_wall(y, z, t) = U(t) * (T2(y, z, t) - T_fluid(y, t))
 
 # 3. Geisterschicht daraus
 ghost_hi = T2 - (dx2 / lam_xx) * q_wall
 ```
 
-`h` ist dabei **kalibriert, nicht geraten und nicht frei gelernt**: aus dem
+`U` ist dabei **kalibriert, nicht geraten und nicht frei gelernt**: aus dem
 gemessenen `Q̇(t)`, der Wandtemperatur und `T_fluid` faellt
 
 ```
-h_eff(t) = Q̇(t) / (A * (T2_mittel(t) - T_fluid_mittel(t)))
+U(t) = Q̇(t) / (A * (T2_mittel(t) - T_fluid_mittel(t))),   A = 0.0206 m^2
 ```
 
-direkt heraus. Einmal offline ueber alle OPs gerechnet, gegen `V_dot`
-aufgetragen, ergibt das eine **feste Funktion `h(V_dot)`**, die zur Laufzeit
-verfuegbar ist. Kein freier Parameter, und bei elf Trajektorien zaehlt jeder,
-den man nicht braucht.
+direkt heraus — die yz-Flaeche der +x-Gehaeusewand, **eine** Seite
+(0.198 x 0.104 m, am Gitter ~0.0207 gemessen). Einmal offline ueber alle OPs
+gerechnet und gegen `V_dot` aufgetragen, ergibt das eine **feste Funktion
+`U(V_dot)`**, die zur Laufzeit verfuegbar ist. Kein freier Parameter, und bei
+elf Trajektorien zaehlt jeder, den man nicht braucht.
 
-> Falls die Punktwolke `h_eff` gegen `V_dot` nicht auf einer Kurve liegt, ist
-> `h` nicht allein flussabhaengig. Dann -- und nur dann -- wird `h` gelernt,
-> aber weiterhin mit `L_wall` gegen `Q̇` beaufsichtigt.
+> **Warum `U` und nicht `h`.** Zwischen der Monitorebene `x = 0.0219` und der
+> Kuehlplatte bei `x = 0.0238` liegen 1.9 mm, die im Repo nicht zerlegt sind
+> (Restwand, TIM, Spalt). Was aus der Formel faellt, ist damit ein
+> **Gesamtdurchgang von der Gitterebene bis in den Fluidkern**, kein
+> Filmkoeffizient an der Kanalwand. Der Widerstand der Schicht steckt **in**
+> `U` — er darf nicht noch einmal aufgeschlagen werden. (Waeren die 1.9 mm
+> reines Aluminium, waere `λ/L ~ 1e5 W/m^2K` und `U ~ h_conv`; das ist eine
+> Abschaetzung, kein Schnittbild.)
+
+> **Und die Flaechenregel:** zaehlt der Waermestrom-Monitor beide Kuehlplatten
+> (`Q_ht/JR1 ~ 2`, Pruefung 1 in `balance_check.py`), dann **entweder** `Q`
+> halbieren **oder** `A` verdoppeln — nie beides.
+
+> Falls die Punktwolke `U` gegen `V_dot` nicht auf einer Kurve liegt, ist `U`
+> nicht allein flussabhaengig. Dann -- und nur dann -- wird es gelernt, aber
+> weiterhin mit `L_wall` gegen `Q̇` beaufsichtigt.
 
 ### Die zwei Gegenproben, die dadurch gratis sind
 
@@ -708,148 +725,93 @@ CNN trotzdem zu bauen, weil er im Entwurf steht.
 
 ---
 
-## 12. Alle offenen Fragen
+## 12. Alle Fragen — Stand 02.09.
 
-Vollstaendig, nach Adressat sortiert. Zu jeder Entscheidung steht eine
-Empfehlung — wo du einverstanden bist, reicht „ja".
+Nichts blockiert mehr. Was hier steht, ist die Buchführung, warum es so
+entschieden ist.
 
-### 12.1 An dich — Fakten
+### 12.1 `L_phys` bleibt
 
-**F1. Die Zahl aus Achse 0.** val OP06 / OP09 aus `06b_ohne_physik.txt`.
+**Entschieden am 02.09.: der Physik-Term bleibt in GridCNN.** Die Begründung ist
+nicht meine, sondern die des Fahrplans selbst:
 
-*Was das ist:* der Lauf, der in `PINNmodulusTwo/FAHRPLAN.md` ganz oben unter
-„▶ Das Nächste" steht —
+> Der Achse-0-Lauf ist **ein Lauf mit einem Seed**, und die Gewichtung darin ist
+> nicht kontrolliert. „Ein Seed ist keine Streuung" steht in
+> `PINNmodulusTwo/FAHRPLAN.md` Teil I als Regel, und sie gilt auch, wenn das
+> Ergebnis gerade bequem wäre. Um daraus „Physik trägt nicht" zu machen,
+> bräuchte es eine Seed-Schleife und einen `w_phys`-Sweep — also genau den
+> Benchmark, den es noch nicht gibt.
 
-```bash
-python3 PINNmodulusTwo/train.py --epochs 60 --w-phys 0 --w-bc 0 2>&1 | tee 06b_ohne_physik.txt
-```
+Dazu kommt: der heutige `L_phys` läuft mit `delta_phys` = 1.0 s gegen Δt_max
+≈ 0.24 s, ist also **4.1× zu grob** (O8). Ein fehlerhaft diskretisierter
+Strafterm, der wenig beiträgt, sagt wenig über Physik.
 
-Vergleichslauf zu Schritt 6 mit genau **einer** Variablen: Physik- und BC-Term
-aus. Schritt 6 (mit Physik) ergab **6.270 / 3.585 C**. Kommt ohne Physik etwas
-Ähnliches heraus, trägt der Term nicht; kommt ~11.6 / 8.5 C heraus, trägt er.
+`L_phys` ist damit ein Term in GridCNN, `w_phys` eine spätere Sweep-Achse, und
+der FD-Stencil ohnehin gebaut — er ist der Löser, den `f` korrigiert.
 
-*Was es hier ändert — und was nicht:*
+### 12.2 Die Randbedingungen — und was wir NICHT wissen
 
-> **Nur, ob `L_phys` in GridCNN ein Verlustterm wird. Nicht, ob der Stencil
-> gebaut wird.** Der Stencil ist hier kein Strafterm, sondern der **Löser, den
-> `f` korrigiert** (Stufe 3 → 4). Der bleibt in jedem Fall, und Stufe 3 bleibt
-> genauso wertvoll — sie ist Korrektheitsprüfung für Padding und Wandterm plus
-> Physik-Latte, kein Gewicht.
+**Bekannt ist genau eine: `dT/dx = 0` an der Zellmitte.** Sonst keine. Das ist
+die Vorgabe, und der Entwurf hält sich daran:
+
+| Fläche | Status | im Modell |
+|---|---|---|
+| x = 0, Zellmitte | **bekannt** — Symmetrieebene, Half-model | `ghost_lo := T1`, exakt |
+| x = 0.0219, Gehäusewand | **bekannt, dass Wärme austritt** — Robin mit `U(V̇)` | `ghost_hi` aus `q_wall` |
+| y/z-Umfang | ⚠ **nicht bekannt.** Angenommen adiabat | `reflect` — **als Annahme markiert** |
+
+> **Die y/z-Annahme steht auf zwei Indizien, nicht auf einer Messung:** die
+> Kühlplatten sitzen laut Doku nur auf ±x, und eine nicht spezifizierte
+> Außenfläche eines Festkörpers ist in StarCCM+ per Voreinstellung adiabat.
+> Beides plausibel, keines belegt.
 >
-> *(Eine frühere Fassung dieser Datei behauptete, bei „trägt nicht" fielen
-> Stencil und Stufe 3 weg. Das war zu weit gegriffen.)*
->
-> Dazu kommt: der heutige `L_phys` läuft mit `delta_phys` = 1.0 s gegen ein
-> Δt_max von 0.24 s, ist also **nachweislich 4.1× zu grob** (O8, `[CFL WARN]`).
-> Ein derart fehlerhaft diskretisierter Strafterm, der nichts beiträgt, ist
-> schwaches Zeugnis gegen Physik allgemein.
+> Deshalb ist das Padding ein **Schalter**, `--pad-yz {reflect,replicate,learned}`,
+> und nicht fest verdrahtet. Und deshalb ist **Stufe 3 des Fahrplans** (der
+> Löser ohne Netz) die Stelle, an der es auffliegt: zeigt der Physiklauf einen
+> systematischen Fehler am Randring, ist das Padding der erste Verdächtige — und
+> nicht das Netz, das es dann gar nicht gibt.
 
-**F2. Liegt `data_raw/` auf der Maschine?** ✅ **ja** (02.09.). Stufe 1 und 2
-sind damit frei; [`tools/balance_check.py`](tools/balance_check.py) ist gebaut.
+### 12.3 Die entschiedenen Punkte
 
-**F3. Wo läuft GridCNN?** ✅ **variabel**, je nach Maschine. Wird wie in
-`PINNmodulusTwo` gelöst: `device: ask` in einer eigenen `config.yaml`, und
-Netzbreite, Tiefe sowie das BPTT-Fenster `k` sind Konfigurations- und
-CLI-Parameter mit gerätabhängigen Vorgaben — auf der CPU klein, auf dem Server
-groß.
+| # | Frage | Entscheidung |
+|---|---|---|
+| F1 | Achse 0 / `L_phys` | **bleibt**, §12.1. Die Zahl ist trotzdem interessant, aber sie blockiert nichts mehr |
+| F2 | `data_raw/` vorhanden? | ✅ ja — Stufe 1 und 2 frei |
+| F3 | Wo läuft GridCNN? | **variabel**: `device: ask`, Netzgröße und BPTT-Fenster als Parameter mit gerätabhängigen Vorgaben |
+| F4 | O16 im PINN-Fahrplan? | ✅ **eingetragen** (02.09.), mit der Einschränkung, dass er die val-Fehler nicht erklärt |
+| F5 | Cache-Schema | **erweitern** (Weg a). Der zweite Datenpfad wäre teurer als der Rebuild — Stufe 2 |
+| F6 | Wand-BC nach PINNmodulusTwo? | **ja, aber nach Stufe 1.** Geht die Bilanz nicht auf, wäre es eine falsche BC in einem funktionierenden Modell |
+| F7 | OP19 mitrollen? | **ja**, ausrollen und berichten, nie trainieren, nie selektieren. §12.4 |
+| F8 | PR beobachten? | ja |
 
-### 12.2 An dich — Entscheidungen
+### 12.4 Zu OP19
 
-**F4. Kommt die fehlende Wand-BC als O16 in `PINNmodulusTwo/FAHRPLAN.md`?**
-Der Befund steht oben unter „Zu 5". Es ist deine Datei und die O-Nummern sind
-deine Buchfuehrung, deshalb frage ich statt es zu tun. Sag Nummer und Teil,
-dann trage ich ihn ein.
+Richtig, es ist der bessere Endtest — und zwar aus einem Grund, den die
+Simulations-OPs nicht liefern können: **es ist gemessen, mit echtem Rauschen.**
+Ein Surrogat, das nur gegen glatte StarCCM+-Felder geprüft wurde, hat nie
+gesehen, wie sich sein Fehler gegen Messrauschen verhält.
 
-**F5. Cache-Schema erweitern oder GridCNN-lokal lesen?**
+Zwei Dinge dazu, damit die Zahl richtig gelesen wird:
 
-| | |
+* **O11 gilt weiter:** OP19 wurde *schlechter*, je besser das Modell auf den
+  Simulations-OPs wurde (10.334 C nach 60 Epochen gegen 5.507 C nach dreien).
+  Das ist eine Envelope-Grenze — OP19 ist ein Fahrzyklus mit Entladung, und der
+  Trainingssatz besteht ausnahmslos aus Ladungen.
+* Deshalb: **berichten, nie selektieren.** Eine Änderung, die OP19 besser
+  aussehen lässt, wäre eine Anpassung an die eine vorhandene Messung — wovor
+  `op_registry.py:185` ausdrücklich warnt.
+
+Das Rauschen ist übrigens auch ein Argument für den Rangtest (§9): auf OP19
+sollte der `uniform`-Anteil anders aussehen als auf den Simulations-OPs.
+
+### 12.5 Was aus der Antwort-MD vom 02.09. übernommen ist
+
+| Befund | Folge im Entwurf |
 |---|---|
-| **a) sauber** *(Empfehlung)* | `generate_cache.py` + `opbundle_contract.md` erweitern, `schema_version` hoch, alle sechzehn OPs neu bauen (10–30 min). `PINNmodulusTwo` bekommt die vier Groessen damit auch — und braucht sie, falls F6 ja lautet |
-| b) leicht | GridCNN liest die vier Groessen lokal aus den Roh-CSVs. Nichts Bestehendes wackelt, aber es entsteht ein zweiter Datenpfad — genau die Doppelung, wegen der am 31.08. zusammengelegt wurde |
-
-**F6. Darf ich die Wand-BC nach `PINNmodulusTwo` portieren — als eigener PR?**
-Nach meiner eigenen Bewertung (§11.3) ist das der beste Aufwand-Ertrag im
-ganzen Projekt: ~80–120 Zeilen, behebt eine nachgewiesene Luecke, wird von
-gemessenem `Q̇(t)` beaufsichtigt, in Tagen messbar. Es beruehrt aber
-`physics.py` und `train.py` des laufenden Projekts, also frage ich, statt es
-einzuplanen.
-
-> *Empfehlung: ja, aber erst nach Stufe 1.* Wenn die Bilanz nicht aufgeht, waere
-> es eine falsche Randbedingung in einem funktionierenden Modell.
-
-**F7. Rollt GridCNN OP19 mit?** Wie `PINNmodulusTwo`: ausrollen und berichten,
-nie trainieren, nie selektieren. *Empfehlung: ja* — sonst fehlt der einzige
-Messvergleich, und O11 (OP19 wird schlechter, je besser das Modell wird) haette
-keine zweite Beobachtung.
-
-### 12.3 An den lokalen Bot
-
-Der fertige Text steht in §12.4. Drei Praezisierungen zum Waermestrom, bevor er
-Randbedingung wird — es geht um Vorzeichen, Bezugsflaeche und zweimal um einen
-**Faktor 2**. Dieses Projekt hat an genau dieser Sorte Buchhaltung schon einmal
-121x verloren (FAHRPLAN §11.1).
-
-### Was ich NICHT mehr frage
-
-Damit klar ist, was als erledigt gilt:
-
-* **y/z-Rand: adiabat oder Symmetrie?** Praktisch egal — beide sind
-  Nullgradient, beide werden `reflect`. Die Auskunft konnte es nicht hart
-  belegen, und sie muss es auch nicht.
-* **Punktreihenfolge im Buendel / ob alle OPs dasselbe Gitter haben.**
-  `tools/spatial_rank.py` leitet beides ab und meldet Abweichungen.
-* **`h(V_dot)` gelernt oder kalibriert?** Entscheidet Stufe 1 an den Daten,
-  nicht wir am Tisch.
-
-## 12.4 Zum Kopieren: der Prompt fuer den lokalen Bot
-
-```
-Anschluss an 029 und 030. Fuenf Praezisierungen zum Waermestrom und zur
-Geometrie, bevor ich den Waermeaustritt an der Gehaeusewand als
-Randbedingung in ein Modell einbaue. Es geht um Vorzeichen, Bezugsflaeche
-und zweimal um einen moeglichen Faktor 2.
-
-1) Bezieht sich "Heat Transfer: solid to fluid Monitor (W)" auf das
-   HALBMODELL (eine Kuehlplatte, x = 0 .. 0.0219) oder auf die ganze Zelle
-   (beide ±x-Platten)?
-
-2) Und dieselbe Frage fuer die Quelle -- moeglicherweise beantwortet die
-   schon GridCNN/tools/balance_check.py aus *_Heat Source.csv selbst
-   (jr1_w, jr2_w und total_w stehen dort nebeneinander; total/jr1 ~ 2 hiesse
-   zwei Wickel und jr1_w = Halbmodell). Falls das eindeutig ist, bleibt nur
-   die Frage nach dem Waermestrom-Monitor: ist die JR1-Leistung, die
-   PINNmodulusTwo als q_source[:,0] liest, ebenfalls Halbmodell — oder
-   ganze Zelle? Beide muessen dieselbe Konvention haben, sonst geht die
-   Bilanz um Faktor 2 nicht auf. Falls das nirgends dokumentiert ist:
-   welche der beiden Groessen laesst sich unabhaengig pruefen?
-
-3) Welche Flaeche A liegt dem Waermestrom zugrunde? Die Rechnung
-   h = Qdot / (A * dT) braucht sie. Ist es die 0.198 x 0.104 m grosse
-   Zellflaeche (= 0.0206 m^2), die Kuehlplattenflaeche, oder eine benetzte
-   Flaeche im Kuehlkanal?
-
-4) Vorzeichenkonvention: ist der Monitor positiv, wenn Waerme VOM
-   Festkoerper INS Fluid geht? Und passt sein Zeitintegral quantitativ zu
-   dem, was energy_balance_report als Fehlbetrag sieht (V_dot = 0 -> 0.9x,
-   V_dot = 0.0026 -> 0.5x der Quellenergie)?
-
-5) Laut 029 endet die Loesungsdomaene bei x = 0.0219, die Kuehlplatten
-   liegen bei x = ±0.0238. Was liegt in den 1.9 mm dazwischen —
-   Gehaeusewandstaerke, ein Kontaktwiderstand, ein Spalt? Ich brauche das
-   nicht aufzuloesen, aber ich muss wissen, ob ein aus Qdot berechnetes h
-   der reine Konvektionskoeffizient ist oder ein GESAMTuebergang inklusive
-   dieser Schicht. Fuer das Modell will ich den Gesamtuebergang; es soll
-   nur nicht faelschlich als Konvektionskoeffizient etikettiert sein.
-
-Wenn dabei ohnehin ein Skript entsteht: bitte fuer OP04/OP05 (hoher Fluss)
-und OP07/OP14 (kein Fluss) beide Seiten der Bilanz gegenueberstellen --
-
-  dT_fluid_gemessen(t) = Tmfavg_fluid_out(t) - fluid_inlet_temp(t)
-  dT_fluid_bilanz(t)   = integral(Qdot dt) / (mdot * Cp_fluid)
-
-und zusaetzlich h_eff = Qdot / (A * (T_wand_mittel - T_fluid_mittel)) gegen
-den Volumenstrom auftragen. Liegt das auf einer Kurve, ist h eine feste
-Funktion von V_dot und kostet keinen freien Parameter. Das ist die
-Gegenprobe aus 030, sie braucht kein Modell, und sie sagt vor dem ersten
-Training, ob die Bilanz aufgeht.
-```
+| `q_source[:,0]` = `Heat Source JR1 Monitor (W)`, `V_JR1 = 4.394793e-04 m³`, eine Rolle | die **Quelle ist Halbmodell** — dieselbe Konvention wie das Gitter. Offen blieb nur der Wärmestrom-Monitor |
+| `Heat Source Monitor (total)` ist **nicht** JR1+JR2, sondern größer | taugt **nicht** als Halbmodell-Probe. `balance_check.py` benutzt es nicht mehr |
+| Probe ist `Q_ht / JR1` im **späten** Fenster: ≈1 eine Platte, ≈2 beide | in `balance_check.py` Prüfung 1 umgebaut |
+| `A = 0.198 × 0.104 = 0.0206 m²`, **eine** Seite | Default des Werkzeugs, und die Fläche der Robin-BC |
+| bei „beide Platten": **entweder** `Q` halbieren **oder** `A` verdoppeln | steht als Regel im Werkzeug und im Fahrplan |
+| `energy_balance_report` sieht **nur JR1** — 0.9× heißt „bleibt in JR1", nicht „geht ins Fluid" | Prüfung 3 umgeschrieben. Der frühere Text hätte **Speicherung zu Kühlung verdreht** |
+| die 1.9 mm zwischen x = 0.0219 und der Platte sind nicht zerlegt | der Koeffizient heißt **`U`** (Gesamtdurchgang), nicht `h_conv`. Der Schichtwiderstand steckt **in** `U` und wird nicht noch einmal aufgeschlagen |

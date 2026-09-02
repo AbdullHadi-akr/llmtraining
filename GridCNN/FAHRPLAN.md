@@ -7,6 +7,10 @@
 > seinen eigenen, und die `.gitignore` führt genau diesen Namen auf ihrer
 > Whitelist.
 
+**Sortierung:** von oben nach unten — was zu tun ist, steht oben; was erledigt
+ist, wandert nach unten in „Erledigt". Wie im Fahrplan von `PINNmodulusTwo`,
+und aus demselben Grund: sonst sucht man das Nächste zwischen dem Erledigten.
+
 Der Plan ist eine **Leiter mit Toren**, keine gerade Linie. Grund steht in
 README §11: die meisten Gewinne dieses Entwurfs sind *Gitter*-Gewinne, nicht
 *CNN*-Gewinne. Also wird das Billigste und Sicherste zuerst gebaut, und jede
@@ -84,11 +88,15 @@ legacy-Assembly. Nur numpy.
 
 Vier Prüfungen:
 
-**1. Der Halbmodell-Faktor, aus den Daten statt aus einer Nachfrage.**
-`*_Heat Source.csv` führt `jr1_w`, `jr2_w` **und** `total_w` nebeneinander. Ist
-`total/jr1 ≈ 2` und `jr2/jr1 ≈ 1`, hat die Zelle zwei Wickel, das Halbmodell
-(x = 0 … 0.0219) enthält genau einen, und `jr1_w` **ist** die
-Halbmodell-Leistung. Damit ist die Frage beantwortet, ohne jemanden zu fragen.
+**1. Die Halbmodell-Konvention des Wärmestrom-Monitors.** Die *Quellenseite* ist
+seit dem 02.09. geklärt: `q_source[:,0]` = `Heat Source JR1 Monitor (W)`, eine
+Rolle, über `V_JR1 = 4.394793e-04 m³` volumetrisch — **Halbmodell**, dieselbe
+Konvention wie das Gitter. Offen ist nur, über welche Fläche StarCCM den
+Solid-to-Fluid-Monitor integriert, und das entscheidet **`Q_ht / JR1` im späten
+Fenster**: ≈1 eine Platte, ≈2 beide.
+
+> ⚠ `Heat Source Monitor (total)` ist **nicht** `JR1 + JR2`, sondern größer. Es
+> taugt daher nicht als Probe und wird nicht benutzt.
 
 **2. Die Fluidbilanz.**
 
@@ -102,22 +110,29 @@ Halbmodell-Leistung. Damit ist die Frage beantwortet, ohne jemanden zu fragen.
 > die falsche Formel würde fehlschlagen, ohne dass an der Physik etwas falsch
 > wäre. Das Werkzeug rechnet die Durchflussform.
 
-**3. Der Energieanteil über die Wand.** `∫Q̇dt` gegen `∫jr1_w dt` — das
-Gegenstück zu den 0.5–0.9× aus `energy_balance_report`. Bei `ṁ = 0` (OP07,
-OP14) muss der Anteil **nahe 0** liegen; tut er es nicht, fließt Wärme auf einem
-Weg ab, den der Entwurf nicht kennt.
+**3. Der Energieanteil über die Wand.** `∫Q̇dt` gegen `∫jr1_w dt`.
 
-**4. `h_eff` gegen den Volumenstrom.** Braucht die Wandtemperatur, also den
-`.npz`-Cache; ohne ihn wird der Teil übersprungen statt zu scheitern.
+> ⚠ **Nicht mit `energy_balance_report` gleichsetzen.** Der Report sieht **nur
+> JR1**: 0.9× bei V̇ = 0 heißt *90 % der JR1-Quelle bleiben in JR1*, die anderen
+> 10 % gehen ins Gehäuse und ins Cell Center — **nicht ins Fluid**.
+> `∫Q̇ ≈ (1−0.9)·∫JR1` zu erzwingen verdreht **Speicherung zu Kühlung**.
+> Erwartet wird: bei ṁ = 0 Anteil ≈ 0, bei hohem Fluss groß aber **kleiner als
+> 0.5**, weil Wärme im Gehäuse gespeichert bleibt.
+
+**4. `U` gegen den Volumenstrom** — Gesamtdurchgang, nicht `h_conv`: die 1.9 mm
+zwischen Monitorebene und Kühlplatte sind nicht zerlegt und stecken **in** `U`.
+Braucht die Wandtemperatur, also den `.npz`-Cache; ohne ihn wird der Teil
+übersprungen statt zu scheitern.
 
 ### Das Tor
 
 | Ergebnis | Folge |
 |---|---|
+| `Q_ht/JR1 ≈ 1` im späten Fenster | 🟢 eine Platte, gleiche Konvention wie die Quelle — nichts anzupassen |
+| `Q_ht/JR1 ≈ 2` | 🟡 beide Platten. **Entweder** `Q` halbieren **oder** `A` verdoppeln — nie beides |
 | Fluidbilanz-Verhältnis ≈ 1.0 | 🟢 `ghost_hi` steht |
-| `h_eff` gegen `V̇` auf einer Kurve | 🟢 `h` wird **feste Funktion**, null freie Parameter |
-| `h_eff` streut breit | 🟡 `h` wird gelernt, aber mit `L_wall` gegen `Q̇` beaufsichtigt |
-| Verhältnis ≈ 2.0 oder ≈ 0.5 | 🔴 **halt.** Halbmodell-Faktor — Prüfung 1 sagt, auf welcher Seite. Kein Physikfehler, und nicht als solcher zu behandeln |
+| `U` gegen `V̇` auf einer Kurve | 🟢 `U` wird **feste Funktion**, null freie Parameter |
+| `U` streut breit | 🟡 `U` wird gelernt, aber mit `L_wall` gegen `Q̇` beaufsichtigt |
 | bei `ṁ = 0` fließt Energie ab | 🔴 der Entwurf hat einen Pfad übersehen |
 
 > Der Faktor-2-Fall ist kein hypothetisches Risiko: dieses Projekt hat schon
@@ -307,7 +322,7 @@ Wird beim Abhaken ausgefüllt. Leer = noch nicht gemessen.
 | 0 | gepoolte Ortsstruktur @ 99.9 % | | |
 | 0 | `uniform`-Anteil je OP | | |
 | 0 | Wandgefälle wächst mit V̇ | | |
-| 1 | Halbmodell-Faktor `total/jr1` | | |
+| 1 | `Q_ht/JR1` spät (1 = eine Platte, 2 = beide) | | |
 | 1 | Fluidbilanz, Verhältnis | | |
 | 1 | Wandanteil bei V̇ = 0 (muss ~0 sein) | | |
 | 1 | `h_eff(V̇)` auf einer Kurve? | | |
@@ -315,5 +330,23 @@ Wird beim Abhaken ausgefüllt. Leer = noch nicht gemessen.
 | 3 | Löser stabil bei dt = 0.2 s | | |
 | 3 | Physik-Latte, val OP06 / OP09 | | |
 | 4 | Netz schlägt Physik-Latte | | |
+| 6 | OP19 (Messvergleich, nur berichten) | | |
 | 5 | `late_mae` gefallen | | |
 | 6 | val / test gegen PINNmodulusTwo | | |
+
+---
+
+# Erledigt
+
+Was fertig ist, damit Teil oben nur Offenes enthält.
+
+| Datum | was |
+|---|---|
+| 02.09. | Gitter verifiziert: 3 × 11 × 11, äquidistant, über alle OPs identisch, Randring **auf** der Flächenkante |
+| 02.09. | Randbedingungen geklärt: Symmetrie bei x = 0, Robin an der Gehäusewand, y/z als *Annahme* markiert |
+| 02.09. | Quellenseite geklärt: `jr1_w` ist Halbmodell, `V_JR1 = 4.394793e-04 m³` |
+| 02.09. | `A = 0.0206 m²` festgelegt, Koeffizient als `U` (Gesamtdurchgang) etikettiert |
+| 02.09. | `tools/spatial_rank.py` gebaut und getestet |
+| 02.09. | `tools/balance_check.py` gebaut und getestet |
+| 02.09. | `L_phys` bleibt — ein Seed ist keine Streuung (README §12.1) |
+| 02.09. | F4–F8 entschieden (README §12.3), O16 im PINN-Fahrplan eingetragen |
