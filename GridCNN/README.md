@@ -38,10 +38,11 @@ Also ein **3 × 11 × 11 Tensorgitter, identisch über alle sechzehn OPs**.
 `data.Tn` ist `(n_t, 363)` und wird mit *einem* `reshape` zu `(n_t, 3, 11, 11)`.
 Kein Vernetzen, kein Interpolieren.
 
-**Layout:** x kommt in die **Kanäle**, gefaltet wird über (y, z), also
-`Conv2d` auf `(B, C, 11, 11)`. Drei Ebenen sind keine Faltungsrichtung — man
-kann darauf nichts stapeln, und die x-Kopplung ist als 1×1-Kanalmischung
-ohnehin ausdrucksstärker als ein 3-Punkt-Stencil.
+**Layout:** gefaltet wird über (y, z) — dort liegen die 11×11 äquidistanten
+Punkte. Wie x behandelt wird, ist die eine offene Layout-Frage: als Kanäle
+(einfach, aber dann sind die Randbedingungen nicht strukturell) oder als kurze
+Achse mit Geisterschichten (beide BCs exakt). **Siehe §5** — die Antwort hängt
+an den Randbedingungen und nicht am Geschmack.
 
 ---
 
@@ -64,8 +65,11 @@ guten In-Sample-Zahlen (OP01: 1.000 C) bei mäßiger Verallgemeinerung. Der CNN
 muss räumliche Struktur über die Materialkarten begründen. Das ist der
 schärfere Prior.
 
-**c) Randbedingungen werden Padding statt Gewicht.** `dT/dx = 0` ist eine
-Spiegelung, exakt, ohne `w_bc`. Achse 2 des Fahrplans löst sich auf.
+**c) Die Symmetrie wird Struktur statt Gewicht.** `dT/dx = 0` an der Zellmitte
+ist eine Spiegelung -- exakt, ohne `w_bc`, Achse 2 des Fahrplans löst sich auf.
+Das gilt aber nur mit der Geisterschicht-Variante aus §5, nicht wenn x einfach
+in den Kanälen liegt. Die Gehäusewand ist **kein** Nullgradient und braucht
+einen eigenen Term (§6).
 
 **d) Der Physik-Stencil wird ein fester Kernel.** Kein Autograd-Hessian im
 Raum mehr, damit auch `tf32: false` hinfällig, und O8 / der `[CFL WARN]` sind
@@ -132,6 +136,11 @@ Treiber × zwei kausale Rate-Lags) aus `data.py`, unverändert.
    je Feature-Kanal ab, die nach jedem Conv skalieren und verschieben.
    Ausdrucksstärker, kaum mehr Code. **Als erste dokumentierte Erweiterung**,
    damit sie eine eigene Sweep-Achse ist und nicht mit der Architektur vermischt.
+
+**Zwei davon gehen zusaetzlich woanders hin.** `fluid_inlet_temp` und
+`fluid_mass_flow` sind nicht nur globale Skalare -- sie sind die
+Gehaeusewand-Randbedingung (§5, §6). Sie werden also *auch* broadcastet, aber
+ihre eigentliche Wirkung hat der Wandterm.
 
 **Nicht drin: die absolute Zeit.** Bewusst. Ein `t / T_span`-Kanal lädt das Netz
 ein, die Uhr der Trajektorie auswendig zu lernen statt Dynamik — bei elf
@@ -221,77 +230,94 @@ Die Δ-Form mit explizitem Stencil ist explizites Euler, also CFL-gebunden.
 
 ---
 
-## 5. Randbedingungen — hier steht eine echte Unklarheit
+## 5. Randbedingungen — und was das fuers Layout heisst
 
-Beim CNN ist die BC ein **Padding**, also eine Zeile Konfiguration statt eines
-Gewichts. Deswegen kostet die Unklarheit unten nichts: beide Lesarten sind ein
-Flag, und wir können sie gegeneinander messen.
+`dT/dx = 0` gilt **nur an der Zellmitte**, nicht an der Gehaeusewand. Das ist
+verifiziert und es ist auch das, was PINNmodulusTwo tut: `train.py:603` setzt
+`bc_mask = |x| < 1e-6`, also genau die 121 Cell-Center-Punkte, und
+`boundary_condition_loss` wertet `dT/dx` per Autograd ausschliesslich dort aus.
 
-**Was der Code heute tut:** `physics.py:36` heißt
-`boundary_condition_loss(...)` und sein Docstring sagt
-*„Boundary condition: dT/dx = 0 at cell center (x=0)"*, mit `bc_mask` als
-*„boolean mask for boundary points (x=0)"*. Der Strafterm sitzt also **an der
-Zellmitte**.
+> Nicht verwechseln: die `bc_pairs = 242` aus Schritt 4 sind **kein** zweiter
+> BC-Ort. `data._measure_bc_scale` misst damit nur den Normierungs-Divisor --
+> den RMS-x-Gradienten ueber alle Nachbarpaare -- damit `L_bc` als Bruchteil der
+> in den Daten vorhandenen Gradienten lesbar ist.
 
-**Was du sagst:** die BC sitzt **an der Gehäusewand**, und an der Zellmitte
-wird auf den Rest der Batterie gespiegelt.
+Damit sind die beiden x-Flaechen **verschieden**:
 
-Beides ist miteinander verträglich, wenn man sie als zwei verschiedene Dinge
-liest, und dann ist das Bild sauber:
-
-| x | was | im CNN |
+| x | | |
 |---|---|---|
-| 0.0 — Cell Center | **Symmetrieebene.** `dT/dx = 0` gilt dort *automatisch*, weil gespiegelt wird — es ist keine Bedingung, die man erzwingt, sondern eine Eigenschaft der Geometrie | **Mirror-Padding.** Exakt, kein Verlustterm |
-| 0.0219 — Gehäusewand | **die eigentliche BC**, und du sagst dort gilt ebenfalls `dT/dx = 0` (adiabat nach außen) | **Mirror-Padding** — dieselbe eine Zeile |
+| 0.0 Cell Center | Symmetrieebene. `dT/dx = 0` gilt, weil auf den Rest der Batterie gespiegelt wird | exakt, strukturell erzwingbar |
+| 0.0219 Gehaeusewand | **hier tritt Waerme aus.** Kein Nullgradient, sondern ein konvektiver Fluss zum Fluid | braucht einen echten Term |
 
-Wenn das so stimmt, ist der Fall in x vollständig erledigt: an beiden Enden
-gespiegelt, `w_bc` gestrichen, kein Strafterm.
+### Die Folge fuers Layout: x kann nicht einfach in die Kanaele
 
-> **⚠ Offene Frage 1 — die physikalische Folge.** Sind *beide* x-Flächen
-> nullgradient, kann in x keine Wärme abfließen. Die Kühlung muss dann komplett
-> über y/z gehen. Das passt nicht zum `energy_balance_report`: der findet
-> **0.5–0.9× und folgt dem Volumenstrom** (V̇ = 0 → 0.9×, V̇ = 0.0026 → 0.5×).
-> Bei hohem Fluss verschwindet also die Hälfte der Quellenergie in einer Senke,
-> die die PDE in dieser Form gar nicht hat. Siehe §6.
+In §1 stand "x in die Kanaele, gefaltet ueber (y,z)". Das ist bequem, hat aber
+eine Konsequenz, die mir erst mit der Korrektur klar wurde: **liegt x in den
+Kanaelen, gibt es in x kein Padding** -- die x-Kopplung ist eine gelernte
+3x3-Kanalmischung. Dann ist *keine* der beiden Bedingungen strukturell, und die
+Symmetrie muesste als Strafterm zurueckkommen, genau wie heute. Der unter §2c
+behauptete Gewinn waere weg.
 
-> **⚠ Offene Frage 2 — der y/z-Rand.** Dazu weiß ich nichts, und beim CNN sind
-> das **40 von 121 Pixeln** je Ebene — falsches Padding dort ist nicht
-> kosmetisch. Vorschlag bis auf Widerruf: `replicate` (nullgradient, die
-> neutralste Annahme). Sitzt die Kühlung dort, ist es falsch und wir müssen es
-> wissen.
-
----
-
-## 6. Der fehlende Senkenterm
-
-Fällt beim Aufschreiben des Inputs auf und gehört hierher, weil es die
-Architekturfrage berührt:
-
-Die Fluid-Treiber (`fluid_inlet_temp`, `fluid_mass_flow`) gehen heute als
-**globale Skalare** ins Netz. Die Kühlung wirkt aber an einer *Fläche*. Und
-`energy_balance_report` sagt, dass bei V̇ = 0.0026 rund **die Hälfte** der
-Quellenergie nicht in den Temperaturanstieg geht — sie fließt in eine Senke,
-die im Residuum (Leitung + Quelle, sonst nichts) nicht vorkommt. Der Datenterm
-muss das ausgleichen.
-
-Dazu passt §11.5 des Fahrplans: **der Volumenstrom ist die Schwierigkeitsachse,
-nicht der Tier** — V̇ = 0 im Mittel 5.374 C, V̇ > 0 im Mittel 2.928 C, und der
-schlechteste ausgehaltene OP ist OP06, der einzige ohne Kühlung.
-
-Auf dem Gitter ist der Term hinschreibbar:
+Die Alternative behandelt x als **kurze echte Achse mit Geisterschichten**:
 
 ```
-q_conv = h(V̇) · (T − T_fluid(t)) · mask_gekühlte_Fläche
+x-Stapel, 5 tief:   [ghost_lo,  T0(Mitte),  T1(JR1),  T2(Wand),  ghost_hi]
+
+ghost_lo := T1                                  # Spiegelung an x=0 -- exakt,
+                                                # das IST die Symmetrie
+
+ghost_hi := T2 - (dx / lam_xx) * q_wall
+q_wall   := h(V_dot) * (T2 - T_fluid(t))        # konvektiver Austritt
 ```
 
-Das setzt die Fluid-Treiber **dorthin, wo sie physikalisch wirken**, statt sie
-gleichverteilt einzustreuen. Ohne Gitter und ohne Flächenmaske ist das mühsam;
-mit beidem sind es ein paar Zeilen.
+Damit ist die Symmetrie **strukturell und exakt** (kein `w_bc`), und der
+Waermeaustritt sitzt dort, wo er physikalisch hingehoert. Gefaltet wird
+weiterhin ueber (y,z); in x laeuft ein expliziter 3-Punkt-Stencil ueber den
+gepaddeten Stapel. Drei Ebenen sind zu flach zum Stapeln -- also ein
+Stencil-Schritt in x je Block, kein tiefes Conv3d.
 
-> **⚠ Offene Frage 3:** welche Fläche ist gekühlt? Hängt an Frage 2. `h(V̇)`
-> wäre entweder eine kleine gelernte Funktion oder eine Korrelation.
+**Empfehlung: die Geisterschicht-Variante.** Sie kostet ein paar Zeilen mehr und
+kauft beide Randbedingungen strukturell statt als Gewicht. Die Kanal-Variante
+bleibt als Vergleichsschalter stehen, weil sie die einfachere Nullhypothese ist.
 
----
+> **Offene Frage 1 -- der y/z-Rand.** Dazu weiss ich weiterhin nichts, und es
+> sind **40 von 121 Pixeln** je Ebene. Vorschlag bis auf Widerruf: `replicate`
+> (nullgradient). Sitzt dort auch Kuehlung, ist es falsch.
+
+## 6. Der Wandterm ist keine Zutat, er ist die fehlende BC
+
+`grep -rin "convect|robin|htc|h_conv|wall.*flux"` ueber `PINNmodulusTwo/*.py`
+findet **nichts**. `heat_residual` ist reine Leitung plus Quelle, ohne Senke,
+und der einzige BC-Term sitzt an der Symmetrieebene. Der Waermeaustritt an der
+Gehaeusewand ist physikalisch voellig unbeschraenkt -- das Netz lernt ihn allein
+aus dem Datenterm.
+
+Genau das sieht der `energy_balance_report`: **0.5-0.9x, und es folgt dem
+Volumenstrom.** V_dot = 0 -> 0.9x (fast geschlossen, fast adiabat).
+V_dot = 0.0026 -> 0.5x, also die halbe Quellenergie verlaesst das System durch
+eine Wand, an der die PDE nichts stehen hat.
+
+Auf dem Gitter ist der Term hinschreibbar (§5, `ghost_hi`), und er setzt die
+Fluid-Treiber `fluid_inlet_temp` / `fluid_mass_flow` **dorthin, wo sie wirken**,
+statt sie als globale Skalare gleichverteilt einzustreuen. Das ist der einzige
+Punkt des Entwurfs, an dem der CNN nicht nur anders rechnet, sondern mehr
+Physik enthaelt als das bestehende Modell.
+
+> **Was das NICHT erklaert.** §11.5 sagt, V_dot = 0 sei der *schwierigere* Fall
+> (Mittel 5.374 C gegen 2.928 C bei V_dot > 0), und der schlechteste
+> ausgehaltene OP ist OP06 -- ohne Kuehlung. Waere der fehlende Wandterm die
+> Ursache der val-Fehler, muesste es andersherum sein. Es bleibt also bei O14:
+> Abdeckung, nicht Physik. Der Wandterm ist eine echte Luecke, aber ihm sind die
+> 6.270 C nicht anzuhaengen.
+
+> **Offene Frage 2 -- `h(V_dot)`.** Eine kleine gelernte Funktion, oder eine
+> Korrelation aus der Literatur? Gelernt ist ehrlicher (wir haben die Geometrie
+> des Kuehlkanals nicht), aber es ist ein weiterer freier Parameter bei elf
+> Trajektorien.
+
+> **Offene Frage 3 -- kuehlt nur die Gehaeusewand?** Falls das Fluid auch an
+> y/z-Flaechen anliegt, gehoert `q_conv` auch dorthin und Frage 1 wird zur
+> selben Frage.
 
 ## 7. Was von PINNmodulusTwo übernommen wird
 
