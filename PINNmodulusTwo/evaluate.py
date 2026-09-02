@@ -101,11 +101,18 @@ def main(argv=None) -> int:
     print(f"  delta_phys={cfg.get('delta_seconds')}s  delta_grid={cfg.get('delta_grid')}  "
           f"width={cfg.get('layer_size')} depth={cfg.get('num_layers')}  "
           f"subsample={run.get('subsample')}")
-    # The loss weights are NOT in the checkpoint. That is a real gap for a
-    # project whose open question is "w_phys 0 or 0.1": this file cannot tell
-    # you which of the two produced it. Say so rather than printing a None.
-    print("  loss weights: not recorded in the checkpoint -- "
-          "take them from the run's log")
+    # Checkpoints written before 02.09.2026 carry no "loss" section, so this
+    # file cannot say whether they came from w_phys 0 or 0.1 -- the question the
+    # project was open on. Say that outright rather than printing a None that
+    # reads like a measured zero.
+    loss = ckpt.get("loss")
+    if loss:
+        print(f"  w_data={loss.get('w_data')} w_phys={loss.get('w_phys')} "
+              f"w_bc={loss.get('w_bc')}  balance={loss.get('loss_balance')}"
+              f"/{loss.get('ema_decay')}  time_deriv={loss.get('time_deriv')}")
+    else:
+        print("  loss weights: NOT RECORDED (checkpoint written before 02.09.2026) "
+              "-- take them from the run's log")
     print(f"  synthetic_cache={run.get('synthetic_cache')}")
     print(f"  scoring {want} against the training normalisation of {trained_on}")
     print()

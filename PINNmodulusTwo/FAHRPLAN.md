@@ -3,17 +3,22 @@
 > ## ▶ Das Nächste: ist die val-Differenz Rauschen?
 >
 > **Achse 0 ist am 02.09. gelaufen. Die Kernfrage ist beantwortet, und die
-> Antwort war keine der beiden vorbereiteten** (§11.8):
+> Antwort hängt davon ab, wie gemittelt wird** (§11.8):
 >
-> | | val (OP06/OP09) | test T3 (OP13/15/16) |
-> |---|---|---|
-> | mit Physik (Schritt 6) | 4.928 C | **4.127 C** |
-> | ohne (`--w-phys 0 --w-bc 0`) | **4.433 C** | 5.147 C |
-> | | **−10 % ohne Physik** | **+24.7 % ohne Physik** |
+> | Aggregation | mit Physik | ohne | |
+> |---|---|---|---|
+> | **alle fünf ausgehaltenen OPs** — was §11.5 als Beleg zählt | **4.447 C** | 4.861 C | **Physik 8.5 % besser** |
+> | nur val (OP06/OP09) | 4.928 C | **4.433 C** | ohne 10 % besser |
+> | nur test T3 (OP13/15/16) | **4.127 C** | 5.147 C | Physik 24.7 % besser |
 >
-> Der Physik-Term **senkt die val-MAE nicht, er hebt sie** — und trägt zugleich
-> allein die Extrapolation. Klassisches Prior-Verhalten: er kostet
-> In-Sample-Genauigkeit und kauft Verallgemeinerung.
+> **Über alles Ausgehaltene gemittelt ist der Lauf MIT Physik der bessere.** Er
+> gewinnt zwar nur 2 von 5 OPs — aber mit großem Abstand (OP13 um 2.647 C),
+> während er die anderen drei knapp verliert (0.739 / 0.251 / 0.034 C). Dazu
+> schlägt er **16 von 16** Simulations-OPs die triviale Latte, der physikfreie
+> Lauf nur 15 von 16.
+>
+> **Dass die Antwort mit der Aggregation kippt, ist der Befund** — und genau das
+> ist O16.
 >
 > **Warum das noch kein Ergebnis ist:** die val-Differenz sind **0.74 C und
 > 0.25 C bei einem Seed**. Nach der eigenen Regel (§10, „Spanne zwischen
@@ -1200,14 +1205,50 @@ einer Variablen Unterschied.
 | OP01 / OP10 | train | 1.000 / 1.373 | 0.958 / **0.933** | −4 % / **−32 %** |
 | OP19 | Messung | 10.334 | 7.780 | −24.7 % |
 
-**Mittel val: 4.928 → 4.433 C (−10 %). Mittel test T3: 4.127 → 5.147 C (+24.7 %).**
+#### Die Aggregation entscheidet das Vorzeichen
 
-Damit ist die 5b-Aussage „der Physik-Term trägt" **bei Konvergenz widerlegt** —
-zum zweiten Mal fällt eine Aussage aus diesem Lauf, und beide Male war der Grund
-Untertrainiertheit. Die Richtung des Befunds ist aber nicht „der Term ist
-nutzlos", sondern **Prior-Verhalten wie im Lehrbuch**: er kostet
+| Aggregation | mit Physik | ohne | |
+|---|---|---|---|
+| **alle fünf ausgehaltenen OPs** | **4.447 C** | 4.861 C | **Physik 8.5 % besser** |
+| nur val (OP06/OP09) | 4.928 C | **4.433 C** | ohne 10 % besser |
+| nur test T3 (OP13/15/16) | **4.127 C** | 5.147 C | Physik 24.7 % besser |
+
+Dieselben zehn Zahlen, drei Mittelungen, zwei entgegengesetzte Antworten. **§11.5
+zählt die fünf ausgehaltenen OPs als den Beleg** — und über die gemittelt ist der
+Lauf **mit** Physik der bessere.
+
+Der Grund für den Widerspruch steht in der Verteilung, nicht im Mittel: der
+Physik-Lauf gewinnt nur **2 von 5** OPs, aber mit großem Abstand, und verliert
+die anderen drei knapp.
+
+| OP | mit Physik | ohne | Vorsprung für |
+|---|---|---|---|
+| OP13 | **4.097** | 6.744 | **Physik, 2.647 C** |
+| OP16 | **3.476** | 3.922 | **Physik, 0.446 C** |
+| OP06 | 6.270 | **5.531** | ohne, 0.739 C |
+| OP09 | 3.585 | **3.334** | ohne, 0.251 C |
+| OP15 | 4.809 | **4.775** | ohne, 0.034 C |
+
+Ein Mittel über zwei val-OPs kann einen Vorteil, der auf einem einzigen
+Extrapolations-OP mit 2.6 C liegt, nicht sehen — es enthält diesen OP nicht.
+**Das ist O16, und es ist kein Detail an der Auswertung, sondern der Befund
+selbst.**
+
+Dazu, was gar keine Mittelung braucht: **Schritt 6 schlägt auf 16 von 16
+Simulations-OPs die triviale Latte, der physikfreie Lauf auf 15 von 16** — OP05,
+ein **Trainings**-OP, verliert dort gegen `persistence` (9.181 gegen 7.973 C).
+
+Damit ist die 5b-Aussage nicht bestätigt, aber auch nicht so widerlegt, wie es
+nach den val-Zahlen allein aussieht. Was steht:
+
+* **„Der Physik-Term senkt die val-MAE"** — widerlegt bei Konvergenz.
+* **„Der Physik-Term ist das bessere Modell"** — von den vorhandenen Zahlen
+  eher gestützt als widerlegt: besser über alle Ausgehaltenen, deutlich besser
+  auf Extrapolation, stabiler, 16/16 statt 15/16.
+
+Die Richtung des Befunds ist **Prior-Verhalten wie im Lehrbuch**: er kostet
 In-Sample-Genauigkeit (OP10 ist ohne ihn 32 % besser) und kauft dafür
-Verallgemeinerung außerhalb des Umschlags (OP13 ist mit ihm 65 % besser).
+Verallgemeinerung außerhalb des Umschlags.
 
 #### Warum das noch kein Ergebnis ist — und die Gegenhypothese
 
@@ -1243,7 +1284,9 @@ val-MAE nicht abbildet.
    nicht die δ-Achse. Vorher ist nichts entschieden.
 2. **O16 neu:** das Auswahlkriterium kann den Physik-Term nicht bewerten, weil
    beide val-OPs im Umschlag liegen (`inside the trained range on every active
-   channel`). Ein Prior, der Extrapolation kauft, kann dort nur verlieren.
+   channel`). Ein Prior, der Extrapolation kauft, kann dort nur verlieren — und
+   dieselben Zahlen sagen über alle fünf Ausgehaltenen das Gegenteil. **Welche
+   Mittelung gilt, ist damit eine Entscheidung und keine Formsache.**
 3. **O15 ist unabhängig bestätigt.** Zweiter Lauf, `div_data` steht 4 878× über
    `L_data` und fällt mit exakt 0.9000/Epoche.
 
@@ -1948,10 +1991,11 @@ stellt.** Und der erste, bei dem die neuen Metriken mitgelaufen sind.
 
 | | |
 |---|---|
-| **Die Kernfrage ist beantwortet** | Der Physik-Term senkt die val-MAE **nicht** — ohne ihn ist val 10 % besser. Er trägt aber allein die Extrapolation: test T3 ist ohne ihn 24.7 % schlechter. §11.8 |
+| **Die Kernfrage ist beantwortet** | …und die Antwort kippt mit der Mittelung. Über **alle fünf ausgehaltenen OPs** ist der Lauf **mit** Physik 8.5 % besser (4.447 gegen 4.861 C) und schlägt 16 von 16 statt 15 von 16 gegen die triviale Latte. Nur über die zwei val-OPs gemittelt liegt er 10 % zurück. Dass beide Sätze aus denselben zehn Zahlen stammen, ist der eigentliche Befund. §11.8 |
 | **…aber es gibt keinen Benchmark** | Ein Seed je Seite. „Der Physik-Lauf hatte Pech" ist mit denselben Daten verträglich und durch nichts ausgeschlossen. Belastbar ist nur die OP13-Differenz (+65 %); die val-Differenz (0.74 / 0.25 C) ist genau die Größenordnung, in der die eigene Regel eine Rangfolge verbietet |
 | **O13 geschlossen** | Drift, nicht schwereres Regime. `late_bias_frac` Median 0.994. §11.9 |
-| **O16 neu** | Das Auswahlkriterium kann den Physik-Term nicht bewerten: beide val-OPs liegen im Umschlag, ein Prior kann dort nur verlieren |
+| **O16 neu** | Das Auswahlkriterium kann den Physik-Term nicht bewerten: beide val-OPs liegen im Umschlag, ein Prior kann dort nur verlieren. Der Vorteil liegt zu 2.6 C auf **einem** OP (OP13), den das val-Mittel nicht enthält |
+| **Checkpoint vollständig** | `save_checkpoint` schreibt jetzt `w_data`/`w_phys`/`w_bc`, `loss_balance`, `ema_decay`, `residual_norm`, `time_deriv`. Bis 02.09. konnte eine `model.pt` nicht sagen, aus welcher Konfiguration sie stammt — bei einer offenen Frage „0 oder 0.1" |
 | **O15 zweifach belegt** | Zweiter unabhängiger Lauf, `div_data` 4 878× zu hoch, Zerfall exakt 0.9000/Epoche |
 | **Achsen neu geordnet** | `w_phys` von Achse 3 auf **Achse 1**. δ dahinter — bei `w_phys = 0` speist δ nichts. `w_bc` abgewertet |
 
@@ -2115,14 +2159,19 @@ drei wären Umbauten gegen ein Problem gewesen, das es nicht gibt.
 | **3 Epochen** (5b) | 10.540 / 7.494 C | 11.591 / 8.504 C |
 | **60 Epochen** | 6.270 / 3.585 C | **5.531 / 3.334 C** ← 02.09. |
 
-**Nein — auf den val-OPs nicht.** Bei drei Epochen war die Physik ~10 % besser,
-bei Konvergenz ist sie ~10 % schlechter. Die 5b-Aussage war Untertrainiertheit,
-genau wie die 5b-Aussage über den `spread`.
+**Auf den val-OPs nein — über alles Ausgehaltene ja.**
 
-**Aber die Frage war zu eng gestellt.** Auf den Extrapolations-OPs dreht sich das
-Vorzeichen um: test T3 ist ohne Physik 24.7 % schlechter, OP13 sogar 65 %. Der
-Term kauft Verallgemeinerung und Stabilität und bezahlt mit In-Sample-Genauigkeit
-— und das Auswahlkriterium sieht nur die Rechnung, nicht den Gegenwert (O16).
+| Aggregation | mit Physik | ohne |
+|---|---|---|
+| alle fünf ausgehaltenen OPs | **4.447 C** | 4.861 C |
+| nur val | 4.928 C | **4.433 C** |
+| gegen die triviale Latte | **16 von 16** | 15 von 16 |
+
+Die Frage war also zu eng gestellt. Bei drei Epochen war die Physik auf val ~10 %
+besser, bei Konvergenz ~10 % schlechter — insofern war die 5b-Aussage
+Untertrainiertheit. Aber der Term kauft Verallgemeinerung (OP13 um 2.647 C) und
+Stabilität, und das val-Mittel enthält den OP nicht, auf dem der Gewinn liegt.
+**Das Auswahlkriterium sieht die Rechnung, nicht den Gegenwert — O16.**
 
 **Und über allem steht, dass es keinen Benchmark gibt.** Ein Seed je Seite.
 „Der Physik-Lauf hatte Pech" erklärt dieselben Zahlen genauso gut. Die nächste

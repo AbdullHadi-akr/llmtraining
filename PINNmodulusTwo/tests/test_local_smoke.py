@@ -978,8 +978,9 @@ def test_evaluate_scores_a_checkpoint_without_training(synthetic_cache, tmp_path
     assert eval_mod.main([str(path), "--device", "cpu"]) == 0
     out = capsys.readouterr().out
     assert "OP02" in out and "late_bias" in out
-    # and it must not pretend to know the weights, which the file does not carry
-    assert "loss weights: not recorded" in out
+    # and the configuration travels with the weights, so the printed numbers can
+    # be attributed to a configuration without a log file next to them
+    assert f"w_phys={float(args.w_phys)}" in out
 
 
 def test_evaluate_rebuilds_the_runs_own_normalisation(synthetic_cache, tmp_path):
@@ -1025,3 +1026,50 @@ def test_evaluate_scores_an_unlisted_op_without_crashing(synthetic_cache, tmp_pa
 
     assert eval_mod.main([str(path), "--ops", "OP02", "--device", "cpu"]) == 0
     assert "OP02" in capsys.readouterr().out
+
+
+def test_the_checkpoint_records_the_loss_weights(synthetic_cache, tmp_path):
+    """Which weights produced these numbers is part of the result.
+
+    Until 02.09.2026 the file recorded the architecture, the normalisation and
+    the OP list but not w_data/w_phys/w_bc, so model.pt could not say whether it
+    came from w_phys 0 or 0.1 -- while that was precisely the open question
+    (FAHRPLAN §11.8). A result whose configuration is only in a log file next to
+    it is a result that gets mislabelled the first time the log is lost.
+    """
+    args = _tiny_args(synthetic_cache, w_phys=0.25, w_bc=0.0)
+    model, bundle, _ops, dtn, hist = train_mod.fit(args)
+    path = tmp_path / "model.pt"
+    train_mod.save_checkpoint(model, bundle, args, dtn, hist, path)
+
+    import torch
+    loss = torch.load(path, weights_only=False)["loss"]
+    assert loss["w_phys"] == pytest.approx(0.25)
+    assert loss["w_bc"] == pytest.approx(0.0)
+    assert loss["loss_balance"] == args.loss_balance
+
+
+def test_evaluate_says_so_when_the_weights_are_missing(synthetic_cache, tmp_path,
+                                                       capsys):
+    """An old checkpoint must not read as w_phys = 0.
+
+    model_schritt6.pt predates the section, and a printed ``None`` next to
+    ``w_phys`` is one glance away from being read as a measured zero -- which
+    would invert the conclusion it is being used to check.
+    """
+    import evaluate as eval_mod
+    import torch
+
+    args = _tiny_args(synthetic_cache, val_ops=["OP02"])
+    model, bundle, _ops, dtn, hist = train_mod.fit(args)
+    path = tmp_path / "old.pt"
+    train_mod.save_checkpoint(model, bundle, args, dtn, hist, path)
+
+    ckpt = torch.load(path, weights_only=False)
+    del ckpt["loss"]                       # an August file
+    torch.save(ckpt, path)
+
+    assert eval_mod.main([str(path), "--device", "cpu"]) == 0
+    out = capsys.readouterr().out
+    assert "NOT RECORDED" in out
+    assert "w_phys=None" not in out

@@ -1194,6 +1194,19 @@ def save_checkpoint(model, bundle, args, dtn, history, path: Path) -> None:
                 "use_driver_history": bool(bundle.use_driver_history),
                 "train_frac": float(getattr(args, "train_frac", 0.8)),
             },
+            # The weights the run was trained under. Absent until 02.09.2026,
+            # which meant a checkpoint could not say whether it came from
+            # w_phys 0 or 0.1 -- the one question the project was open on. Old
+            # files simply lack the section; readers must treat it as optional.
+            "loss": {
+                "w_data": float(getattr(args, "w_data", 1.0)),
+                "w_phys": float(getattr(args, "w_phys", 0.0)),
+                "w_bc": float(getattr(args, "w_bc", 0.0)),
+                "loss_balance": str(getattr(args, "loss_balance", "ema")),
+                "ema_decay": float(getattr(args, "ema_decay", 0.9)),
+                "residual_norm": str(getattr(args, "residual_norm", "rms")),
+                "time_deriv": str(getattr(args, "time_deriv", "bdf2")),
+            },
             "run": {
                 "ops": list(args.ops),
                 "val_ops": list(getattr(args, "val_ops", []) or []),
