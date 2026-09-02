@@ -1,34 +1,33 @@
 # Fahrplan — OP01–OP16 trainiert, OP19 als Messvergleich
 
-> ## ▶ Das Nächste: trägt der Physik-Term überhaupt?
+> ## ▶ Das Nächste: ist die val-Differenz Rauschen?
 >
-> ```bash
-> cd /mnt/c/Users/M0245635/batterysurrogatemodell
-> git checkout main && git pull
-> source modulus_env/bin/activate
+> **Achse 0 ist am 02.09. gelaufen. Die Kernfrage ist beantwortet, und die
+> Antwort war keine der beiden vorbereiteten** (§11.8):
 >
-> python3 PINNmodulusTwo/train.py --epochs 60 --w-phys 0 --w-bc 0 2>&1 | tee 06b_ohne_physik.txt
-> ```
->
-> ~2 h auf CPU. **Das ist der Vergleichslauf zu Schritt 6**, mit genau einer
-> Variablen: Physik- und BC-Term aus.
->
-> **Warum das vor allem anderen kommt:** die Überschrift der letzten Sitzung
-> lautet „der Physik-Term trägt". Diese Aussage stammt aus **drei** Epochen
-> (Schritt 5b) — und **derselbe 5b-Lauf sagte auch, der `spread` kollabiere.
-> Das hat Schritt 6 widerlegt** (§11.3). Bei 60 Epochen ist nur der Lauf **mit**
-> Physik gemacht worden.
->
-> | Ergebnis von 06b | heißt | dann |
+> | | val (OP06/OP09) | test T3 (OP13/15/16) |
 > |---|---|---|
-> | val-MAE deutlich schlechter als 6.270 / 3.585 C (etwa 11 / 8 C wie in 5b) | **der Physik-Term trägt.** Bestätigt bei Konvergenz | weiter mit den Sweep-Achsen δ → `w_bc` → `w_phys` |
-> | val-MAE nahe 6.270 / 3.585 C | **er trägt nicht.** Die 5b-Differenz war Untertrainiertheit, wie schon beim `spread` | `w_phys` zurück auf 0 prüfen, Sweep-Achsen neu ordnen — O8 und O12 wären dann Nebensache |
+> | mit Physik (Schritt 6) | 4.928 C | **4.127 C** |
+> | ohne (`--w-phys 0 --w-bc 0`) | **4.433 C** | 5.147 C |
+> | | **−10 % ohne Physik** | **+24.7 % ohne Physik** |
 >
-> Zwei Stunden, die entscheiden, ob der halbe geplante Sweep überhaupt die
-> richtige Frage stellt. **Danach** `sweep.py` (Teil I).
+> Der Physik-Term **senkt die val-MAE nicht, er hebt sie** — und trägt zugleich
+> allein die Extrapolation. Klassisches Prior-Verhalten: er kostet
+> In-Sample-Genauigkeit und kauft Verallgemeinerung.
 >
-> Wie gut Schritt 6 wirklich war — in-sample gegen ausgehalten, und warum der
-> Volumenstrom die eigentliche Schwierigkeitsachse ist: **§11.5**.
+> **Warum das noch kein Ergebnis ist:** die val-Differenz sind **0.74 C und
+> 0.25 C bei einem Seed**. Nach der eigenen Regel (§10, „Spanne zwischen
+> Konfigurationen < Spanne zwischen Seeds → keine Rangfolge") ist das nicht
+> rangfähig. Die test-Differenz (+2.65 C auf OP13, 65 %) ist es fast sicher.
+>
+> **Also: `sweep.py`, und die erste Achse ist `w_phys ∈ {0, 0.1}` über drei
+> Seeds** — nicht δ. Ohne die Streuung steht das Hauptergebnis dieses Projekts
+> auf einem einzelnen Lauf, und genau daran ist 5b zweimal gescheitert.
+>
+> Zwei Dinge sind dabei mitgemessen worden und stehen fest:
+> **O13 ist beantwortet** (Drift, `bias_frac` Median 0.994 — §11.9) und
+> **O15 ist unabhängig bestätigt** (zweiter Lauf, `div_data` 4 878× zu hoch,
+> Zerfall exakt 0.9000/Epoche).
 ---
 
 **Diese Datei ist der Einstieg.** Alles andere ist Nachschlagewerk. Wenn du nur
@@ -91,23 +90,17 @@ Schritt 6 hat dafür gerade das Lehrstück geliefert: nach drei Epochen stand
 
 ## Die Achsen danach, in dieser Reihenfolge
 
+**Am 02.09. neu geordnet.** Achse 0 ist gelaufen, und ihr Ergebnis hat `w_phys`
+von hinten nach vorn geholt: die Frage „0 oder 0.1" ist nicht mehr eine
+Feinabstimmung am Schluss, sondern die offene Hauptfrage.
+
 | # | Achse | warum in dieser Reihenfolge |
 |---|---|---|
-| **0** | **`--w-phys 0 --w-bc 0` über 60 Epochen** — ein Lauf, kein Sweep | **Die Überschrift dieser Sitzung steht auf drei Epochen.** „Der Physik-Term trägt" kommt aus 5b, und derselbe 5b-Lauf sagte auch „der `spread` kollabiert" — das war falsch (§11.3). Bis das A/B bei 60 Epochen wiederholt ist, ist die Kernaussage ungeprüft. Zwei Stunden, und sie entscheidet, ob die Achsen 1–3 überhaupt die richtigen sind |
-| 1 | **δ (`--delta-phys`)**, O8 | sauber isoliert (speist im Hybrid-Modus nur `L_phys`), und der `[CFL WARN]` steht bei jedem Lauf: 1.0 s gegen Δt_max 0.24 s. **Drei Punkte: 1.0 (Default), 0.4, 0.2.** 0.2 ist das Datengitter und zugleich der Boden — darunter interpoliert `history_at` nur noch linear zwischen zwei Gitterzeilen, die Ableitung wird davon nicht genauer. **Der einzige bekannt falsche Parameter** |
-| 2 | **`w_bc`**, ehemals O12 | **02.09.: die ursprüngliche Begründung ist weggefallen** — `ratio_bc` zeigt über 30 Epochen keinen Abfall (Median 0.0581, die 0.0178 waren eine Epoche), und `--batch-bc 121` rechnet dieselbe Zeile wie 128. Die Achse bleibt als bewusste Gegenprobe stehen, nicht mehr als Verdacht. Kann gestrichen werden, wenn Rechenzeit knapp wird. §11.6 |
-| 3 | **`w_phys`**, O6 | erst wenn 1 und 2 stehen — sonst misst man δ mit dem Gewicht. **Und erst nach O15:** solange die Divisoren eingefroren sind, misst ein `w_phys`-Sweep den Anker des ersten Optimiererschritts mit |
+| **1** | **`w_phys ∈ {0, 0.1}` über ≥3 Seeds**, O6/O16 | **Die Hauptfrage.** Achse 0 sagt: ohne Physik ist val 10 % besser und test T3 24.7 % schlechter. Beides ruht auf **einem** Seed je Seite, und die val-Differenz ist mit 0.74 / 0.25 C klein genug, dass sie Seed-Rauschen sein kann. Ohne diese Streuung ist keine der beiden Aussagen rangfähig — und alles Weitere hängt daran, ob der Physik-Term überhaupt drinbleibt |
+| 2 | **δ (`--delta-phys`)**, O8 | erst wenn 1 steht: bei `w_phys = 0` speist δ nichts und die Achse ist gegenstandslos. Drei Punkte 1.0 / 0.4 / 0.2; 0.2 ist das Datengitter und zugleich der Boden. Dazu `--delta-grid`, das der Lauf selbst als unterhalb des Datenschritts meldet |
+| 3 | **`w_bc`** | **stark abgewertet.** O12 ist widerlegt (kein Abfall, Median `ratio_bc` 0.0581), `--batch-bc 121` rechnet dieselbe Zeile wie 128. Bleibt als Gegenprobe, fällt als Erstes weg, wenn Rechenzeit knapp wird |
 
-> **Achse 0 braucht `sweep.py` nicht** und kann sofort laufen:
->
-> ```bash
-> python3 PINNmodulusTwo/train.py --epochs 60 --w-phys 0 --w-bc 0 2>&1 | tee 06b_ohne_physik.txt
-> ```
->
-> Kommt dort eine val-MAE nahe 6.270 / 3.585 C heraus, war der Physik-Term nie
-> der Grund — und O8, O12 und der halbe Sweep zielen daneben. Kommt sie bei
-> ~11.6 / 8.5 C heraus wie in 5b, ist die Aussage bestätigt und der Rest steht
-> auf festem Grund.
+> **Achse 0 ist erledigt** (02.09., §11.8). Sie steht als Schritt 7 in Teil III.
 
 ## Was am 02.09. dazugekommen ist
 
@@ -143,7 +136,7 @@ Seeds → keine Rangfolge · **kein Befund aus der letzten Epoche** (neu 02.09.,
 > einer Nachricht nach Wochen noch stimmt. Offene stehen hier, geschlossene in
 > Teil III unter „Geschlossene Punkte".
 
-### Index: alle Punkte, O1 bis O15
+### Index: alle Punkte, O1 bis O16
 
 | # | worum es geht | Zustand |
 |---|---|---|
@@ -159,24 +152,25 @@ Seeds → keine Rangfolge · **kein Befund aus der letzten Epoche** (neu 02.09.,
 | **O10** | **OP14s 0 °C sind geplant — nicht „reparieren"** | **stehende Warnung** |
 | **O11** | **OP19 wird schlechter, je besser das Modell wird** | **dauerhafte Envelope-Grenze** (Datensatz ist fix) |
 | O12 | BC-Term trägt fast nichts (`ratio` 0.0178) | ✅ **widerlegt** — 0.0178 war eine Epoche, Median 0.0581 |
-| **O13** | **Fehler wächst zum Trajektorienende** | **offen** — und **kein** Verallgemeinerungsproblem |
+| O13 | Fehler wächst zum Trajektorienende | ✅ **beantwortet 02.09.** — Drift, nicht schwereres Regime |
 | **O14** | **Volumenstrom ist die Schwierigkeitsachse** | **dauerhafte Envelope-Grenze** (Datensatz ist fix) |
-| **O15** | **NEU: das Loss-Balancing greift nach 60 Epochen nicht** | **offen** — blockiert O6 |
+| **O15** | **das Loss-Balancing greift nach 60 Epochen nicht** | **offen** — blockiert O6, zweifach belegt |
+| **O16** | **NEU: das Auswahlkriterium kann den Physik-Term nicht bewerten** | **offen** — beide val-OPs liegen im Umschlag |
 
 Die offenen im Detail, nach Dringlichkeit:
 
 | # | offen | wer / wann |
 |---|---|---|
-| **O15** | **NEU 02.09. Das Loss-Balancing hat nach 60 Epochen noch nicht eingesetzt.** Alle drei Divisoren fallen mit exakt 0.9000/Epoche — reiner geometrischer Zerfall, der aktuelle Loss trägt 0.009 % bei. `div_data/div_phys` ist damit über den ganzen Lauf **konstant**, das Balancing wirkt wie `fixed` mit Divisoren, die der erste Optimiererschritt gesetzt hat. Gemessen: `ratio_phys` = 0.586, wo `w_phys = 0.1` nominell 0.1 verspricht. Seit 02.09. als `xfail`-Test festgehalten und von `analyse_history.py` bei jedem Lauf gemeldet. §11.6 | **blockiert O6** |
-| **O8** | Der BDF-Stencil nutzt δ = 1.0 s gegen Δt_max ≈ 0.24 s (`[CFL WARN]` bei jedem Lauf). **02.09. entschieden: wird gemessen, drei Punkte 1.0 / 0.4 / 0.2.** Nicht einfach richtiggestellt, weil es ein Zielkonflikt ist und kein Einheitenfehler — der Zähler `3T − 4T₋₁ + T₋₂` schrumpft mit δ, der Eigenfehler des Rollouts nicht. δ = 0.2 ist zugleich der Boden: darunter liest `history_at` nur noch die Gerade zwischen zwei Gitterpunkten. §11.2 | **Sweep-Achse 1** |
-| **O13** | **Der Fehler sitzt am Ende der Trajektorie.** OP06: MAE 6.270 C, aber `late(held out)` = **13.248 C** — doppelt. Gleiches Muster auf OP03 (3.341 / 7.371) und OP16 (3.476 / 6.959). **02.09.: OP03 ist ein Trainings-OP und `--holdout-tail` ist aus — das Modell hat diese späten Zeitschritte mit Beschriftung gesehen und verdoppelt dort trotzdem seinen Fehler. O13 ist also kein Verallgemeinerungsproblem, sondern mechanisch.** §11.7 | **Messung gebaut 02.09.**, läuft beim nächsten Lauf mit |
-| **O6** | Kein Gewicht auf Basis von Messungen gesetzt. **02.09.: der Grund hat sich geändert.** Die fünf Gründe aus §10a (CFL-Verletzung, degenerierter Anker, saturierter Rollout, nie arbeitende Loss-Balance, 121er-Quelle) sind alle behoben — O6 ist nicht mehr „bewusst offen", sondern **erstmals messbar**. Nur nicht jetzt: solange O15 gilt, misst ein `w_phys`-Sweep den eingefrorenen Divisor mit | **nach O15** |
-| **O5** | **Tote Eingangskanäle — 02.09. umgewidmet.** `soc_start` ist über alle OPs konstant 10 % (`DEAD -> forced to 0`), die Rate-Kanäle von `c_rate` und `fluid_mass_flow` sind im Training tot, auf OP15/OP16/OP19 aber lebendig. **Das ist kein MAE-Hebel:** eine Spalte ohne Varianz kann nichts erklären, und die SOC-Wirkung steckt über `q_dot` ohnehin schon im Modell. Der Punkt ist eine **Envelope-Grenze** und damit Vorbedingung für O11, nicht eine Code-Änderung. Kein Kanal wird gestrichen. §10a | dokumentiert, nichts zu tun |
-| **O14** | **Volumenstrom ist die Schwierigkeitsachse, nicht der Tier.** V̇=0 im Mittel 5.374 C gegen 2.928 C mit Kühlung; alle drei No-Flow-OPs unter den letzten vier. Nur 2 von 11 Trainings-OPs haben V̇=0 (OP07 bei T0 = 10 °C, OP14 bei 0 °C), OP06 fährt 25 °C — das Regime „keine Kühlung bei mittlerer Starttemperatur" kommt im Training nicht vor. **02.09.: der Datensatz ist fix, es kommen keine OPs dazu.** Damit ist O14 keine Aufgabe mehr, sondern eine **dauerhafte Grenze**: nach V̇ getrennt berichten, nie als Modellfehler lesen. §11.5 | dauerhaft, nur berichten |
-| **O11** | **OP19 wird schlechter, je besser das Modell wird.** 10.334 C sind 88 % schlechter als die 5.507 C nach drei Epochen, während jeder Simulations-OP sich verbessert hat. 16.7 σ unter dem trainierten `c_rate` (OP19 ist ein Fahrzyklus, OP01–OP16 sind ausnahmslos Ladungen), `soc_start` 77 % gegen 10 % über einen toten Kanal (O5). **02.09.: da der Datensatz fix ist und OP17/OP18 nie simuliert wurden, ist der Envelope nicht erweiterbar.** Jede Code-Änderung, die OP19 besser aussehen ließe, wäre eine Anpassung an die eine vorhandene Messung — wovor `op_registry.py:185` ausdrücklich warnt. §11.4 | dauerhaft, nie Auswahlkriterium |
+| **O16** | **NEU 02.09. Das Auswahlkriterium kann den Physik-Term nicht bewerten.** Nach §10 wird auf dem Mittel über `--val-ops` ausgewählt. Beide val-OPs liegen aber **innerhalb** des trainierten Umschlags — der Coverage-Report sagt zu OP06 und OP09 wörtlich *„inside the trained range on every active channel"*. Ein Prior, der Extrapolation kauft und In-Sample-Genauigkeit kostet, kann dort nur verlieren. Genau das ist am 02.09. eingetreten: val −10 % **ohne** Physik, test T3 +24.7 % **ohne** Physik. Die Regel würde also `w_phys = 0` wählen und dabei das kaufen, was sie nicht misst. §11.8 | **erst nach der Seed-Streuung entscheiden** |
+| **O15** | **Das Loss-Balancing hat nach 60 Epochen nicht eingesetzt.** Alle Divisoren fallen mit exakt 0.9000/Epoche — reiner geometrischer Zerfall, der aktuelle Loss trägt 0.009 % bei. `div_data/div_phys` ist über den ganzen Lauf konstant, das Balancing wirkt wie `fixed` mit Divisoren aus dem ersten Optimiererschritt. **Am 02.09. im zweiten, unabhängigen Lauf bestätigt** (`div_data` 4 878× über `L_data`). Als `xfail`-Test festgehalten, von `analyse_history.py` bei jedem Lauf gemeldet. §11.6 | **blockiert O6** |
+| **O8** | Der BDF-Stencil nutzt δ = 1.0 s gegen Δt_max ≈ 0.24 s (`[CFL WARN]` bei jedem Lauf). Entschieden: wird gemessen, drei Punkte 1.0 / 0.4 / 0.2. Nicht richtiggestellt, weil es ein Zielkonflikt ist — der Zähler `3T − 4T₋₁ + T₋₂` schrumpft mit δ, der Eigenfehler des Rollouts nicht. δ = 0.2 ist zugleich der Boden. **02.09. dazu:** der Lauf meldet außerdem `[WARN] --delta-grid 0.2s is below the data step 0.2s` — der Anker läuft effektiv auf 0.2 s. Eigener Knopf, gehört in dieselbe Achse. §11.2 | **Sweep-Achse 2**, nach `w_phys` |
+| **O6** | Kein Gewicht auf Basis von Messungen gesetzt. Die fünf Gründe aus §10a sind alle behoben, O6 ist **erstmals messbar** — aber erst nach O15: solange die Divisoren eingefroren sind, misst ein `w_phys`-Sweep den Anker des ersten Schritts mit. **02.09.: durch Achse 0 ist `w_phys` von Achse 3 auf Achse 1 gerückt** — die Frage „0 oder 0.1" ist jetzt die offene Hauptfrage des Projekts, nicht mehr eine Feinabstimmung | **Sweep-Achse 1** |
+| **O5** | **Tote Eingangskanäle — Envelope-Grenze, kein MAE-Hebel.** `soc_start` ist über alle OPs konstant 10 % (`DEAD -> forced to 0`), die Rate-Kanäle von `c_rate` und `fluid_mass_flow` sind im Training tot, auf OP15/OP16/OP19 aber lebendig. Eine Spalte ohne Varianz kann nichts erklären, und die SOC-Wirkung steckt über `q_dot` ohnehin im Modell. Vorbedingung für O11, keine Code-Änderung. Kein Kanal wird gestrichen. §10a | dokumentiert, nichts zu tun |
+| **O14** | **Volumenstrom ist die Schwierigkeitsachse, nicht der Tier.** V̇=0 im Mittel 5.374 C gegen 2.928 C mit Kühlung. Nur 2 von 11 Trainings-OPs haben V̇=0 (OP07 bei T0 = 10 °C, OP14 bei 0 °C), OP06 fährt 25 °C — das Regime „keine Kühlung bei mittlerer Starttemperatur" kommt im Training nicht vor. Der Datensatz ist fix, es kommen keine OPs dazu. **Dauerhafte Grenze**: nach V̇ getrennt berichten, nie als Modellfehler lesen. §11.5 | dauerhaft, nur berichten |
+| **O11** | **OP19 wird schlechter, je besser das Modell wird.** 16.7 σ unter dem trainierten `c_rate` (OP19 ist ein Fahrzyklus, OP01–OP16 sind ausnahmslos Ladungen), `soc_start` 77 % gegen 10 % über einen toten Kanal (O5). Der Datensatz ist fix, OP17/OP18 sind nie simuliert worden — der Envelope ist nicht erweiterbar. **02.09.: OP19 verliert in beiden Konfigurationen gegen `persistence`** (1.376 C), mit Physik um Faktor 7.5, ohne um 5.7. Die Zahl misst den Umschlag, nicht das Modell. §11.4 | dauerhaft, nie Auswahlkriterium |
 | **O10** | **Warnung, kein Punkt.** OP14 startet über alle Punkte bei 0 °C. Das sieht nach Füllwert aus, ist aber die geplante Anfangsbedingung (`op_registry.py:123`: T0 = 0 °C, „coldest start in the set"). **Nicht maskieren, nicht ersetzen, OP14 nicht entfernen** — es ist einer von nur zwei OPs mit V̇ = 0, und die binden die Energiebilanz | nichts tun |
 
-**Geschlossen am 01.09.:** O1, O2, O3, O4, O7, O9. **Am 02.09.:** O12. Siehe Teil III.
+**Geschlossen am 01.09.:** O1, O2, O3, O4, O7, O9. **Am 02.09.:** O12, O13. Siehe Teil III.
 
 ---
 
@@ -651,6 +645,8 @@ Archiv: abgehakte Schritte, gemessene Zahlen, geschlossene Befunde.
 | **§11.5** | die Einordnung: in-sample gegen ausgehalten, V̇ als Schwierigkeitsachse — O14 |
 | **§11.6** | die volle Auswertung der `history.csv` — O12 widerlegt, **O15 neu** |
 | **§11.7** | warum O13 mechanisch ist und nicht eine Frage der Verallgemeinerung |
+| **§11.8** | **Achse 0: das Hauptergebnis** — und die Gegenhypothese, dass der Physik-Lauf Pech hatte |
+| **§11.9** | **O13 beantwortet**: Drift, `bias_frac` Median 0.994 |
 
 ## Geschlossene Punkte
 
@@ -662,6 +658,7 @@ Archiv: abgehakte Schritte, gemessene Zahlen, geschlossene Befunde.
 | **O4** | OP12: Profil endet bei 1440 s, Trajektorie bis 1605 s | Kein Knick in `dT/dt` an der Nahtstelle → der Solver hat den letzten Wert gehalten, `np.interp` tut dasselbe. Keine Rückfrage nötig. §9a.2, Q1 | 01.09. |
 | **O7** | Energiebilanz ging um ~147x nicht auf | Codefehler: `jr1_w` wurde zusätzlich durch die 121 JR1-Gitterpunkte geteilt. Behoben, mit Tests, und auf echten Daten bestätigt. §11.1 | 01.09. |
 | **O9** | dämpft der Physik-Term nur, statt Dynamik zu lernen? | **Widerlegt.** `spread_time` steigt von 0.201 (Ep 3) auf 0.968 (Ep 60), während die MAE weiter fällt. Am 02.09. gegen die volle `history.csv` gehalten: Median über Ep31–60 = 0.922 bei Std 0.119 — die Aussage steht auf dreißig Epochen, nicht auf einer. §11.3, §11.6 | 01.09. |
+| **O13** | Der Fehler wächst zum Trajektorienende (OP06 6.270 C im Mittel, 13.248 C spät) | **Beantwortet: es ist Drift.** `late_bias_frac` Median **0.994** über 17 OPs, 12 davon ≥ 0.95, und die Drittel wachsen monoton im selben Vorzeichen. Das ist der Level-Integrator (Mechanismus 1), nicht ein schwereres Endregime. Das Modell wird spät systematisch zu kalt. Was daraus folgt — der Hebel liegt am Anker, nicht an den Gewichten — ist ein neuer Punkt, sobald die Seed-Frage steht. §11.9 | 02.09. |
 | **O12** | BC-Term trägt fast nichts (`ratio bc` = 0.0178) | **Widerlegt, beide Hälften.** (a) Die 0.0178 sind der Wert **einer** Epoche einer Reihe mit 59 % relativer Streuung; Median Ep31–60 = 0.0581, Ep21–40 → Ep41–60 = 0.0540 → 0.0582, also kein Abfall. Der Term liegt bei 58 % seines nominellen `w_bc/w_data = 0.1` — unauffällig. (b) `--batch-bc 121` ändert nichts: `boundary_condition_loss` zieht `min(121, batch_bc)`, und `min(121,128) == min(121,121)`. §11.6 | 02.09. |
 
 ## Der Weg dahin (alles erledigt)
@@ -1161,6 +1158,112 @@ Zwei Befunde, die aus den Zahlen von Schritt 4/5 folgen und beide den
 blind repariert. Am 01.09. hat sich der erste (11.1) als **Codefehler mit
 eindeutiger Ursache** herausgestellt und ist behoben; der zweite (11.2) bleibt
 eine Achse, die gemessen und nicht geraten wird.
+
+> **Neueste zuerst:** §11.8 (Achse 0, das Hauptergebnis) und §11.9 (O13
+> beantwortet) sind vom 02.09. und stehen deshalb vor den älteren Abschnitten.
+
+### 11.8 Achse 0 — der Physik-Term senkt die val-MAE nicht (02.09.)
+
+`train.py --epochs 60 --w-phys 0 --w-bc 0`, ~2 h CPU, gegen Schritt 6 mit genau
+einer Variablen Unterschied.
+
+| OP | Rolle | mit Physik | ohne | Diff |
+|---|---|---|---|---|
+| **OP06** | **val** | 6.270 | **5.531** | **−11.8 %** |
+| **OP09** | **val** | 3.585 | **3.334** | **−7.0 %** |
+| OP13 | test T3 | **4.097** | 6.744 | **+64.6 %** |
+| OP15 | test T3 | 4.809 | 4.775 | −0.7 % |
+| OP16 | test T3 | **3.476** | 3.922 | **+12.8 %** |
+| OP01 / OP10 | train | 1.000 / 1.373 | 0.958 / **0.933** | −4 % / **−32 %** |
+| OP19 | Messung | 10.334 | 7.780 | −24.7 % |
+
+**Mittel val: 4.928 → 4.433 C (−10 %). Mittel test T3: 4.127 → 5.147 C (+24.7 %).**
+
+Damit ist die 5b-Aussage „der Physik-Term trägt" **bei Konvergenz widerlegt** —
+zum zweiten Mal fällt eine Aussage aus diesem Lauf, und beide Male war der Grund
+Untertrainiertheit. Die Richtung des Befunds ist aber nicht „der Term ist
+nutzlos", sondern **Prior-Verhalten wie im Lehrbuch**: er kostet
+In-Sample-Genauigkeit (OP10 ist ohne ihn 32 % besser) und kauft dafür
+Verallgemeinerung außerhalb des Umschlags (OP13 ist mit ihm 65 % besser).
+
+#### Warum das noch kein Ergebnis ist — und die Gegenhypothese
+
+**Es gibt keinen Benchmark. Ein Seed auf jeder Seite, keine Streuung.** Damit
+steht neben „der Physik-Term senkt die val-MAE nicht" eine gleichwertige, mit
+denselben Daten verträgliche Erklärung: **der Physik-Lauf hatte Pech.** Nichts in
+den vorliegenden Zahlen trennt die beiden. Genau diese Lücke hat 5b zweimal
+zu Fall gebracht, und sie ist hier nicht kleiner geworden, nur später
+aufgetreten.
+
+Was sich sagen lässt, nach Belastbarkeit sortiert:
+
+| Befund | Größe | belastbar? |
+|---|---|---|
+| OP13 mit Physik besser | +2.65 C (65 %) | **wahrscheinlich ja** — zu groß für Seed-Rauschen bei den bisher gesehenen Schwankungen |
+| val ohne Physik besser | 0.74 C / 0.25 C | **nein** — genau die Größenordnung, in der die eigene Regel eine Rangfolge verbietet |
+| OP19 ohne Physik besser | 2.55 C | **irrelevant** — OP19 verliert in beiden Fällen gegen `persistence` (1.376 C) |
+
+**Der physikfreie Lauf war zudem der instabilere**, was gegen ein reines
+Glückslos spricht, den Vergleich aber nicht rettet:
+
+* `[SATURATED]` bis Epoche **50** (in Schritt 6 ab Epoche 26 verschwunden),
+* ein `L_data`-Ausschlag auf **314** in Epoche 6 (Nachbarn ~0.2),
+* und **OP05, ein Trainings-OP, verliert gegen `persistence`** (9.181 gegen
+  7.973 C). In Schritt 6 hat kein einziger OP verloren.
+
+Der Physik-Term kauft also erkennbar auch Stabilität — ein Effekt, den die
+val-MAE nicht abbildet.
+
+#### Was daraus folgt
+
+1. **`sweep.py` mit `w_phys ∈ {0, 0.1}` über ≥3 Seeds ist der nächste Schritt**,
+   nicht die δ-Achse. Vorher ist nichts entschieden.
+2. **O16 neu:** das Auswahlkriterium kann den Physik-Term nicht bewerten, weil
+   beide val-OPs im Umschlag liegen (`inside the trained range on every active
+   channel`). Ein Prior, der Extrapolation kauft, kann dort nur verlieren.
+3. **O15 ist unabhängig bestätigt.** Zweiter Lauf, `div_data` steht 4 878× über
+   `L_data` und fällt mit exakt 0.9000/Epoche.
+
+---
+
+### 11.9 O13 beantwortet: es ist Drift, nicht ein schwereres Regime (02.09.)
+
+Die am 02.09. eingebauten signierten Metriken (§11.7) haben bei ihrem ersten
+Lauf entschieden, wofür sie gebaut wurden.
+
+`late_bias_frac` über alle 17 OPs: **Median 0.994**, bei **12 von 17** ≥ 0.95.
+Der späte Fehler ist also fast vollständig **gerichtet** — er hat ein Vorzeichen,
+er ist keine Streuung. Und die Drittel wachsen monoton im selben Vorzeichen:
+
+```
+OP06  bias/3 = -0.87 / -3.51 / -10.84     late_bias = -12.822  (100 % von late)
+OP03  bias/3 = -1.44 / -4.95 / -13.32     late_bias = -13.857  (100 %)
+OP05  bias/3 = -4.70 / -9.85 / -12.99     late_bias = -13.209  (100 %)
+```
+
+Gleiches Vorzeichen, wachsender Betrag über die Zeit — **das ist die Signatur
+eines Integrators und nichts sonst.** Ein schwereres Endregime (Mechanismus 2
+oder 3 aus §11.7) hätte wechselnde Vorzeichen ergeben. **Mechanismus 1
+bestätigt: der Level-Anker sammelt eine kleine systematische Schieflage über
+~7000 Rollout-Schritte auf**, und das Modell wird zum Trajektorienende
+systematisch **zu kalt**.
+
+Drei OPs zeigen echte Streuung statt Drift: OP10 (0.474), OP14 (0.414) und OP13
+(0.483). Die ersten beiden haben zugleich die kleinsten späten Fehler.
+
+**Einschränkung:** diese Zahlen kommen aus dem **physikfreien** Lauf — die
+Metrik ist jünger als Schritt 6. Ob das Modell *mit* Physik genauso driftet,
+sagt ein `evaluate.py` auf `model_schritt6.pt` in Minuten. Der Befund „der späte
+Fehler ist gerichtet" ist davon unabhängig, die Frage „hilft der Physik-Term
+dagegen" nicht.
+
+**Was daraus folgt, ist ein neuer Punkt und kein alter:** wenn der späte Fehler
+Drift ist, liegt der Hebel am **Anker** (`level`, `delta_grid`, die
+`--rate-lags`) und nicht an den Loss-Gewichten. Das ist zu formulieren, sobald
+die Seed-Frage steht — vorher weiß niemand, welche Konfiguration überhaupt
+gemeint ist.
+
+---
 
 ### 11.1 Die Energiebilanz ging um Faktor ~147 nicht auf — GEFUNDEN, 01.09.
 
@@ -1815,6 +1918,31 @@ nicht schadet — das wäre der schlechtere Tausch.
 
 ---
 
+## 0c. Achse 0 gelaufen — 02.09., abends
+
+**Der erste Lauf dieses Projekts, der eine Konfiguration gegen eine andere
+stellt.** Und der erste, bei dem die neuen Metriken mitgelaufen sind.
+
+| | |
+|---|---|
+| **Die Kernfrage ist beantwortet** | Der Physik-Term senkt die val-MAE **nicht** — ohne ihn ist val 10 % besser. Er trägt aber allein die Extrapolation: test T3 ist ohne ihn 24.7 % schlechter. §11.8 |
+| **…aber es gibt keinen Benchmark** | Ein Seed je Seite. „Der Physik-Lauf hatte Pech" ist mit denselben Daten verträglich und durch nichts ausgeschlossen. Belastbar ist nur die OP13-Differenz (+65 %); die val-Differenz (0.74 / 0.25 C) ist genau die Größenordnung, in der die eigene Regel eine Rangfolge verbietet |
+| **O13 geschlossen** | Drift, nicht schwereres Regime. `late_bias_frac` Median 0.994. §11.9 |
+| **O16 neu** | Das Auswahlkriterium kann den Physik-Term nicht bewerten: beide val-OPs liegen im Umschlag, ein Prior kann dort nur verlieren |
+| **O15 zweifach belegt** | Zweiter unabhängiger Lauf, `div_data` 4 878× zu hoch, Zerfall exakt 0.9000/Epoche |
+| **Achsen neu geordnet** | `w_phys` von Achse 3 auf **Achse 1**. δ dahinter — bei `w_phys = 0` speist δ nichts. `w_bc` abgewertet |
+
+### Die Lehre, und sie ist wieder dieselbe
+
+Zum dritten Mal in Folge hätte eine Zahl ohne Streuung daneben eine Entscheidung
+getragen. Beim `spread` (5b, drei Epochen) ging es schief, bei O12 (eine Epoche)
+ging es schief, und hier wäre es beinahe wieder passiert — der Unterschied ist
+nur, dass die Lücke diesmal **vor** der Entscheidung benannt wurde.
+
+**Deshalb ist `sweep.py` jetzt der nächste Schritt und nicht die nächste Achse.**
+
+---
+
 ## 0b. Was sich am 02.09. geändert hat
 
 **Kein Lauf, keine Code-Änderung.** Diese Sitzung hat die offenen Punkte
@@ -1955,23 +2083,28 @@ drei wären Umbauten gegen ein Problem gewesen, das es nicht gibt.
 
 **Geschlossen am 01.09.:** O1, O2, O3, O4, O7, **O9**. Schritte 4, 5, 5b, 6.
 
-## Die offene Kernfrage, im Klartext
+## Die Kernfrage — am 02.09. beantwortet
 
-**Trägt der Physik-Term, senkt er also die MAE — oder nicht?**
-
-Gemessen ist bisher nur dies:
+**Trägt der Physik-Term, senkt er also die MAE?**
 
 | | mit Physik | ohne (`--w-phys 0 --w-bc 0`) |
 |---|---|---|
 | **3 Epochen** (5b) | 10.540 / 7.494 C | 11.591 / 8.504 C |
-| **60 Epochen** (Schritt 6) | **6.270 / 3.585 C** | **nie gelaufen** |
+| **60 Epochen** | 6.270 / 3.585 C | **5.531 / 3.334 C** ← 02.09. |
 
-Bei drei Epochen war die Physik ~10 % besser. Aber derselbe Lauf sagte auch, der
-`spread` kollabiere — und Schritt 6 hat das widerlegt (§11.3). Eine Aussage aus
-diesem Lauf ist gefallen; die andere ist ungeprüft.
+**Nein — auf den val-OPs nicht.** Bei drei Epochen war die Physik ~10 % besser,
+bei Konvergenz ist sie ~10 % schlechter. Die 5b-Aussage war Untertrainiertheit,
+genau wie die 5b-Aussage über den `spread`.
 
-**Die Antwort braucht genau einen Lauf**, und er steht ganz oben in dieser Datei.
-Bis er gelaufen ist, gilt: *bei drei Epochen ja, bei Konvergenz unbekannt.*
+**Aber die Frage war zu eng gestellt.** Auf den Extrapolations-OPs dreht sich das
+Vorzeichen um: test T3 ist ohne Physik 24.7 % schlechter, OP13 sogar 65 %. Der
+Term kauft Verallgemeinerung und Stabilität und bezahlt mit In-Sample-Genauigkeit
+— und das Auswahlkriterium sieht nur die Rechnung, nicht den Gegenwert (O16).
+
+**Und über allem steht, dass es keinen Benchmark gibt.** Ein Seed je Seite.
+„Der Physik-Lauf hatte Pech" erklärt dieselben Zahlen genauso gut. Die nächste
+Zahl, die dieses Projekt braucht, ist keine neue Konfiguration, sondern die
+**Streuung über Seeds** — §11.8.
 
 ## Was der Code an diesem Tag gelernt hat
 
