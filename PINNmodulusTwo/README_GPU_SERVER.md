@@ -451,9 +451,18 @@ python3 PINNmodulusTwo/sweep.py --seeds 0 1 2 \
 ```
 
 Jeder Punkt ist ein eigener `train.py`-Prozess mit eigenem `--artifacts-dir`.
-Prozesse teilen weder RNG noch Allokator noch Optimiererzustand, **ein Lauf im
-Sweep ist also bit-identisch mit demselben Lauf allein** — genau der Grund,
-warum es Prozesse sind und nicht eine Schleife über `train.fit()`.
+Prozesse teilen weder RNG noch Allokator noch Optimiererzustand — genau der
+Grund, warum es Prozesse sind und nicht eine Schleife über `train.fit()`.
+
+> **Eine Einschränkung, gemessen statt vermutet.** `sweep.py` setzt seinen
+> Kindern `OMP_NUM_THREADS=1`, und **die Thread-Zahl verschiebt die letzten
+> Stellen**: mehrfädige CPU-Reduktionen legen ihre Summationsreihenfolge nicht
+> fest. Auf der synthetischen Fixture geprüft — mit `OMP_NUM_THREADS=1` auf
+> beiden Seiten stimmten alle 25 Gewichtstensoren und alle Vorhersage-Arrays
+> bitweise überein; gegen einen Lauf mit der Voreinstellung wich es ab der
+> 8. Stelle ab. **Innerhalb eines Sweeps ist das folgenlos** — alle Punkte
+> bekommen dieselbe Umgebung, und nur ihr Vergleich untereinander zählt. Wer
+> gegen eine von Hand erzeugte Zahl vergleichen will, setzt `--threads` passend.
 
 Die Grenze ist die **CPU, nicht der Speicher**: jeder Lauf ist eine
 Python-Schleife, die Millionen Kernel-Starts absetzt, und will einen Kern für

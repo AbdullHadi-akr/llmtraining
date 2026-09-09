@@ -33,10 +33,20 @@ which is the one thing a sweep must hold still.
 What DOES fill the card is more independent work resident at once, and a sweep is
 made of nothing else: the points and the seeds are separate experiments that must
 not influence each other. Running them as separate processes gives that for free
-and gives it EXACTLY -- no shared RNG, no shared allocator, no shared optimiser
-state, so every run's numbers are bit-identical to running it alone. That
-property is the whole reason this is subprocesses and not one process looping
-over ``train.fit()``.
+and gives it exactly: no shared RNG, no shared allocator, no shared optimiser
+state. That property is the whole reason this is subprocesses and not one
+process looping over ``train.fit()``.
+
+One caveat, measured rather than assumed. The runs are bit-identical to a
+standalone ``train.py`` **at the same thread count**, and this script pins its
+children to one thread (see below), so a sweep row will not match a hand-started
+run that used the machine's default. Verified on the synthetic fixture: with
+``OMP_NUM_THREADS=1`` on both sides every weight tensor and every prediction
+array matched bit for bit; against a default-threaded run the numbers drifted in
+the 8th significant digit, because multi-threaded CPU reductions do not fix their
+summation order. Within a sweep this cannot bite -- every point gets the same
+environment, which is what makes the points comparable to each other. To compare
+against an existing hand-run number, use ``--threads`` to match it.
 
 The ceiling is the CPU, not the GPU. Each run is one Python loop issuing millions
 of kernel launches, so it wants a core to itself; on a g4dn.2xlarge (8 vCPU, 4
@@ -95,6 +105,13 @@ def parse_args() -> argparse.Namespace:
                    help="root for the per-run artifact directories")
     p.add_argument("--csv", default=str(ART_DIR / "sweep.csv"),
                    help="where the one-row-per-run summary goes")
+    p.add_argument("--threads", type=int, default=1,
+                   help="CPU threads per run (OMP_NUM_THREADS and friends). 1 is "
+                        "right when several runs share the machine, and it also "
+                        "makes the runs reproducible: multi-threaded CPU "
+                        "reductions do not fix their summation order, so the "
+                        "thread count moves the last digits. Raise it only to "
+                        "reproduce a number from a run that used more")
     p.add_argument("--dry-run", action="store_true",
                    help="print the runs that would be started, then stop")
     argv = sys.argv[1:]
@@ -136,7 +153,8 @@ def config_key(config: dict) -> str:
     return ", ".join(f"{k}={v}" for k, v in sorted(config.items())) or "base"
 
 
-def run_one(point: dict, out_root: Path, passthrough: list[str]) -> dict:
+def run_one(point: dict, out_root: Path, passthrough: list[str],
+            threads: int = 1) -> dict:
     """Start one train.py, wait for it, return what happened.
 
     Never raises on a failing run. A point that diverges or crashes is a result
@@ -157,8 +175,14 @@ def run_one(point: dict, out_root: Path, passthrough: list[str]) -> dict:
     # wants ONE core. Left at the default, every child would open a thread pool
     # the width of the machine and the runs would spend their time preempting
     # each other rather than training.
-    env.update(OMP_NUM_THREADS="1", MKL_NUM_THREADS="1",
-               OPENBLAS_NUM_THREADS="1", NUMEXPR_NUM_THREADS="1")
+    #
+    # It is also what makes a run reproducible: multi-threaded CPU reductions do
+    # not fix their summation order, so the thread count alone moves the last
+    # digits. Every point in a sweep gets the same value, so points stay
+    # comparable to each other whatever it is set to.
+    threads = str(max(1, int(threads)))
+    env.update(OMP_NUM_THREADS=threads, MKL_NUM_THREADS=threads,
+               OPENBLAS_NUM_THREADS=threads, NUMEXPR_NUM_THREADS=threads)
 
     t0 = time.time()
     log = run_dir / "train.log"
@@ -301,7 +325,8 @@ def main() -> None:
     try:
         with ThreadPoolExecutor(max_workers=jobs) as pool:
             results = list(pool.map(
-                lambda pt: run_one(pt, out_root, args.passthrough), points))
+                lambda pt: run_one(pt, out_root, args.passthrough, args.threads),
+                points))
     except KeyboardInterrupt:
         print("\n[interrupted] finished runs keep their artifacts; rerun to "
               "redo the rest.", flush=True)

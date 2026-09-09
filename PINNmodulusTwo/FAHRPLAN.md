@@ -101,9 +101,16 @@ Die Zeile, für die das Werkzeug existiert, steht am Ende der Ausgabe:
                   aber die Seed-Streuung ist 0.121 C. Das ist keine Differenz.
 ```
 
-> **Noch keine Zahl.** `sweep.py` ist gebaut und gegen einen Fake-`train.py`
-> durchgespielt (Parallelität, Fehlerisolation, CSV, beide Urteilszweige), aber
-> noch nie mit echten Daten gelaufen. Der erste echte Aufruf ist Achse 1.
+> **Gelaufen, aber nur auf der Fixture.** Am 09.09. gegen den echten `train.py`
+> auf dem synthetischen Cache: 4 Läufe (2 Punkte × 2 Seeds), `-j 4` auf 4 Kernen,
+> **17.2 s Wanduhr gegen 66 s Summe der Läufe = 3.9×**. `[NOT SEPARATED]` hat
+> korrekt ausgelöst (0.624 C Abstand gegen 3.859 C Seed-Streuung bei zwei Seeds),
+> und ein `[FAIL]`-Punkt bricht den Sweep nicht ab.
+>
+> Die 3.9× sind **CPU auf vier Kernen**, nicht die T4. Sie zeigen, dass der
+> Mechanismus greift und an den Kernen hängt — nicht, was er auf der Instanz
+> bringt. Absolute MAE aus der Fixture sagen ohnehin nichts. Der erste echte
+> Aufruf ist Achse 1.
 
 ## Warum zuerst das und nicht die nächste Achse
 
@@ -187,12 +194,32 @@ daraus besteht ein Sweep.
 | `op_metrics.csv` | `train.py` | dieselben Zahlen wie die Tabelle in `metrics.txt`, nur maschinenlesbar. `sweep.py` liest daraus die val-MAE |
 | `sweep.py -j N` | neu | N Läufe gleichzeitig, je als eigener Prozess |
 
-**Die Zahlen ändern sich dadurch nicht.** Die EMA-Umstellung ist gegen die alte
-Python-float-Fassung über alle Pathologien durchgerechnet (NaN zuerst, NaN
-später, inf, 0, negativ, 400 Zufallsfolgen): null Abweichung, auch im
-EMA-Zustand selbst. Die Akkumulatoren sind float64 wie vorher. Prozesse teilen
-sich weder RNG noch Optimierer, ein Lauf im Sweep ist also bit-identisch mit
-demselben Lauf allein.
+**Die Zahlen ändern sich dadurch nicht — nachgemessen, nicht behauptet.**
+Derselbe Lauf (Seed 0, 3 Epochen, OP01/OP02, val OP06, echtes Modulus) auf dem
+Stand vor und nach dem Umbau:
+
+| verglichen | Ergebnis |
+|---|---|
+| `history.csv`, inkl. aller `div_*` auf 10 Stellen | **byte-identisch** |
+| `metrics.txt` | **byte-identisch** |
+| `pred_OP01/02/06.npz`, alle Arrays | **bitweise gleich** |
+| 25 Gewichtstensoren im Checkpoint | **bitweise gleich** |
+| Testsuite | 130 passed, 1 skipped, 1 xfailed — der O15-`xfail` bleibt `xfail` |
+
+Dazu ist der branchlose EMA-Update separat gegen die alte Python-float-Fassung
+durchgerechnet (NaN zuerst, NaN später, inf, 0, negativ, 400 Zufallsfolgen):
+null Abweichung, auch im EMA-Zustand selbst. Die Akkumulatoren sind float64 wie
+vorher.
+
+> **Was nicht gilt: „bit-identisch mit einem Einzellauf".** Das stand hier
+> zuerst und ist falsch. `sweep.py` setzt seinen Kindern `OMP_NUM_THREADS=1`,
+> und **die Thread-Zahl verschiebt die letzten Stellen** — mehrfädige
+> CPU-Reduktionen legen ihre Summationsreihenfolge nicht fest. Gegen einen
+> Einzellauf mit der Voreinstellung wich es ab der 8. Stelle ab; mit gleicher
+> Thread-Zahl auf beiden Seiten stimmte alles bitweise. Innerhalb eines Sweeps
+> ist das folgenlos, weil alle Punkte dieselbe Umgebung bekommen und nur ihr
+> Vergleich untereinander zählt. `--threads` setzt es, wenn eine von Hand
+> erzeugte Zahl getroffen werden muss.
 
 ### Was das bringt — und was nicht
 
