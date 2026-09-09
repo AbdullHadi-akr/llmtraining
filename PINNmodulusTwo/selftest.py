@@ -23,6 +23,7 @@ from env_check import require_training_env  # noqa: E402
 require_training_env()   # a useful sentence instead of a pandas ImportError
 
 import numpy as np  # noqa: E402
+import torch  # noqa: E402
 
 # Nothing below touches a network, but ``physics`` imports ``model``, which
 # imports Modulus at module scope -- so this file could only ever run on the one
@@ -49,8 +50,18 @@ def check(name: str, ok: bool, detail: str = "") -> None:
 
 
 def balancer(mode: str, *, decay: float = 0.9, warmup: int = 1) -> _LossBalancer:
+    # ``device`` since 09.09.: the balancer keeps its state as 0-dim tensors so
+    # train.py's inner loop does not sync three times per optimiser step. It
+    # still takes plain floats and its arithmetic is float64, so every check
+    # below reads exactly as it did -- ``div()`` only unwraps the 0-dim tensor.
     return _LossBalancer(mode=mode, decay=decay, warmup_steps=warmup,
-                         phys_norm=0.0, bc_norm=0.0, data_floor=1e-8)
+                         phys_norm=0.0, bc_norm=0.0, data_floor=1e-8,
+                         device="cpu")
+
+
+def div(b: _LossBalancer, key: str, value: float) -> float:
+    """``b.divisor`` as a Python float."""
+    return float(b.divisor(key, value))
 
 
 def main() -> int:
@@ -60,36 +71,36 @@ def main() -> int:
     # average before dividing by it lets a 10x jump report as ~5x -- damping
     # exactly the signal the balancing is supposed to expose.
     b = balancer("ema")
-    b.divisor("phys", 100.0)
+    div(b, "phys", 100.0)
     b.end_step()
     check("a 10x spike is reported as 10x, not damped",
-          abs(1000.0 / b.divisor("phys", 1000.0) - 10.0) < 1e-9)
+          abs(1000.0 / div(b, "phys", 1000.0) - 10.0) < 1e-9)
 
     # legacy leaves L_data raw; ema does not. This is the whole difference
     # between "w_phys is a ratio" and "w_phys depends on how far the fit got".
     check("legacy leaves L_data unnormalised",
-          balancer("legacy").divisor("data", 4e-3) == 1.0)
+          div(balancer("legacy"), "data", 4e-3) == 1.0)
     check("ema normalises L_data too",
-          balancer("ema").divisor("data", 4e-3) == 4e-3)
+          div(balancer("ema"), "data", 4e-3) == 4e-3)
 
     # decay * nan == nan, so one bad step would pin the divisor at nan forever.
     b = balancer("ema")
-    b.divisor("phys", 4.0)
+    div(b, "phys", 4.0)
     b.end_step()
-    b.divisor("phys", float("nan"))
+    div(b, "phys", float("nan"))
     b.end_step()
     check("a non-finite sample never enters the average",
-          b.divisor("phys", 4.0) == 4.0)
+          div(b, "phys", 4.0) == 4.0)
 
     b = balancer("fixed", warmup=2)
     for value in (10.0, 10.0, 1e6, 1e-6):
-        frozen = b.divisor("phys", value)
+        frozen = div(b, "phys", value)
         b.end_step()
     check("fixed mode freezes after warm-up", frozen == 10.0)
 
     b = _LossBalancer(mode="ema", decay=0.9, warmup_steps=1, phys_norm=0.0,
-                      bc_norm=0.0, data_floor=1e-3)
-    check("the data divisor respects its floor", b.divisor("data", 1e-9) == 1e-3)
+                      bc_norm=0.0, data_floor=1e-3, device="cpu")
+    check("the data divisor respects its floor", div(b, "data", 1e-9) == 1e-3)
 
     # The EMA is stepped once per OP, so a per-step decay would give a horizon
     # of 1/(1-d) STEPS -- ~2 epochs at five OPs but ~10 at one, silently making
@@ -97,11 +108,15 @@ def main() -> int:
     estimates = []
     for n_ops in (1, 3, 5):
         b = balancer("ema", decay=0.9 ** (1.0 / n_ops))
-        b._ema["phys"] = 1.0
+        # Seed the average directly. ``_ema_init`` has to be set with it: the
+        # update is branchless and reads that flag to tell "no sample yet" from
+        # "a sample of exactly this value", which used to be ``_ema is None``.
+        b._ema["phys"] = torch.tensor(1.0, dtype=torch.float64)
+        b._ema_init["phys"] = torch.tensor(True)
         for _ in range(n_ops):            # exactly one EPOCH at 10x
-            b.divisor("phys", 10.0)
+            div(b, "phys", 10.0)
             b.end_step()
-        estimates.append(b._ema["phys"])
+        estimates.append(float(b._ema["phys"]))
     check("EMA horizon is independent of the number of OPs",
           max(estimates) - min(estimates) < 1e-9,
           f"after one epoch at 10x: {[round(v, 4) for v in estimates]}")

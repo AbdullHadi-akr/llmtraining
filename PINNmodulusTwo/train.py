@@ -470,9 +470,11 @@ class _LossBalancer:
 
     Keeping the state on the device removes them all. The state is float64 so the
     EMA is accumulated exactly as the old Python-float version accumulated it, and
-    :meth:`divisor` hands back float32 so the division does not silently promote
-    the loss -- a Python float operand used to be cast to the tensor's dtype at
-    the op, and ``.to(torch.float32)`` reproduces that rounding.
+    :meth:`divisor` hands it back in float64 too. The cast to float32 happens at
+    the call site, on the line that divides the loss -- which is both where it
+    matters and where it is visible. A Python float operand used to be cast to the
+    tensor's dtype at the op, and ``.to(torch.float32)`` there reproduces exactly
+    that rounding.
 
     The ``prev is None`` test also had to leave Python: whether the EMA has ever
     seen a finite sample is itself a value on the device, and branching on it
@@ -515,8 +517,12 @@ class _LossBalancer:
         self._seen: set = set()
         self._freeze_done = False
 
-    def divisor(self, key: str, value: torch.Tensor) -> torch.Tensor:
-        """Divisor for ``key``, as a float32 0-dim tensor. ``value`` is detached.
+    def divisor(self, key: str, value) -> torch.Tensor:
+        """Divisor for ``key``, as a float64 0-dim tensor. ``value`` is detached.
+
+        ``value`` may be a tensor (the training loop, which must not sync) or a
+        plain float (``selftest.py``, which is arithmetic on the machinery and
+        cares about readability instead).
 
         The EMA update reproduces the original four cases exactly, without a
         branch on any device value:
@@ -534,16 +540,17 @@ class _LossBalancer:
         override = self._override_t.get(key)
         if override is not None:
             self.last[key] = override
-            return override.to(torch.float32)
+            return override
         if key == "data" and self.mode == "legacy":
             self.last[key] = self._one          # historical: L_data stays raw
-            return self._one.to(torch.float32)
+            return self._one
         frozen = self._frozen[key]
         if frozen is not None:
             self.last[key] = frozen
-            return frozen.to(torch.float32)
+            return frozen
 
-        value = value.to(torch.float64)
+        value = torch.as_tensor(value, dtype=torch.float64,
+                                device=self._one.device)
         prev, init = self._ema[key], self._ema_init[key]
         finite = torch.isfinite(value)
         den = torch.where(init, prev, value)
@@ -556,7 +563,7 @@ class _LossBalancer:
         if key == "data":
             den = torch.clamp(den, min=self.data_floor)
         self.last[key] = den
-        return den.to(torch.float32)
+        return den
 
     def end_step(self) -> None:
         """Advance the step counter and, in ``fixed`` mode, freeze after warm-up."""
@@ -992,10 +999,15 @@ def fit(args):
                 # this step, and a non-finite sample never enters it.
                 # Tensors, not floats: the balancer keeps its state on the
                 # device precisely so these three calls do not stall the stream.
-                L_data_bal = L_data / balance.divisor("data", L_data.detach())
-                L_phys_bal = (L_phys / balance.divisor("phys", L_phys.detach())
+                # ``.float()`` on a float64 divisor, not a promotion of the
+                # loss: dividing an f32 loss by an f64 tensor would make the
+                # whole backward pass float64. The old code passed a Python
+                # float, which torch cast to the tensor's dtype at the op --
+                # this is the same rounding, written out.
+                L_data_bal = L_data / balance.divisor("data", L_data.detach()).float()
+                L_phys_bal = (L_phys / balance.divisor("phys", L_phys.detach()).float()
                               if want_phys else nan)
-                L_bc_bal = (L_bc / balance.divisor("bc", L_bc.detach())
+                L_bc_bal = (L_bc / balance.divisor("bc", L_bc.detach()).float()
                             if want_bc else nan)
                 balance.end_step()
 
