@@ -143,7 +143,7 @@ Seeds → keine Rangfolge · **kein Befund aus der letzten Epoche** (neu 02.09.,
 > einer Nachricht nach Wochen noch stimmt. Offene stehen hier, geschlossene in
 > Teil III unter „Geschlossene Punkte".
 
-### Index: alle Punkte, O1 bis O15
+### Index: alle Punkte, O1 bis O16
 
 | # | worum es geht | Zustand |
 |---|---|---|
@@ -161,7 +161,8 @@ Seeds → keine Rangfolge · **kein Befund aus der letzten Epoche** (neu 02.09.,
 | O12 | BC-Term trägt fast nichts (`ratio` 0.0178) | ✅ **widerlegt** — 0.0178 war eine Epoche, Median 0.0581 |
 | **O13** | **Fehler wächst zum Trajektorienende** | **offen** — und **kein** Verallgemeinerungsproblem |
 | **O14** | **Volumenstrom ist die Schwierigkeitsachse** | **dauerhafte Envelope-Grenze** (Datensatz ist fix) |
-| **O15** | **NEU: das Loss-Balancing greift nach 60 Epochen nicht** | **offen** — blockiert O6 |
+| **O15** | **das Loss-Balancing greift nach 60 Epochen nicht** | **offen** — blockiert O6 |
+| **O16** | **NEU: die Gehäusewand hat gar keine Randbedingung** | **offen** — Ziel ist gemessen, Umsetzung geplant |
 
 Die offenen im Detail, nach Dringlichkeit:
 
@@ -170,6 +171,7 @@ Die offenen im Detail, nach Dringlichkeit:
 | **O15** | **NEU 02.09. Das Loss-Balancing hat nach 60 Epochen noch nicht eingesetzt.** Alle drei Divisoren fallen mit exakt 0.9000/Epoche — reiner geometrischer Zerfall, der aktuelle Loss trägt 0.009 % bei. `div_data/div_phys` ist damit über den ganzen Lauf **konstant**, das Balancing wirkt wie `fixed` mit Divisoren, die der erste Optimiererschritt gesetzt hat. Gemessen: `ratio_phys` = 0.586, wo `w_phys = 0.1` nominell 0.1 verspricht. Seit 02.09. als `xfail`-Test festgehalten und von `analyse_history.py` bei jedem Lauf gemeldet. §11.6 | **blockiert O6** |
 | **O8** | Der BDF-Stencil nutzt δ = 1.0 s gegen Δt_max ≈ 0.24 s (`[CFL WARN]` bei jedem Lauf). **02.09. entschieden: wird gemessen, drei Punkte 1.0 / 0.4 / 0.2.** Nicht einfach richtiggestellt, weil es ein Zielkonflikt ist und kein Einheitenfehler — der Zähler `3T − 4T₋₁ + T₋₂` schrumpft mit δ, der Eigenfehler des Rollouts nicht. δ = 0.2 ist zugleich der Boden: darunter liest `history_at` nur noch die Gerade zwischen zwei Gitterpunkten. §11.2 | **Sweep-Achse 1** |
 | **O13** | **Der Fehler sitzt am Ende der Trajektorie.** OP06: MAE 6.270 C, aber `late(held out)` = **13.248 C** — doppelt. Gleiches Muster auf OP03 (3.341 / 7.371) und OP16 (3.476 / 6.959). **02.09.: OP03 ist ein Trainings-OP und `--holdout-tail` ist aus — das Modell hat diese späten Zeitschritte mit Beschriftung gesehen und verdoppelt dort trotzdem seinen Fehler. O13 ist also kein Verallgemeinerungsproblem, sondern mechanisch.** §11.7 | **Messung gebaut 02.09.**, läuft beim nächsten Lauf mit |
+| **O16** | **NEU 02.09. Die Gehäusewand hat keine Randbedingung.** `grep -rin "convect\|robin\|htc\|h_conv\|wall.*flux"` über `physics.py`, `model.py` und `train.py` findet **nichts**. `heat_residual` ist reine Leitung plus Quelle, **ohne Senke**, und der einzige BC-Term sitzt per `bc_mask = |x| < 1e-6` an der Symmetrieebene (`train.py:603`, „BC points (x=0): 121/363"). Der Wärmeaustritt an der Gehäusewand ist damit physikalisch **unbeschränkt** — das Netz lernt ihn allein aus dem Datenterm, obwohl dort laut Energiebilanz bis zur Hälfte der Quellenergie hinausgeht. **Neu behebbar**, weil der Wärmestrom `Q̇(t)` gemessen im Rohexport liegt (`*_Heat Transfer.csv`, Spalte `Heat Transfer: solid to fluid Monitor (W)`) — ein Robin-Term an `x = 0.0219` mit `U(V̇)` auf `A = 0.0206 m²` wäre also nicht geraten, sondern **gegen eine Messung beaufsichtigt**. ⚠ **Erklärt die val-Fehler NICHT:** §11.5 sagt, V̇ = 0 ist der *schwierigere* Fall (5.374 gegen 2.928 C), also bliebe es dafür bei O14. Herleitung und Einbauregel in [`GridCNN/README.md`](../GridCNN/README.md) §6 | **erst nach GridCNN-Stufe 1** (Bilanzprobe), sonst baut man eine falsche BC in ein laufendes Modell |
 | **O6** | Kein Gewicht auf Basis von Messungen gesetzt. **02.09.: der Grund hat sich geändert.** Die fünf Gründe aus §10a (CFL-Verletzung, degenerierter Anker, saturierter Rollout, nie arbeitende Loss-Balance, 121er-Quelle) sind alle behoben — O6 ist nicht mehr „bewusst offen", sondern **erstmals messbar**. Nur nicht jetzt: solange O15 gilt, misst ein `w_phys`-Sweep den eingefrorenen Divisor mit | **nach O15** |
 | **O5** | **Tote Eingangskanäle — 02.09. umgewidmet.** `soc_start` ist über alle OPs konstant 10 % (`DEAD -> forced to 0`), die Rate-Kanäle von `c_rate` und `fluid_mass_flow` sind im Training tot, auf OP15/OP16/OP19 aber lebendig. **Das ist kein MAE-Hebel:** eine Spalte ohne Varianz kann nichts erklären, und die SOC-Wirkung steckt über `q_dot` ohnehin schon im Modell. Der Punkt ist eine **Envelope-Grenze** und damit Vorbedingung für O11, nicht eine Code-Änderung. Kein Kanal wird gestrichen. §10a | dokumentiert, nichts zu tun |
 | **O14** | **Volumenstrom ist die Schwierigkeitsachse, nicht der Tier.** V̇=0 im Mittel 5.374 C gegen 2.928 C mit Kühlung; alle drei No-Flow-OPs unter den letzten vier. Nur 2 von 11 Trainings-OPs haben V̇=0 (OP07 bei T0 = 10 °C, OP14 bei 0 °C), OP06 fährt 25 °C — das Regime „keine Kühlung bei mittlerer Starttemperatur" kommt im Training nicht vor. **02.09.: der Datensatz ist fix, es kommen keine OPs dazu.** Damit ist O14 keine Aufgabe mehr, sondern eine **dauerhafte Grenze**: nach V̇ getrennt berichten, nie als Modellfehler lesen. §11.5 | dauerhaft, nur berichten |
@@ -177,6 +179,8 @@ Die offenen im Detail, nach Dringlichkeit:
 | **O10** | **Warnung, kein Punkt.** OP14 startet über alle Punkte bei 0 °C. Das sieht nach Füllwert aus, ist aber die geplante Anfangsbedingung (`op_registry.py:123`: T0 = 0 °C, „coldest start in the set"). **Nicht maskieren, nicht ersetzen, OP14 nicht entfernen** — es ist einer von nur zwei OPs mit V̇ = 0, und die binden die Energiebilanz | nichts tun |
 
 **Geschlossen am 01.09.:** O1, O2, O3, O4, O7, O9. **Am 02.09.:** O12. Siehe Teil III.
+
+**Neu am 02.09.:** O16 — beim Entwurf von `GridCNN/` aufgefallen, siehe dort §6.
 
 ---
 
