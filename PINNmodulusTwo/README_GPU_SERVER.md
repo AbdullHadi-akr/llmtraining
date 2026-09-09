@@ -339,6 +339,17 @@ und 8 hängen an dieser einen Zahl. Die Epochenzeile schlüsselt sie auf:
   epoch 1  L_data=...  [118.7s/epoch = 112.4s rollout + 6.3s x100 inner, ...]
 ```
 
+> **Diese Beispielzahl ist veraltet — nicht als Erwartung lesen.** Am 09.09. auf
+> der synthetischen Fixture gemessen: **0.58 ms je Rollout-Schritt** (CPU, 4
+> Kerne). Für dieselbe Konfiguration wie oben — 2 OPs, 7000 Schritte — sind das
+> ~8 s Rollout, nicht 112 s. Die 112.4 s stammen sichtbar aus der Zeit vor dem
+> `rollout_plan`-Fastpath: `level_rollout` reduzierte damals je Schritt den
+> ganzen Puffer-Präfix, also O(n_t²·P), und „dominierte die Epoche" (so der
+> Docstring in `model.py`). **Jede Budgetrechnung in Kapitel 7 und 8 hängt an
+> dieser einen Zahl und ist damit vermutlich um eine Größenordnung zu
+> pessimistisch.** Die Rechenvorschrift darunter stimmt weiter — nur `S` muss
+> aus einem heutigen Lauf kommen.
+
 Zwei Hälften, die sich völlig verschieden verhalten:
 
 - **rollout** — ~7000 sequentielle Schritte je OP. Latenzgebunden, hängt nur an
@@ -476,6 +487,37 @@ Thread-Pool in Maschinenbreite und die Läufe verdrängen sich gegenseitig.
 belegt eine Handvoll Thread-Blocks, egal wie viele Prozesse gleichzeitig eins
 schicken. Der Gewinn kommt daher, dass sich die CPU-Arbeit der einen Läufe mit
 der GPU-Arbeit der anderen überlappt — Durchsatz, nicht Rechenleistung.
+
+#### Wie viel das spart, und warum bei ~4× Schluss ist
+
+**Gemessen am 09.09.:** 4 Läufe mit `-j 4` auf 4 Kernen — 17.2 s Wanduhr gegen
+66 s Summe der Läufe, also **3.9×**, ~97 % Effizienz solange `-j` ≤ Kernzahl.
+
+Die g4dn.2xlarge hat 8 vCPU = **4 physische Kerne**, und damit ist bei ~4×
+Schluss. Jeder Lauf ist eine Python-Schleife, die einen Kern für sich will; ab
+dem fünften teilen sie sich einen und die Lauf-Dauer wächst gegen den Gewinn an.
+Die Karte ist dabei nie die Grenze.
+
+**Die Wanduhr ist `ceil(Läufe / j)` Lauf-Dauern, nicht `Läufe / j`.** Der Pool
+rückt zwar nach, aber eine letzte Welle mit weniger Läufen als Arbeitern kostet
+trotzdem eine ganze Dauer. Eine Fahrplan-Achse sind **9 Läufe** (3 Punkte × 3
+Seeds):
+
+| `-j` | Wanduhr in Lauf-Dauern | Faktor | |
+|---|---|---|---|
+| 1 (heute) | 9 | 1× | |
+| 2 | 5 | 1.8× | |
+| **3** | **3** | **3×** | drei Kerne reichen schon |
+| 4 | 3 | 3× | **kein Gewinn** — der vierte Kern läuft in der letzten Welle leer |
+| 5+ | ~3 | ~3× | die Läufe teilen sich Kerne, die Dauer wächst |
+
+**Faustregel: `-j` auf einen Teiler der Laufzahl setzen.** 9 Läufe → `-j 3`.
+Das ganze Gitter aus 27 Läufen auf einmal → `-j 4`, das sind `ceil(27/4) = 7`
+Dauern statt 27, also die vollen **3.9×**. `sweep.py` rechnet die Wellenzahl beim
+Start selbst aus und weist auf ein krummes `-j` hin.
+
+Die Verhältnisse oben sind exakt; absolut hängen sie an der Lauf-Dauer, und die
+ist auf der T4 nicht gemessen (Kapitel 6.3).
 
 ---
 

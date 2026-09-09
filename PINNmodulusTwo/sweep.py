@@ -339,8 +339,21 @@ def main() -> None:
     jobs = args.jobs or max(1, min(4, (os.cpu_count() or 2) // 2))
     jobs = min(jobs, len(points))
 
+    # Wall time is ceil(n / jobs) run-durations, not n/jobs: the pool refills as
+    # runs finish, but a last wave with fewer runs than workers still costs a
+    # whole duration. With 9 runs (3 points x 3 seeds, one Fahrplan axis) that
+    # makes -j 4 exactly as fast as -j 3 and a core busy for nothing.
+    waves = -(-len(points) // jobs)
     print(f"{len(points)} runs ({len(points) // max(1, len(args.seeds))} "
-          f"configuration(s) x {len(args.seeds)} seed(s)), {jobs} at a time")
+          f"configuration(s) x {len(args.seeds)} seed(s)), {jobs} at a time "
+          f"-> {waves} run-duration(s) of wall time")
+    if len(points) % jobs:
+        same = min(j for j in range(1, jobs + 1) if -(-len(points) // j) == waves)
+        if same < jobs:
+            print(f"  [HINT] -j {same} finishes in the same {waves} run-duration(s) "
+                  f"and leaves {jobs - same} core(s) free -- with {len(points)} runs "
+                  f"the last wave is ragged. A -j that divides {len(points)} wastes "
+                  f"nothing.")
     print(f"artifacts: {out_root}")
     if args.passthrough:
         print(f"passed to train.py: {' '.join(args.passthrough)}")

@@ -230,11 +230,56 @@ vorher.
 | Durchsatz (Läufe/h) | 1× | ~4–6× |
 | genutzte Rechenleistung der T4 | ~0.1 % | ~1 % |
 
+**Für einen Einzellauf** — GPU gegen die CPU dieser Box — ist Faktor **2–3** zu
+erwarten, nicht 10. Gerechnet aus einer Messung: 0.58 ms je Rollout-Schritt auf
+der CPU (09.09., synthetische Fixture, 4 Kerne). Hochgerechnet auf 11 OPs ×
+7000 Schritte × 100 inner_steps sind das ~45 s Rollout + ~33 s inner = ~78 s je
+Epoche auf der CPU, gegen geschätzte ~27 s + ~5 s = ~32 s auf der T4. Der
+Rollout gewinnt wenig, weil er nicht rechen-, sondern **Python-gebunden** ist —
+~50 Ops je Schritt zu ~7 µs Dispatch, und Python läuft auf beiden Seiten gleich
+schnell. Der Innenteil gewinnt viel: 2048×128-Matmuls plus doppeltes Autograd
+sind echte Parallelarbeit.
+
+Die Karte zahlt sich vor allem **in Kombination mit `-j`** aus: auf der CPU
+konkurrieren vier parallele Läufe um dieselben FLOPs, auf der GPU nur um vier
+Python-Kerne, während eine Karte die Mathematik für alle macht.
+
 **Ein einzelner Lauf wird davon nicht schneller** — die 7000 Schritte bleiben
-sequentiell. Schneller wird der *Sweep*. Die Grenze sind die 8 vCPUs, nicht die
-Karte: jeder Lauf ist eine Python-Schleife, die Millionen Kernel-Starts absetzt,
-und will einen Kern für sich. `sweep.py` setzt dafür `OMP_NUM_THREADS=1` in den
-Kindprozessen.
+sequentiell. Schneller wird der *Sweep*. Die Grenze sind die 8 vCPU = **4
+physische Kerne**, nicht die Karte: jeder Lauf ist eine Python-Schleife, die
+Millionen Kernel-Starts absetzt, und will einen Kern für sich. `sweep.py` setzt
+dafür `OMP_NUM_THREADS=1` in den Kindprozessen.
+
+### Was der Sweep dadurch spart
+
+Gemessen: 4 Läufe mit `-j 4` auf 4 Kernen, **3.9×** (17.2 s Wanduhr gegen 66 s
+Summe), also ~97 % Effizienz solange `-j` ≤ Kernzahl. Bei ~4× ist Schluss.
+
+**Die Wanduhr ist `ceil(Läufe / j)` Lauf-Dauern, nicht `Läufe / j`** — eine
+letzte Welle mit weniger Läufen als Arbeitern kostet eine ganze Dauer. Eine
+Achse hier sind 9 Läufe (3 Punkte × 3 Seeds):
+
+| `-j` | Wanduhr | Faktor | |
+|---|---|---|---|
+| 1 (heute) | 9 Dauern | 1× | |
+| **3** | **3 Dauern** | **3×** | drei Kerne reichen |
+| 4 | 3 Dauern | 3× | **kein Gewinn** gegenüber 3 — die letzte Welle ist krumm |
+| 5+ | ~3 Dauern | ~3× | Läufe teilen sich Kerne |
+
+**`-j` auf einen Teiler der Laufzahl setzen.** 9 Läufe → `-j 3`. Alle 27 Läufe
+des Gitters auf einmal → `-j 4` = `ceil(27/4) = 7` Dauern, die vollen 3.9×.
+`sweep.py` rechnet die Wellen beim Start aus und warnt bei krummem `-j`.
+
+Die Verhältnisse sind exakt, die Minuten nicht: mit der geschätzten Lauf-Dauer
+(unten) wären das je Achse ~1.7 h seriell gegen ~35 min, und ~5 h gegen ~1.3 h
+für das ganze Gitter. **Die absoluten Zahlen stehen erst nach 6.3 auf der
+Instanz.**
+
+> **Der größere Hebel wäre ein anderer.** Die Achsen laufen nacheinander, weil
+> Achse 2 die Antwort von Achse 1 braucht — eine wissenschaftliche Abhängigkeit,
+> keine rechnerische. Solange das so bleibt, sind nie mehr als 9 Läufe
+> gleichzeitig unterwegs und die 4 Kerne sind die Decke. Deutlich mehr ginge nur
+> mit der `bmm`-Ensemble-Variante am Ende dieses Abschnitts.
 
 Einmal auf der Instanz, außerhalb des Skripts:
 
