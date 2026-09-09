@@ -668,10 +668,17 @@ def test_delta_phys_reaches_the_model(synthetic_cache):
 # --------------------------------------------------------------------------
 
 def _feed(balancer, key, values):
-    """Push a series through the balancer, returning the divisor it handed out."""
+    """Push a series through the balancer, returning the divisor it handed out.
+
+    The balancer speaks tensors since 09.09. -- it keeps its state on the device
+    so the training loop does not sync three times per optimiser step -- so the
+    conversion lives here and every assertion below still reads plain floats.
+    """
+    import torch
+
     out = []
     for v in values:
-        out.append(balancer.divisor(key, v))
+        out.append(float(balancer.divisor(key, torch.tensor(float(v)))))
         balancer.end_step()
     return out
 
@@ -679,7 +686,8 @@ def _feed(balancer, key, values):
 def _balancer(decay_per_epoch=0.9, steps_per_epoch=100):
     return train_mod._LossBalancer(
         mode="ema", decay=decay_per_epoch ** (1.0 / steps_per_epoch),
-        warmup_steps=1, phys_norm=0.0, bc_norm=0.0, data_floor=1e-12)
+        warmup_steps=1, phys_norm=0.0, bc_norm=0.0, data_floor=1e-12,
+        device="cpu")
 
 
 def test_the_divisor_converges_on_a_constant_loss():

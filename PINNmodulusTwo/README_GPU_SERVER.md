@@ -432,7 +432,45 @@ beiden Schritte müssen in jedem Hyperparameter übereinstimmen.
 
 ---
 
-### 6.4 Batchgrößen — was 20 GB VRAM hergeben
+### 6.4 Mehrere Läufe gleichzeitig — der Weg, der das Experiment nicht anfasst
+
+Ein einzelner Lauf lastet die Karte nicht aus und kann es nicht: ~7000
+**sequentielle** Rollout-Schritte je OP, jeder ein 363×128-Matmul. Das sind ~50
+Kernel zu ~5 µs Startlatenz gegen ~1.5 µs Rechenzeit — die GPU wartet auf Python.
+Kein Regler ändert daran etwas, denn die Schritte hängen voneinander ab.
+
+Was die Karte füllt, ist **mehr unabhängige Arbeit gleichzeitig**, und ein Sweep
+besteht aus nichts anderem — die Punkte und die Seeds sind getrennte Experimente,
+die sich gerade *nicht* beeinflussen dürfen:
+
+```bash
+nvidia-cuda-mps-control -d          # einmal je Boot, sonst time-sliced der Treiber
+
+python3 PINNmodulusTwo/sweep.py --seeds 0 1 2 \
+    --vary delta-phys 1.0 0.4 0.2 -j 4 -- --epochs 20
+```
+
+Jeder Punkt ist ein eigener `train.py`-Prozess mit eigenem `--artifacts-dir`.
+Prozesse teilen weder RNG noch Allokator noch Optimiererzustand, **ein Lauf im
+Sweep ist also bit-identisch mit demselben Lauf allein** — genau der Grund,
+warum es Prozesse sind und nicht eine Schleife über `train.fit()`.
+
+Die Grenze ist die **CPU, nicht der Speicher**: jeder Lauf ist eine
+Python-Schleife, die Millionen Kernel-Starts absetzt, und will einen Kern für
+sich. Auf einer g4dn.2xlarge (8 vCPU, 4 physisch) sind 4–6 gleichzeitige Läufe
+der nutzbare Bereich; das landet bei ~4–6 GB VRAM. `sweep.py` setzt
+`OMP_NUM_THREADS=1` in den Kindprozessen, sonst öffnet jedes Kind einen
+Thread-Pool in Maschinenbreite und die Läufe verdrängen sich gegenseitig.
+
+`nvidia-smi` wird danach fast ausgelastet aussehen. Das täuscht: es zeigt, dass
+*irgendein* Kernel läuft, nicht dass die 40 SMs voll sind. Ein 363-Zeilen-Matmul
+belegt eine Handvoll Thread-Blocks, egal wie viele Prozesse gleichzeitig eins
+schicken. Der Gewinn kommt daher, dass sich die CPU-Arbeit der einen Läufe mit
+der GPU-Arbeit der anderen überlappt — Durchsatz, nicht Rechenleistung.
+
+---
+
+### 6.5 Batchgrößen — was 20 GB VRAM hergeben
 
 Der erste Epochen-Log auf einer GPU nennt den gemessenen Spitzenverbrauch:
 
@@ -467,6 +505,16 @@ Danach **6.3 noch einmal fahren** und zwei Zahlen ablesen:
 Zwei Dinge, die **nicht** helfen: ein breiteres Netz (der Rollout dominiert, und
 der wird davon langsamer, nicht besser) und `--subsample` erhöhen (die CFL-Grenze
 liegt bei ~0.241 s, `dt = 0.2 s` ist schon nah dran).
+
+> **Nachtrag 09.09. — größere Batches sind nicht gratis.** Der Absatz oben sagt
+> „kostet fast keinen Speicher und kaum Zeit", und das stimmt. Er verschweigt,
+> was es sonst kostet: `--batch-data` ist die Zahl der (t, Punkt)-Paare je
+> Adam-Schritt, ein größerer Batch macht den Gradienten leiser, und **das ist
+> eine andere Optimierung** — nicht dieselbe Rechnung, nur schneller. Innerhalb
+> eines Sweeps ist das in Ordnung, solange **alle** Punkte dieselben Batchgrößen
+> benutzen; gegen die Zahlen aus Schritt 6 vergleichbar bleibt es nicht.
+>
+> Wer die Karte auslasten will, ohne am Experiment zu drehen, nimmt **6.4**.
 
 Was du hier wählst, muss über alle Läufe, die du miteinander vergleichst,
 identisch sein — sonst mischt der Vergleich zwei Experimente.
