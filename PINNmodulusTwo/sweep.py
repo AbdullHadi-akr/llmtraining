@@ -162,7 +162,6 @@ def run_one(point: dict, out_root: Path, passthrough: list[str],
     unfinished one would be the expensive mistake here.
     """
     run_dir = out_root / slug(point["config"], point["seed"])
-    run_dir.mkdir(parents=True, exist_ok=True)
     cmd = [sys.executable, str(TRAIN_PY),
            "--seed", str(point["seed"]),
            "--artifacts-dir", str(run_dir)]
@@ -186,16 +185,31 @@ def run_one(point: dict, out_root: Path, passthrough: list[str],
 
     t0 = time.time()
     log = run_dir / "train.log"
-    with log.open("w") as fh:
-        fh.write(" ".join(cmd) + "\n\n")
-        fh.flush()
-        proc = subprocess.run(cmd, stdout=fh, stderr=subprocess.STDOUT, env=env)
+    # A non-zero exit is an ordinary result and needs no handler (no check=True).
+    # This guard is for the launch itself failing -- an unwritable directory, a
+    # missing interpreter, the OS refusing a process. Letting that escape would
+    # abort ThreadPoolExecutor.map and throw away every finished point with it,
+    # which is the one outcome a sweep must never have.
+    try:
+        run_dir.mkdir(parents=True, exist_ok=True)
+        with log.open("w") as fh:
+            fh.write(" ".join(cmd) + "\n\n")
+            fh.flush()
+            proc = subprocess.run(cmd, stdout=fh, stderr=subprocess.STDOUT, env=env)
+        rc = proc.returncode
+    except KeyboardInterrupt:
+        raise
+    except Exception as exc:                       # noqa: BLE001 - deliberate
+        rc, secs = -1, time.time() - t0
+        print(f"  [FAIL] {run_dir.name}  could not be started: "
+              f"{type(exc).__name__}: {exc}", flush=True)
+        return {**point, "dir": run_dir, "ok": False, "seconds": secs,
+                "returncode": rc}
     secs = time.time() - t0
-    ok = proc.returncode == 0 and (run_dir / "op_metrics.csv").exists()
+    ok = rc == 0 and (run_dir / "op_metrics.csv").exists()
     print(f"  [{'ok  ' if ok else 'FAIL'}] {run_dir.name}  {secs / 60:.1f} min"
-          + ("" if ok else f"  (exit {proc.returncode}, see {log})"), flush=True)
-    return {**point, "dir": run_dir, "ok": ok, "seconds": secs,
-            "returncode": proc.returncode}
+          + ("" if ok else f"  (exit {rc}, see {log})"), flush=True)
+    return {**point, "dir": run_dir, "ok": ok, "seconds": secs, "returncode": rc}
 
 
 def read_val_mae(run_dir: Path) -> dict:
@@ -208,17 +222,25 @@ def read_val_mae(run_dir: Path) -> dict:
     path = run_dir / "op_metrics.csv"
     if not path.exists():
         return {}
-    rows = path.read_text().strip().splitlines()
-    if len(rows) < 2:
+    # Tolerant on purpose: a run killed mid-write leaves a truncated file, and
+    # that is a point to report as unusable, never a reason to lose the sweep's
+    # other results at the very last step.
+    try:
+        rows = path.read_text().strip().splitlines()
+        if len(rows) < 2:
+            return {}
+        header = rows[0].split(",")
+        i_op, i_role, i_mae = header.index("op"), header.index("role"), header.index("mae")
+        out = {}
+        for line in rows[1:]:
+            cells = line.split(",")
+            if len(cells) > max(i_op, i_role, i_mae) and cells[i_role] == "val":
+                out[cells[i_op]] = float(cells[i_mae])
+        return out
+    except (OSError, ValueError, IndexError) as exc:
+        print(f"  [WARN] {path} is not readable as a metrics table "
+              f"({type(exc).__name__}): treating the point as unusable.", flush=True)
         return {}
-    header = rows[0].split(",")
-    i_op, i_role, i_mae = header.index("op"), header.index("role"), header.index("mae")
-    out = {}
-    for line in rows[1:]:
-        cells = line.split(",")
-        if cells[i_role] == "val":
-            out[cells[i_op]] = float(cells[i_mae])
-    return out
 
 
 def _mean(xs):
@@ -286,17 +308,26 @@ def report(results: list[dict], val_ops: list[str]) -> None:
         ranked.sort()
         best, second = ranked[0], ranked[1]
         gap = second[0] - best[0]
-        spread = max(_std(best[2]), _std(second[2]))
+        # NaN is dropped rather than passed to max(): _std returns it for a
+        # single finished seed, and ``max(nan, 0.5)`` and ``max(0.5, nan)``
+        # disagree in Python -- the verdict would then depend on which
+        # configuration happened to rank first.
+        spreads = [v for v in (_std(best[2]), _std(second[2])) if v == v]
         print()
         # The one sentence this whole tool exists to be able to say.
-        if spread == spread and gap < spread:
+        if not spreads:
+            print(f"  [NO SPREAD] {best[1]!r} leads {second[1]!r} by {gap:.3f} C, "
+                  f"and neither has more than one finished seed. Two single "
+                  f"measurements are not a comparison -- there is nothing here "
+                  f"to read yet. Run more seeds.")
+        elif gap < max(spreads):
             print(f"  [NOT SEPARATED] {best[1]!r} leads {second[1]!r} by "
-                  f"{gap:.3f} C, but the seed spread is {spread:.3f} C. That is "
-                  f"not a difference -- it is the same configuration measured "
-                  f"twice. More seeds, or a wider axis.")
+                  f"{gap:.3f} C, but the seed spread is {max(spreads):.3f} C. "
+                  f"That is not a difference -- it is the same configuration "
+                  f"measured twice. More seeds, or a wider axis.")
         else:
             print(f"  {best[1]!r} beats {second[1]!r} by {gap:.3f} C against a "
-                  f"seed spread of {spread:.3f} C.")
+                  f"seed spread of {max(spreads):.3f} C.")
 
 
 def main() -> None:
@@ -318,7 +349,11 @@ def main() -> None:
             print(f"  {slug(pt['config'], pt['seed'])}")
         return
 
-    out_root.mkdir(parents=True, exist_ok=True)
+    try:
+        out_root.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        raise SystemExit(f"--out {out_root} cannot be created: "
+                         f"{type(exc).__name__}: {exc}")
     t0 = time.time()
     # Threads, not processes: each worker only waits on a subprocess, so the GIL
     # is never held and the real parallelism is the train.py processes themselves.
