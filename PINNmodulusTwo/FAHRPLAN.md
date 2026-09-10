@@ -250,6 +250,49 @@ physische Kerne**, nicht die Karte: jeder Lauf ist eine Python-Schleife, die
 Millionen Kernel-Starts absetzt, und will einen Kern für sich. `sweep.py` setzt
 dafür `OMP_NUM_THREADS=1` in den Kindprozessen.
 
+### 10.09. — der erste Lauf auf der Instanz
+
+```bash
+python3 PINNmodulusTwo/train.py --ops OP01 OP02 --epochs 3 --device cuda
+```
+
+**Exit 0 auf `cuda:0 Tesla T4`, torch 2.6.0+cu124.** ~2.7 min für den ganzen
+Aufruf, 600 Optimizer-Steps (2 OPs × 100 `inner_steps` × 3 Epochen).
+
+**Was das schließt:** der CUDA-Pfad des geräteseitigen `_LossBalancer` war bis
+hierher ungetestet — in der Entwicklungsumgebung gibt es keine Karte, geprüft
+war alles nur auf CPU. Er läuft.
+
+**Was es misst: `peak VRAM 0.11 GB von 15.6 GB`.** Das ist keine Randnotiz,
+sondern die Bestätigung der ganzen Prämisse: **Speicher ist hier nicht die
+Ressource.** 0.11 GB bei 2 OPs; mit allen elf wären es grob 0.4–0.5 GB, weil je
+OP nur `Tn`, `Qsrc` und `T_lab` dazukommen (~35 MB) und die Batchgrößen sich
+nicht ändern. Von 15.6 GB. Es gibt nichts, was man an diesem Lauf drehen könnte,
+um die Karte zu füllen, ohne das Experiment zu ändern.
+
+**Was es NICHT misst — und das war der Zweck des Laufs:** die Zeile
+`[Xs/epoch = Y rollout + Z inner]`. 2.7 min ist der ganze Aufruf inklusive
+Datenladen, acht Auswertungs-Rollouts und Plots, also **nicht** durch 3 teilbar.
+Ohne diese Zeile steht weiterhin kein Budget auf einer Messung. Nachzuholen:
+
+```bash
+grep "s/epoch" <logdatei>
+```
+
+**Die MAE aus diesem Lauf sind keine Ergebnisse** (3 Epochen, und trainiert
+wurde nur auf OP01+OP02 statt auf allen elf — mit 5b/6 also nicht vergleichbar).
+Der Vollständigkeit halber: train 6.73 / 5.43, val OP06/OP09 12.48 / 8.22, test
+OP13/OP15/OP16 10.97 / 9.76 / 4.87 C.
+
+Die Diagnostik dagegen ist lesbar, und sie verhält sich wie erwartet: Epoche 1
+traf den `|Tn| <= 50`-Guard (`[SATURATED]`), Epochen 2–3 meldeten `[FLAT]` mit
+`spread s/t = 0.055 / 0.111`. Beides ist bei drei Epochen der bekannte Verlauf —
+Schritt 6 hat gezeigt, dass der `spread` von dort über 60 Epochen monoton auf
+0.968 läuft (§11.3). **Aus drei Epochen darf daraus nichts geschlossen werden**;
+genau dieser Fehlschluss steckt hinter O9.
+
+---
+
 ### Was der Sweep dadurch spart
 
 Gemessen: 4 Läufe mit `-j 4` auf 4 Kernen, **3.9×** (17.2 s Wanduhr gegen 66 s
@@ -898,6 +941,9 @@ Wird beim Abhaken ausgefüllt. Leer = noch nicht gemessen.
 | 6 | MAE Trainings-OPs | 1.000 (OP01) … 5.656 (OP14), **alle beats** | 01.09. |
 | 6 | MAE OP19 (Messvergleich) | **10.334 C — LOSES TO** (persistence 1.376). Und 88 % **schlechter** als in 5b. Siehe O11 | **01.09.** |
 | 6 | `L_data` | 100.5 → **0.0515** | 01.09. |
+| 6.3 | **läuft auf der Karte** | **Exit 0** auf `cuda:0 Tesla T4`, torch 2.6.0+cu124. 2 OPs, 3 Epochen, 600 Optimizer-Steps, ~2.7 min für den ganzen Aufruf (inkl. Auswertung und Plots) | **10.09.** |
+| 6.3 | **peak VRAM** | **0.11 GB von 15.6 GB** — bei 2 OPs und den Default-Batches | **10.09.** |
+| 6.3 | `s/epoch` | **fehlt noch.** Die Zeile `[Xs/epoch = Y rollout + Z inner]` steht im Log, ist aber nicht abgelesen. Ohne sie steht kein Budget auf einer Messung | — |
 | 6 | Loss-Balance | arbeitet jetzt: `ratio phys/bc` 2.17/0.782 → **0.605/0.0178**, betas [0.91 …] → [0.98 2.64 3.9 3.99] | 01.09. |
 
 Alles läuft aus dem Repo-Wurzelverzeichnis:

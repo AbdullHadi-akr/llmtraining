@@ -29,6 +29,7 @@ For the GPU server setup see ``PINNmodulusTwo/README_GPU_SERVER.md``.
 from __future__ import annotations
 
 import argparse
+import os
 import time
 from pathlib import Path
 
@@ -63,7 +64,21 @@ THIS_DIR = Path(__file__).resolve().parent
 # without one directory per grid point they would all write the same files --
 # the Fahrplan already warns that "jeder Lauf ueberschreibt artifacts/model.pt".
 # That single collision is what stood between this project and a parallel sweep.
-ART_DIR = THIS_DIR / "artifacts"
+#
+# Two ways to set it, and the env var is read HERE, at import, on purpose:
+#
+#   PINN_ART_DIR=...          environment. Applies to every entry point that
+#                             imports this module, whether or not it parses
+#                             ``--artifacts-dir`` -- so a parallel runner can
+#                             isolate a child it does not fully control.
+#   --artifacts-dir ...       command line. Wins over the env var; applied in
+#                             train() before anything writes.
+#
+# sweep.py sets both for its children. Belt and braces is right here: a run that
+# silently shares a directory with three others does not fail, it produces a
+# history.csv and a checkpoint that are a mixture of four runs.
+ART_DIR = Path(os.environ.get("PINN_ART_DIR") or (THIS_DIR / "artifacts"))
+ART_DIR = ART_DIR.expanduser().resolve()
 ART_DIR.mkdir(parents=True, exist_ok=True)
 
 
@@ -352,9 +367,10 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--artifacts-dir", default=d.get("artifacts_dir", ""),
                    help="directory for history.csv, the checkpoint, pred_*.npz, "
                         "op_metrics.csv, metrics.txt and the plots. Default is "
-                        "PINNmodulusTwo/artifacts/. sweep.py gives every grid "
-                        "point its own, which is what lets runs go in parallel "
-                        "without overwriting each other")
+                        "PINNmodulusTwo/artifacts/, or $PINN_ART_DIR when that "
+                        "is set; this flag wins over both. sweep.py gives every "
+                        "grid point its own, which is what lets runs go in "
+                        "parallel without overwriting each other")
     p.add_argument("--save-checkpoint", default=d.get("save_checkpoint", "model.pt"),
                    help="filename under artifacts/ for the trained weights; "
                         "empty string disables. The file carries everything "

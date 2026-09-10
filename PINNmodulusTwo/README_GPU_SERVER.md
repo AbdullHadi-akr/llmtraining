@@ -529,6 +529,12 @@ Der erste Epochen-Log auf einer GPU nennt den gemessenen Spitzenverbrauch:
   peak VRAM 0.41 GB of 20.0 GB (batch_data=2048 batch_phys=256 batch_bc=128)
 ```
 
+> **10.09. auf der g4dn.2xlarge nachgemessen: `0.11 GB von 15.6 GB`** (Tesla T4,
+> torch 2.6.0+cu124, `--ops OP01 OP02 --epochs 3`, Default-Batches). Mit allen
+> elf OPs wären es grob 0.4–0.5 GB — je OP kommen nur `Tn`, `Qsrc` und `T_lab`
+> dazu (~35 MB), die Batchgrößen ändern sich nicht. **Der Absatz unten stimmt
+> also nicht nur ungefähr, sondern mit Faktor 100 Luft.**
+
 **Speicher ist hier nicht die Grenze.** Das Netz ist mit 128×4 winzig (~70k
 Parameter), der Rollout-Buffer ist `7000 × 363 × 4 B` ≈ 10 MB, und selbst der
 doppelte Autograd des Physik-Residuums hängt nur linear an `--batch-phys`. Bei

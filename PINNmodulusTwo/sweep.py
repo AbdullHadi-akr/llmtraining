@@ -61,6 +61,16 @@ Worth doing on the instance, once, outside this script: start the CUDA MPS daemo
 (``nvidia-cuda-mps-control -d``). Without it the driver time-slices between
 processes rather than letting their kernels share the SMs.
 
+**``-j 4`` is four processes on ONE card, not a four-GPU sweep.** There is a
+single T4 in this machine. Parallel can therefore come out SLOWER than serial,
+through contention or an out-of-memory -- and finding out which is exactly what a
+``-j 1`` baseline is for. Never read the speedup off a parallel run alone.
+
+**Start this with the project virtualenv.** The children inherit
+``sys.executable``, so the system Python makes every point die on ``import
+torch``; :func:`preflight` checks that once, up front, instead of letting it
+happen N times.
+
 What this deliberately does NOT do
 ----------------------------------
 No plots, no resume, no checkpoint merge -- the Fahrplan puts those last, and
@@ -124,6 +134,37 @@ def parse_args() -> argparse.Namespace:
     return args
 
 
+def preflight() -> None:
+    """Fail in one line if this interpreter cannot train, before launching anything.
+
+    The children run under ``sys.executable`` -- whatever interpreter started
+    this script -- so starting sweep.py with the system Python instead of the
+    project virtualenv makes every single point die on ``import torch``. Without
+    this check that is N identical tracebacks in N log files and a sweep that
+    reports ``0/12 runs finished``, which reads like a code problem rather than
+    a forgotten ``source modulus_env/bin/activate``.
+
+    One subprocess, a fraction of a second, and the failure names itself.
+    """
+    probe = subprocess.run(
+        [sys.executable, "-c",
+         "import torch, numpy, pandas, yaml, matplotlib"],
+        capture_output=True, text=True,
+    )
+    if probe.returncode == 0:
+        return
+    missing = probe.stderr.strip().splitlines()[-1] if probe.stderr else "unknown"
+    raise SystemExit(
+        f"this interpreter cannot run train.py, so no point would survive:\n"
+        f"  {sys.executable}\n"
+        f"  {missing}\n"
+        f"Activate the project virtualenv and try again, e.g.\n"
+        f"  source modulus_env/bin/activate\n"
+        f"or call the venv's python directly:\n"
+        f"  <venv>/bin/python {Path(__file__).name} ..."
+    )
+
+
 def build_points(args) -> list[dict]:
     """The cartesian product of the axes, times the seeds. One dict per run."""
     axes: list[tuple[str, list[str]]] = []
@@ -170,6 +211,13 @@ def run_one(point: dict, out_root: Path, passthrough: list[str],
     cmd += passthrough
 
     env = dict(os.environ)
+    # Both mechanisms, deliberately. ``--artifacts-dir`` is the flag train.py
+    # parses; ``PINN_ART_DIR`` is read at import, so it isolates the child even
+    # on a path that never reaches the argument parser. A run that silently
+    # shares its directory with three others does not fail -- it writes a
+    # history.csv and a checkpoint that are a mixture of four runs, which is the
+    # kind of result nobody notices until it is quoted.
+    env["PINN_ART_DIR"] = str(run_dir)
     # Each run is one Python loop driving millions of tiny kernel launches, so it
     # wants ONE core. Left at the default, every child would open a thread pool
     # the width of the machine and the runs would spend their time preempting
@@ -255,8 +303,16 @@ def _std(xs):
     return (sum((x - mu) ** 2 for x in xs) / len(xs)) ** 0.5
 
 
-def write_csv(results: list[dict], path: Path) -> list[str]:
-    """One row per (configuration, seed). Returns the val OP ids it found."""
+def write_csv(results: list[dict], path: Path, sweep_wall_s: float) -> list[str]:
+    """One row per (configuration, seed). Returns the val OP ids it found.
+
+    ``wall_s`` is that run's own duration; ``sweep_wall_s`` is the whole sweep's
+    wall time, repeated on every row so the file is self-contained. Both are
+    seconds. The pair is the point of a timing comparison: ``sweep_wall_s`` at
+    ``-j 1`` against ``sweep_wall_s`` at ``-j N`` is the only honest speedup
+    number -- the sum of ``wall_s`` under contention OVERSTATES it, because each
+    run is itself slowed down by the others.
+    """
     val_ops: list[str] = []
     for r in results:
         for op in r.get("val_mae", {}):
@@ -265,15 +321,15 @@ def write_csv(results: list[dict], path: Path) -> list[str]:
     val_ops.sort()
 
     axes = sorted({k for r in results for k in r["config"]})
-    header = (["config", "seed", "ok", "minutes", "val_mae_mean"]
+    header = (["config", "seed", "ok", "wall_s", "sweep_wall_s", "val_mae_mean"]
               + [f"mae_{op}" for op in val_ops] + axes)
     lines = [",".join(header)]
     for r in results:
         vm = r.get("val_mae", {})
         mean = _mean([vm[op] for op in val_ops if op in vm])
         cells = [config_key(r["config"]).replace(",", ";"), str(r["seed"]),
-                 "1" if r["ok"] else "0", f"{r['seconds'] / 60:.2f}",
-                 f"{mean:.6g}"]
+                 "1" if r["ok"] else "0", f"{r['seconds']:.1f}",
+                 f"{sweep_wall_s:.1f}", f"{mean:.6g}"]
         cells += [f"{vm[op]:.6g}" if op in vm else "" for op in val_ops]
         cells += [str(r["config"].get(a, "")) for a in axes]
         lines.append(",".join(cells))
@@ -334,6 +390,8 @@ def main() -> None:
     args = parse_args()
     if not TRAIN_PY.exists():
         raise SystemExit(f"train.py not found next to sweep.py ({TRAIN_PY})")
+    if not args.dry_run:
+        preflight()
     points = build_points(args)
     out_root = Path(args.out).expanduser().resolve()
     jobs = args.jobs or max(1, min(4, (os.cpu_count() or 2) // 2))
@@ -383,11 +441,17 @@ def main() -> None:
     for r in results:
         r["val_mae"] = read_val_mae(r["dir"]) if r["ok"] else {}
 
-    val_ops = write_csv(results, Path(args.csv))
+    sweep_wall_s = time.time() - t0
+    val_ops = write_csv(results, Path(args.csv), sweep_wall_s)
     n_ok = sum(1 for r in results if r["ok"])
-    print(f"\n{n_ok}/{len(results)} runs finished in {(time.time() - t0) / 60:.1f} "
-          f"min wall time (sum of the runs: "
-          f"{sum(r['seconds'] for r in results) / 60:.1f} min)")
+    run_sum_s = sum(r["seconds"] for r in results)
+    print(f"\n{n_ok}/{len(results)} runs finished")
+    print(f"  sweep_wall_s = {sweep_wall_s:.1f} s ({sweep_wall_s / 60:.1f} min) "
+          f"<- compare THIS between -j 1 and -j N")
+    print(f"  sum of wall_s = {run_sum_s:.1f} s ({run_sum_s / 60:.1f} min) "
+          f"-> ratio {run_sum_s / max(sweep_wall_s, 1e-9):.2f}x, which is an "
+          f"UPPER BOUND: under contention each run is itself slower, so the sum "
+          f"is larger than a serial sweep would have cost. Measure -j 1.")
     print(f"wrote {args.csv}")
     if not val_ops:
         print("  [NOTE] no val OPs in any op_metrics.csv -- pass --val-ops to "
