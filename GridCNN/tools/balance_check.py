@@ -112,7 +112,16 @@ RAW_CANDIDATES = (
     "data_raw",
 )
 ENCODING = "cp1252"          # wie build.yaml: csv_encoding, Default cp1252
-DEFAULT_OPS = ("OP04", "OP05", "OP07", "OP14")
+# Alle sieben Konstant-Treiber-OPs AUS DEM TRAINING. Die frueheren Defaults
+# (OP04, OP05, OP07, OP14) hatten nur ZWEI Flusslevel -- 30 und 0 -- weil OP04
+# und OP05 beide V_dot = 30 fahren. Damit lassen sich zwei Punkte messen, aber
+# keine Funktion U(V_dot) anpassen. Diese sieben geben die drei trainierten
+# Level 0 / 15 / 30, jedes mehrfach belegt.
+#
+# OP16 (V_dot = 90) fehlt hier ABSICHTLICH: es ist ein TEST-OP. U daran zu
+# kalibrieren waere eine Auswahl auf dem Extrapolationstier -- genau das, wovor
+# op_registry.py warnt. OP16 ist die Gegenprobe fuer U(V_dot), nie die Stuetze.
+DEFAULT_OPS = ("OP01", "OP02", "OP03", "OP04", "OP05", "OP07", "OP14")
 
 TIME = ("Physical Time (s)",)
 HEAT_SRC = {"jr1_w": ("Heat Source JR1 Monitor (W)",),
@@ -121,8 +130,20 @@ HEAT_SRC = {"jr1_w": ("Heat Source JR1 Monitor (W)",),
 Q_WALL = ("Heat Transfer: solid to fluid Monitor (W)",
           "Heat Transfer: solid to fluid (W)")
 T_OUT = ("Tmfavg_fluid_out Monitor (C)", "Tmfavg_fluid_out (C)")
+# Die Einlasstemperatur stand am 09.09. unter KEINEM dieser Namen in
+# *_Temperaturen.csv -- "dT gemessen" kam als nan heraus. Deshalb eine
+# Rueckfallkette statt eines einzelnen Ratens, und das Skript sagt, welche
+# Quelle es benutzt hat. Fuer die Konstant-Treiber-OPs ist die Fluidtemperatur
+# ohnehin ein Skalar und steht in *_Input Signale.csv.
 T_IN = ("Tmfavg_fluid_in Monitor (C)", "Tmfavg_fluid_in (C)",
-        "Fluid Inlet Temperature Monitor (C)")
+        "Tmfavg_fluid_inlet Monitor (C)",
+        "Fluid Inlet Temperature Monitor (C)",
+        "Fluid Inlet Temperature (C)",
+        "Fluid Initial Temperature Monitor (C)")
+# Rueckfall 2: derselbe Wert als Skalar im Inputsignale-Export.
+T_IN_SCALAR = ("Fluid Inlet Temperature Monitor (C)",
+               "Fluid Initial Temperature Monitor (C)",
+               "Fluid Temperature Monitor (C)")
 CP_FLUID = ("Specific Heat Monitor (J/kg-K)", "Specific Heat (J/kg-K)")
 MDOT = ("Fluid Mass Flow Monitor (kg/s)",)
 
@@ -287,6 +308,11 @@ def main() -> None:
         t_out = pick(tm, T_OUT, "Fluid-Auslasstemperatur", files["temperaturen"])
         t_in = pick(tm, T_IN, "Fluid-Einlasstemperatur", files["temperaturen"],
                     required=False)
+        t_in_src = "Temperaturen.csv"
+        if t_in is None:
+            t_in = pick(ins, T_IN_SCALAR, "Fluid-Einlasstemperatur",
+                        files["input"], required=False)
+            t_in_src = "Input Signale.csv" if t_in is not None else "FEHLT"
         cp = pick(fl, CP_FLUID, "Cp_fluid", files["fluid"])
         mdot = pick(ins, MDOT, "Massenstrom", files["input"])
 
@@ -294,7 +320,8 @@ def main() -> None:
         m_v = float(np.nanmean(mdot))
 
         rows.append(dict(op=op, t=t, jr1=jr1, jr2=jr2, tot=tot, t_q=t_q, q=q,
-                         t_out=t_out, t_in=t_in, cp=cp_v, mdot=m_v))
+                         t_out=t_out, t_in=t_in, t_in_src=t_in_src,
+                         cp=cp_v, mdot=m_v))
 
     if args.list_columns or not rows:
         return
@@ -302,43 +329,52 @@ def main() -> None:
     # ---- 1. Halbmodell-Faktor ----------------------------------------------
     print("== 1. Halbmodell-Konvention des Waermestrom-Monitors ==")
     print("   Die QUELLE ist geklaert: jr1_w = eine Rolle = Halbmodell.")
-    print("   Offen ist nur der Solid-to-Fluid-Monitor. Entscheidend: Q_ht/JR1")
+    print("   Offen ist die Bezugsflaeche des Solid-to-Fluid-Monitors. Gemessen")
     print("   im SPAETEN Fenster (letztes Drittel), wo Einschwingen vorbei ist.\n")
-    print(f"{'OP':<6} {'jr2/jr1':>9} {'Q_ht/JR1':>10} {'Q_ht/(JR1+JR2)':>16} "
-          f"{'Lesart':>16}")
+    print(f"{'OP':<6} {'V_dot':>6} {'jr2/jr1':>8} {'tot/jr1':>8} "
+          f"{'Q_ht/jr1':>9} {'Q_ht/tot':>9}  {'Lesart':<22}")
     for r in rows:
-        j1 = r["jr1"]; j2 = r["jr2"]
         late = slice(int(0.67 * len(r["t_q"])), None)
         q_l = float(np.nanmean(r["q"][late]))
-        j1_l = float(np.nanmean(np.interp(r["t_q"], r["t"], j1)[late]))
-        j2_l = (float(np.nanmean(np.interp(r["t_q"], r["t"], j2)[late]))
-                if j2 is not None else np.nan)
-        rat1 = q_l / j1_l if j1_l else np.nan
-        rat2 = q_l / (j1_l + j2_l) if j1_l and not np.isnan(j2_l) else np.nan
+        onq = lambda a: float(np.nanmean(np.interp(r["t_q"], r["t"], a)[late]))
+        j1 = onq(r["jr1"])
+        j2 = onq(r["jr2"]) if r["jr2"] is not None else np.nan
+        tt = onq(r["tot"]) if r["tot"] is not None else np.nan
+        r1 = q_l / j1 if j1 else np.nan
+        rt = q_l / tt if tt else np.nan
         if r["mdot"] <= 0:
-            verdict = "kein Fluss"
-        elif 0.75 < rat1 < 1.35:
-            verdict = "eine Platte"
-        elif 1.6 < rat1 < 2.6:
-            verdict = "BEIDE Platten"
+            v = "kein Fluss"
+        elif not np.isnan(rt) and 0.85 < rt < 1.15:
+            v = "= Gesamtquelle"
+        elif 0.75 < r1 < 1.3:
+            v = "eine Platte"
+        elif 1.6 < r1 < 2.4:
+            v = "beide Platten"
         else:
-            verdict = "unklar"
-        print(f"{r['op']:<6} {j2_l/j1_l if j1_l else np.nan:>9.4f} "
-              f"{rat1:>10.4f} {rat2:>16.4f} {verdict:>16}")
-    print("   'eine Platte' -> Q in JR1-Konvention, nichts anzupassen.")
-    print("   'BEIDE Platten' -> ENTWEDER Q halbieren ODER A verdoppeln, nie beides.")
-    print("   Achtung: 'Heat Source Monitor (total)' ist NICHT JR1+JR2, sondern")
-    print("   groesser -- es taugt nicht als Probe und wird hier nicht benutzt.\n")
+            v = "PASST NICHT"
+        print(f"{r['op']:<6} {r['mdot']:>6.4g} {j2/j1 if j1 else np.nan:>8.3f} "
+              f"{tt/j1 if j1 else np.nan:>8.3f} {r1:>9.3f} {rt:>9.3f}  {v:<22}")
+    print()
+    print("   Q_ht/tot ~ 1  -> der Monitor draint die GANZE Erzeugung. Dann ist")
+    print("                    Q_ht/jr1 kein Konventionsfehler, sondern sagt, dass")
+    print("                    die Zelle mehr erzeugt als 2x JR1 -- und die")
+    print("                    Modellquelle q_dot deckt nur JR1 ab.")
+    print("   Q_ht/jr1 ~ 1  -> eine Platte, gleiche Konvention wie die Quelle.")
+    print("   Q_ht/jr1 ~ 2  -> beide Platten: ENTWEDER Q halbieren ODER A")
+    print("                    verdoppeln, nie beides.")
+    print("   'Heat Source Monitor (total)' ist NICHT jr1+jr2, sondern groesser")
+    print("   -- deshalb steht tot/jr1 hier als eigene Spalte und nicht als Probe.\n")
 
     # ---- 2. Fluidbilanz -----------------------------------------------------
     print("== 2. Fluidbilanz:  dT = Qdot / (mdot * Cp)  gegen  T_out - T_in ==")
     print(f"{'OP':<6} {'mdot':>9} {'Cp':>9} {'dT gerechnet':>14} "
-          f"{'dT gemessen':>13} {'Verhaeltnis':>12}")
+          f"{'dT gemessen':>13} {'Verh.':>7}  {'T_in aus':<20}")
     for r in rows:
         q = np.interp(r["t"], r["t_q"], r["q"])
         if r["mdot"] <= 0:
             print(f"{r['op']:<6} {r['mdot']:>9.4g} {r['cp']:>9.4g} "
-                  f"{'--':>14} {'--':>13} {'kein Durchfluss':>12}")
+                  f"{'--':>14} {'--':>13} {'--':>7}  "
+                  f"kein Durchfluss")
             continue
         dt_calc = float(np.nanmean(q)) / (r["mdot"] * r["cp"])
         if r["t_in"] is not None:
@@ -347,9 +383,12 @@ def main() -> None:
             dt_meas = np.nan
         print(f"{r['op']:<6} {r['mdot']:>9.4g} {r['cp']:>9.4g} "
               f"{dt_calc:>14.4f} {dt_meas:>13.4f} "
-              f"{dt_calc/dt_meas if dt_meas else np.nan:>12.4f}")
+              f"{dt_calc/dt_meas if dt_meas else np.nan:>7.3f}  "
+              f"{r['t_in_src']:<20}")
     print("   ~1.0 -> die Bilanz geht auf. ~2.0 oder ~0.5 -> Halbmodell-Faktor,")
-    print("   siehe Punkt 1, NICHT ein Physikfehler.\n")
+    print("   siehe Punkt 1, NICHT ein Physikfehler.")
+    print("   'T_in aus FEHLT' -> die Spalte wurde nirgends gefunden; dann einmal")
+    print("   mit --list-columns laufen und den Namen nachtragen.\n")
 
     # ---- 3. Energieanteil ueber die Wand ------------------------------------
     print("== 3. Anteil der Quellenergie, der ueber die Wand abfliesst ==")
@@ -360,17 +399,26 @@ def main() -> None:
         e_s = float(_trapz(r["jr1"], r["t"]))
         print(f"{r['op']:<6} {e_q:>17.5g} {e_s:>18.5g} "
               f"{e_q/e_s if e_s else np.nan:>9.4f}")
-    print("   NICHT mit energy_balance_report gleichsetzen: der sieht nur JR1.")
-    print("   0.9x dort heisst '90 % bleiben IN JR1', der Rest geht ins Gehaeuse")
-    print("   und ins Cell Center -- nicht ins Fluid. Erwartet wird hier:")
-    print("     mdot = 0     -> Anteil ~ 0   (kein konvektiver Abtransport)")
-    print("     hoher Fluss  -> gross, aber KLEINER als 0.5 (Gehaeusespeicher)\n")
+    print("   NICHT mit energy_balance_report gleichsetzen: der sieht nur JR1,")
+    print("   und er vergleicht RATEN, nicht Energien.")
+    print()
+    print("   KORRIGIERT am 09.09.: bei mdot = 0 ist NICHT ~0 zu erwarten.")
+    print("   mdot = 0 heisst kein FLUSS, nicht kein FLUID -- das Kuehlmittel")
+    print("   steht im Kanal und nimmt Waerme in seine eigene Waermekapazitaet")
+    print("   auf. Gemessen wurden ~0.27 auf OP07/OP14, und das ist physikalisch")
+    print("   richtig: die Energie wird GESPEICHERT, nicht abtransportiert.")
+    print("   Was daraus folgt, ist ein Modellbefund, kein Messfehler --")
+    print("   dT = Qdot/(mdot*Cp) divergiert bei mdot -> 0 und braucht einen")
+    print("   Kapazitaetsterm. Siehe FAHRPLAN, Stufe 1.\n")
 
     # ---- 4. h_eff gegen den Fluss ------------------------------------------
     print(f"== 4. U = Qdot / (A * dT),  A = {args.area} m^2 ==")
     print("   U ist ein GESAMTDURCHGANG Gitterebene -> Fluidkern, kein")
     print("   Filmkoeffizient: die 1.9 mm zur Kuehlplatte stecken drin.")
-    print(f"{'OP':<6} {'mdot':>9} {'U [W/m2K]':>15}")
+    print("   VORLAEUFIG, solange Punkt 1 offen ist: zaehlt der Monitor beide")
+    print("   Platten, ist U hier um Faktor 2 zu hoch. Robust ist das VERHAELTNIS")
+    print("   zwischen den Flusslevels, nicht der Absolutwert.")
+    print(f"{'OP':<6} {'V_dot':>7} {'mdot':>9} {'U [W/m2K]':>12}")
     any_wall = False
     for r in rows:
         Tw, tw = wall_temp_from_cache(r["op"])
@@ -383,7 +431,7 @@ def main() -> None:
         dT = Tw - tf
         ok = np.abs(dT) > 1e-6
         h = np.nanmean(q[ok] / (args.area * dT[ok])) if ok.any() else np.nan
-        print(f"{r['op']:<6} {r['mdot']:>9.4g} {h:>15.4f}")
+        print(f"{r['op']:<6} {'':>7} {r['mdot']:>9.4g} {h:>12.2f}")
     if not any_wall:
         print("   uebersprungen -- kein data_cache gefunden (braucht T an der Wand)")
     else:
