@@ -54,8 +54,25 @@ from op_registry import (
 from physics import heat_residual, boundary_condition_loss
 
 THIS_DIR = Path(__file__).resolve().parent
+# Where every artefact of a run lands: history.csv, the checkpoint, pred_*.npz,
+# op_metrics.csv, metrics.txt and the plots. A module global because eight call
+# sites reach for it; ``--artifacts-dir`` rebinds it in ``train()`` before any of
+# them run.
+#
+# It is a knob because ``sweep.py`` runs several train.py processes at once, and
+# without one directory per grid point they would all write the same files --
+# the Fahrplan already warns that "jeder Lauf ueberschreibt artifacts/model.pt".
+# That single collision is what stood between this project and a parallel sweep.
 ART_DIR = THIS_DIR / "artifacts"
 ART_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def set_artifacts_dir(path) -> Path:
+    """Rebind :data:`ART_DIR` and create it. Call before ``fit()``/``evaluate()``."""
+    global ART_DIR
+    ART_DIR = Path(path).expanduser().resolve()
+    ART_DIR.mkdir(parents=True, exist_ok=True)
+    return ART_DIR
 
 # Every per-epoch series ``fit`` records. One tuple rather than a dict literal
 # buried in ``fit``, because the abort path appends to each series by hand: a
@@ -332,6 +349,12 @@ def parse_args() -> argparse.Namespace:
     #   --test-ops  the report number. Look at it once, at the end. Choosing
     #               anything on it turns it into a second validation set and
     #               there is no held-out estimate left.
+    p.add_argument("--artifacts-dir", default=d.get("artifacts_dir", ""),
+                   help="directory for history.csv, the checkpoint, pred_*.npz, "
+                        "op_metrics.csv, metrics.txt and the plots. Default is "
+                        "PINNmodulusTwo/artifacts/. sweep.py gives every grid "
+                        "point its own, which is what lets runs go in parallel "
+                        "without overwriting each other")
     p.add_argument("--save-checkpoint", default=d.get("save_checkpoint", "model.pt"),
                    help="filename under artifacts/ for the trained weights; "
                         "empty string disables. The file carries everything "
@@ -432,43 +455,113 @@ class _LossBalancer:
     * A non-finite sample never enters the average. ``decay * nan`` is ``nan``,
       so a single bad step would otherwise pin the divisor at nan for the rest
       of the run and silently poison every later epoch.
+
+    Everything here is a 0-dim CUDA tensor rather than a Python float
+    ---------------------------------------------------------------
+    The arithmetic is unchanged; where it happens is not. This class used to take
+    ``float(L_data.detach())`` and return a Python float, and each of those
+    conversions is a ``cudaStreamSynchronize``: the CPU stops until the GPU has
+    drained everything queued behind it. At three terms per optimiser step and
+    ``len(ops) * inner_steps`` steps per epoch that is ~3300 full pipeline stalls
+    an epoch from this class alone, placed at the worst possible moment -- right
+    after the forward pass, before the backward has even been enqueued. The CPU
+    and the GPU then never overlap, which is most of why a run of this shape sits
+    at single-digit GPU utilisation.
+
+    Keeping the state on the device removes them all. The state is float64 so the
+    EMA is accumulated exactly as the old Python-float version accumulated it, and
+    :meth:`divisor` hands it back in float64 too. The cast to float32 happens at
+    the call site, on the line that divides the loss -- which is both where it
+    matters and where it is visible. A Python float operand used to be cast to the
+    tensor's dtype at the op, and ``.to(torch.float32)`` there reproduces exactly
+    that rounding.
+
+    The ``prev is None`` test also had to leave Python: whether the EMA has ever
+    seen a finite sample is itself a value on the device, and branching on it
+    would put the sync straight back. It is carried as a 0-dim bool tensor and
+    the update is branchless -- see :meth:`divisor` for the four cases it has to
+    reproduce.
     """
 
     KEYS = ("data", "phys", "bc")
 
     def __init__(self, *, mode: str, decay: float, warmup_steps: int,
-                 phys_norm: float, bc_norm: float, data_floor: float) -> None:
+                 phys_norm: float, bc_norm: float, data_floor: float,
+                 device) -> None:
         self.mode = mode
         self.decay = decay
         self.warmup_steps = max(1, warmup_steps)
         self.data_floor = data_floor
         self.override = {"data": 0.0, "phys": phys_norm, "bc": bc_norm}
-        self._ema: dict = {k: None for k in self.KEYS}
+        f64 = dict(device=device, dtype=torch.float64)
+        self._one = torch.ones((), **f64)
+        # Allocated once: a fresh torch.full() per step would be a kernel launch
+        # per term per step for a number that never changes.
+        self._override_t = {
+            k: (torch.full((), float(v), **f64) if v > 0.0 else None)
+            for k, v in self.override.items()
+        }
+        self._ema = {k: torch.zeros((), **f64) for k in self.KEYS}
+        # "has this EMA ever seen a finite sample?" -- the old ``prev is None``,
+        # on the device so nothing has to sync to ask.
+        self._ema_init = {
+            k: torch.zeros((), device=device, dtype=torch.bool) for k in self.KEYS
+        }
         self._frozen: dict = {k: None for k in self.KEYS}
-        self.last: dict = {k: 1.0 for k in self.KEYS}
+        self.last: dict = {k: self._one for k in self.KEYS}
         self._steps = 0
+        # Which keys were ever asked for. A term switched off by a zero weight
+        # never calls divisor(), and without this ``fixed`` mode would keep
+        # retrying to freeze a divisor that will never exist -- one sync per step
+        # for the rest of the run.
+        self._seen: set = set()
+        self._freeze_done = False
 
-    def divisor(self, key: str, value: float) -> float:
-        override = self.override.get(key, 0.0)
-        if override > 0.0:
+    def divisor(self, key: str, value) -> torch.Tensor:
+        """Divisor for ``key``, as a float64 0-dim tensor. ``value`` is detached.
+
+        ``value`` may be a tensor (the training loop, which must not sync) or a
+        plain float (``selftest.py``, which is arithmetic on the machinery and
+        cares about readability instead).
+
+        The EMA update reproduces the original four cases exactly, without a
+        branch on any device value:
+
+        ==================  ==============  ================================
+        state               sample          result
+        ==================  ==============  ================================
+        never initialised   finite          divisor = value, EMA := value
+        never initialised   non-finite      divisor -> 1.0, EMA stays empty
+        initialised         finite          divisor = EMA, EMA := decayed
+        initialised         non-finite      divisor = EMA, EMA unchanged
+        ==================  ==============  ================================
+        """
+        self._seen.add(key)
+        override = self._override_t.get(key)
+        if override is not None:
             self.last[key] = override
             return override
         if key == "data" and self.mode == "legacy":
-            self.last[key] = 1.0          # historical behaviour: L_data stays raw
-            return 1.0
-        if self._frozen[key] is not None:
-            self.last[key] = self._frozen[key]
-            return self._frozen[key]
+            self.last[key] = self._one          # historical: L_data stays raw
+            return self._one
+        frozen = self._frozen[key]
+        if frozen is not None:
+            self.last[key] = frozen
+            return frozen
 
-        prev = self._ema[key]
-        den = value if prev is None else prev
-        if np.isfinite(value):
-            self._ema[key] = (value if prev is None
-                              else self.decay * prev + (1.0 - self.decay) * value)
-        if not np.isfinite(den) or den <= 0.0:
-            den = 1.0
+        value = torch.as_tensor(value, dtype=torch.float64,
+                                device=self._one.device)
+        prev, init = self._ema[key], self._ema_init[key]
+        finite = torch.isfinite(value)
+        den = torch.where(init, prev, value)
+        fresh = torch.where(init, self.decay * prev + (1.0 - self.decay) * value,
+                            value)
+        self._ema[key] = torch.where(finite, fresh, prev)
+        self._ema_init[key] = init | finite
+
+        den = torch.where(torch.isfinite(den) & (den > 0.0), den, self._one)
         if key == "data":
-            den = max(den, self.data_floor)
+            den = torch.clamp(den, min=self.data_floor)
         self.last[key] = den
         return den
 
@@ -477,10 +570,27 @@ class _LossBalancer:
         self._steps += 1
         if self.mode != "fixed" or self._steps < self.warmup_steps:
             return
-        for key in self.KEYS:
-            if self._frozen[key] is None and self._ema[key] is not None:
+        if self._freeze_done:
+            return
+        # The one place a sync is unavoidable, and it happens once per run: an
+        # EMA that never saw a finite sample must stay unfrozen, and that is a
+        # device value. Bounded by _seen, so a switched-off term cannot make this
+        # retry forever.
+        for key in self._seen:
+            if self._frozen[key] is None and bool(self._ema_init[key]):
                 floor = self.data_floor if key == "data" else 1e-30
-                self._frozen[key] = max(self._ema[key], floor)
+                self._frozen[key] = torch.clamp(self._ema[key], min=floor)
+        self._freeze_done = all(
+            self._frozen[k] is not None for k in self._seen
+        )
+
+    def last_floats(self) -> dict:
+        """The divisors last handed out, as Python floats. Syncs -- call rarely.
+
+        Once per epoch, for the history CSV. Reading ``self.last`` directly in the
+        hot loop would put back exactly the stalls this class exists to avoid.
+        """
+        return {k: float(v) for k, v in self.last.items()}
 
 
 def fit(args):
@@ -601,6 +711,10 @@ def fit(args):
 
     # Create boundary condition mask (x ≈ 0 for cell center)
     bc_mask = torch.tensor(np.abs(bundle.xn[:, 0]) < 1e-6, dtype=torch.bool, device=device)
+    # Materialised ONCE. Handed to boundary_condition_loss in place of the mask,
+    # which is what keeps that function from running a nonzero() -- and syncing
+    # on its data-dependent length -- on every optimiser step.
+    bc_index = torch.where(bc_mask)[0]
     n_bc = int(bc_mask.sum().item())
     print(f"BC points (x=0): {n_bc}/{len(bc_mask)}", flush=True)
     # The BC term is silent about its own failure modes, and both of them look
@@ -690,6 +804,7 @@ def fit(args):
     balance = _LossBalancer(
         mode=balance_mode, decay=step_decay, warmup_steps=warmup_steps,
         phys_norm=phys_norm, bc_norm=bc_norm, data_floor=data_floor,
+        device=device,
     )
     print(
         f"loss balance: mode={balance_mode} ema_decay={ema_decay:g}/epoch "
@@ -807,8 +922,23 @@ def fit(args):
                 ep_spread_time += t_pred / (t_lab + 1e-12)
             _t0 = time.time()
 
-            op_data = op_phys = op_bc = 0.0
-            op_ratio_phys = op_ratio_bc = 0.0
+            # Accumulated on the DEVICE, in float64. Every ``float(L.detach())``
+            # that used to stand in this loop was a cudaStreamSynchronize, and
+            # there were six of them per optimiser step on top of the balancer's
+            # three -- ~11k full pipeline stalls an epoch at eleven OPs and 100
+            # inner steps, which is most of the reason a run of this shape leaves
+            # the card idle.
+            #
+            # float64 because the Python-float accumulation these replace was
+            # float64: summing ``inner_steps`` terms in float32 instead would move
+            # the logged epoch loss for a reason that has nothing to do with the
+            # model.
+            zero64 = torch.zeros((), device=device, dtype=torch.float64)
+            op_data_t = zero64.clone()
+            op_phys_t = zero64.clone()
+            op_bc_t = zero64.clone()
+            op_ratio_phys_t = zero64.clone()
+            op_ratio_bc_t = zero64.clone()
             # Placeholder for a term that is switched off: NaN, not 0.0, so the
             # convergence plot shows a gap instead of a flat line that never
             # happened.
@@ -856,7 +986,7 @@ def fit(args):
                     bc_res = boundary_condition_loss(
                         model, op["xn"], op["static"], op["cfg"][pt_bc],
                         op["forcing"][pt_bc], own_hist, dtn, op["tn"][pt_bc],
-                        bc_mask, bundle.bc_scale, residual_norm=residual_norm,
+                        bc_index, bundle.bc_scale, residual_norm=residual_norm,
                     )
                     L_bc = torch.mean(bc_res ** 2)
                 else:
@@ -867,10 +997,17 @@ def fit(args):
                 # not between their units. Which terms get divided depends on
                 # --loss-balance; the divisor is always the estimate from BEFORE
                 # this step, and a non-finite sample never enters it.
-                L_data_bal = L_data / balance.divisor("data", float(L_data.detach()))
-                L_phys_bal = (L_phys / balance.divisor("phys", float(L_phys.detach()))
+                # Tensors, not floats: the balancer keeps its state on the
+                # device precisely so these three calls do not stall the stream.
+                # ``.float()`` on a float64 divisor, not a promotion of the
+                # loss: dividing an f32 loss by an f64 tensor would make the
+                # whole backward pass float64. The old code passed a Python
+                # float, which torch cast to the tensor's dtype at the op --
+                # this is the same rounding, written out.
+                L_data_bal = L_data / balance.divisor("data", L_data.detach()).float()
+                L_phys_bal = (L_phys / balance.divisor("phys", L_phys.detach()).float()
                               if want_phys else nan)
-                L_bc_bal = (L_bc / balance.divisor("bc", float(L_bc.detach()))
+                L_bc_bal = (L_bc / balance.divisor("bc", L_bc.detach()).float()
                             if want_bc else nan)
                 balance.end_step()
 
@@ -888,6 +1025,17 @@ def fit(args):
                 # Never let a non-finite loss reach the optimiser: clip_grad_norm_
                 # does not rescue it (total_norm=nan -> clip_coef=nan -> all grads
                 # nan), so one bad step would permanently destroy the weights.
+                #
+                # Taken AFTER backward() and before step(), which guards exactly
+                # the same thing -- nothing has touched the weights yet -- but
+                # moves the step's one unavoidable sync to the end of it. Before
+                # backward(), where it used to stand, the CPU stalled with only
+                # the forward enqueued; here the whole forward AND backward are in
+                # flight, so the card has real work while the CPU waits. The
+                # wasted backward on the aborting step costs nothing: it happens
+                # once, and the run ends.
+                opt.zero_grad()
+                loss.backward()
                 if not torch.isfinite(loss):
                     # Only terms that were actually computed can be to blame; a
                     # term skipped for having weight 0 is NaN on purpose and must
@@ -907,26 +1055,39 @@ def fit(args):
                     aborted_epoch = True
                     break
 
-                opt.zero_grad()
-                loss.backward()
                 grad_clip = float(getattr(args, "grad_clip", 0.0))
                 if grad_clip > 0.0:
                     torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=grad_clip)
                 opt.step()
-                op_data += float(L_data.detach())
-                op_phys += float(L_phys.detach())
-                op_bc += float(L_bc.detach())
+                op_data_t += L_data.detach().double()
+                op_phys_t += L_phys.detach().double()
+                op_bc_t += L_bc.detach().double()
                 # Ratio each weighted term actually contributes against the data
                 # term. This is the number the loss weights are really setting,
                 # and without it the balance can only be guessed at from w_phys
                 # alone. ``benchmark_balance.py`` reads exactly this series.
-                base = args.w_data * float(L_data_bal.detach())
-                if np.isfinite(base) and base > 0.0:
-                    if want_phys and args.w_phys != 0.0:
-                        op_ratio_phys += args.w_phys * float(L_phys_bal.detach()) / base
-                    if want_bc and args.w_bc != 0.0:
-                        op_ratio_bc += args.w_bc * float(L_bc_bal.detach()) / base
+                # ``torch.where`` rather than a Python ``if``: the condition is a
+                # device value, and asking about it would be another sync. Both
+                # branches are evaluated, so the division by a zero base produces
+                # an inf that is then discarded -- exactly what the old guard did
+                # by never computing it.
+                base = args.w_data * L_data_bal.detach().double()
+                ok = torch.isfinite(base) & (base > 0.0)
+                if want_phys and args.w_phys != 0.0:
+                    op_ratio_phys_t += torch.where(
+                        ok, args.w_phys * L_phys_bal.detach().double() / base, zero64)
+                if want_bc and args.w_bc != 0.0:
+                    op_ratio_bc_t += torch.where(
+                        ok, args.w_bc * L_bc_bal.detach().double() / base, zero64)
 
+            # The one sync for this OP's whole inner loop. It is taken before
+            # the timer so t_inner_s still measures work that has finished,
+            # rather than work merely queued.
+            op_data = float(op_data_t)
+            op_phys = float(op_phys_t)
+            op_bc = float(op_bc_t)
+            op_ratio_phys = float(op_ratio_phys_t)
+            op_ratio_bc = float(op_ratio_bc_t)
             t_inner_s += time.time() - _t0
             if aborted_epoch:
                 break
@@ -1016,9 +1177,10 @@ def fit(args):
             # plots and CSV writers downstream silently misalign an aborted run
             # by one row. The divisors are real values and worth keeping; the
             # spreads describe the epoch that just blew up, so they go in too.
-            history["div_data"].append(balance.last["data"])
-            history["div_phys"].append(balance.last["phys"] if want_phys else float("nan"))
-            history["div_bc"].append(balance.last["bc"] if want_bc else float("nan"))
+            div_now = balance.last_floats()
+            history["div_data"].append(div_now["data"])
+            history["div_phys"].append(div_now["phys"] if want_phys else float("nan"))
+            history["div_bc"].append(div_now["bc"] if want_bc else float("nan"))
             history["spread_space"].append(ep_spread_space)
             history["spread_time"].append(ep_spread_time)
             history["delta"].append(float(model.delta.detach()))
@@ -1029,9 +1191,12 @@ def fit(args):
         # divisors the balancer last handed out, so the logged numbers are the
         # ones the optimiser actually saw -- not a second, differently computed
         # estimate that would drift away from them under --loss-balance.
-        ep_data_bal = ep_data / balance.last["data"]
-        ep_phys_bal = ep_phys / balance.last["phys"] if want_phys else float("nan")
-        ep_bc_bal = ep_bc / balance.last["bc"] if want_bc else float("nan")
+        # One sync per epoch for the whole balancer, instead of three per
+        # optimiser step. See _LossBalancer.last_floats().
+        div_now = balance.last_floats()
+        ep_data_bal = ep_data / div_now["data"]
+        ep_phys_bal = ep_phys / div_now["phys"] if want_phys else float("nan")
+        ep_bc_bal = ep_bc / div_now["bc"] if want_bc else float("nan")
 
         history["epoch"].append(epoch)
         history["L_data"].append(ep_data)
@@ -1041,9 +1206,9 @@ def fit(args):
         history["L_bc_bal"].append(ep_bc_bal)
         history["ratio_phys"].append(ep_ratio_phys if want_phys else float("nan"))
         history["ratio_bc"].append(ep_ratio_bc if want_bc else float("nan"))
-        history["div_data"].append(balance.last["data"])
-        history["div_phys"].append(balance.last["phys"] if want_phys else float("nan"))
-        history["div_bc"].append(balance.last["bc"] if want_bc else float("nan"))
+        history["div_data"].append(div_now["data"])
+        history["div_phys"].append(div_now["phys"] if want_phys else float("nan"))
+        history["div_bc"].append(div_now["bc"] if want_bc else float("nan"))
         history["spread_space"].append(ep_spread_space)
         history["spread_time"].append(ep_spread_time)
         history["delta"].append(float(model.delta.detach()))
@@ -1096,9 +1261,14 @@ def fit(args):
                 flush=True,
             )
             if epoch == 1 and device.type == "cuda":
-                # Peak VRAM, once. The batch sizes are the only real GPU knob here
-                # (see README_GPU_SERVER 6.4) and guessing how much headroom is
-                # left is exactly the thing a measurement should answer.
+                # Peak VRAM, once. Not a headroom hint: a single run of this
+                # shape cannot fill the card and no batch size makes it -- the
+                # rollout is ~7000 SEQUENTIAL steps of a 363x128 matmul, so the
+                # GPU waits on kernel launches, not on memory. Raising the batch
+                # sizes to use the free memory changes the gradient noise, i.e.
+                # the experiment (README_GPU_SERVER 6.5). What uses the card
+                # without touching the experiment is several runs at once:
+                # sweep.py -j N, README_GPU_SERVER 6.4.
                 peak = torch.cuda.max_memory_allocated(device) / 1e9
                 total = torch.cuda.get_device_properties(device).total_memory / 1e9
                 print(
@@ -1237,6 +1407,10 @@ def trivial_baselines(op, bundle) -> tuple[float, float]:
 
 
 def train(args) -> None:
+    # Before anything writes: fit() checkpoints every --checkpoint-every epochs,
+    # so rebinding after it started would scatter one run over two directories.
+    if str(getattr(args, "artifacts_dir", "") or ""):
+        print(f"[artifacts] {set_artifacts_dir(args.artifacts_dir)}", flush=True)
     # Resolve the OPs the run DEPENDS on before training, not after: a typo in
     # --val-ops would otherwise cost the whole run before it surfaces.
     require_ops(*args.ops, *getattr(args, "val_ops", []),
@@ -1441,6 +1615,27 @@ def evaluate(model, bundle, ops, dtn, device, history, args) -> None:
                  "warm) and 'bias_frac' = |late_bias|/late; near 1 the late error "
                  "is drift in one direction, near 0 it is scatter. O13.")
 
+    # ---- op_metrics.csv ------------------------------------------------------
+    # The same numbers as the table above, in a form a program can read. The
+    # table is fixed-width and carries units and footnotes: fine for a human,
+    # brittle for sweep.py, which has to pull one val-MAE out of every grid
+    # point it ran. The column list is explicit rather than derived from the
+    # dict, so adding a metric cannot silently reorder an existing sweep.csv.
+    metric_cols = [
+        "mae", "rmse", "max_abs_err", "peak_err", "peak_true", "peak_pred",
+        "mae_transient", "mae_quiescent", "transient_frac", "late_mae",
+        "late_is_holdout", "bias_early", "bias_mid", "bias_end", "late_bias",
+        "late_bias_frac",
+    ]
+    csv_rows = ["op,tier,role," + ",".join(metric_cols)]
+    for op_id, tier, role, m in rows:
+        vals = ",".join(
+            f"{int(m[c])}" if isinstance(m[c], bool) else f"{float(m[c]):.10g}"
+            for c in metric_cols
+        )
+        csv_rows.append(f"{op_id},{tier},{role},{vals}")
+    (ART_DIR / "op_metrics.csv").write_text("\n".join(csv_rows) + "\n")
+
     # ---- plots --------------------------------------------------------------
     fig, ax = plt.subplots(1, 2, figsize=(11, 4))
     ax[0].semilogy(history["epoch"], history["L_data"], label="L_data")
@@ -1478,7 +1673,8 @@ def evaluate(model, bundle, ops, dtn, device, history, args) -> None:
     plt.close(fig)
 
     (ART_DIR / "metrics.txt").write_text("\n".join(lines) + "\n")
-    print(f"\n  wrote {ART_DIR/'metrics.txt'} and plots", flush=True)
+    print(f"\n  wrote {ART_DIR/'metrics.txt'}, {ART_DIR/'op_metrics.csv'} "
+          f"and plots", flush=True)
 
 
 

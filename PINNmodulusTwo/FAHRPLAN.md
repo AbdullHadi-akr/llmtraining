@@ -64,19 +64,53 @@ ist, unten.**
 **Schritt 6 ist gelaufen und grün** (Zahlen in Teil III). Ab hier werden
 Konfigurationen verglichen, und dafür fehlt das Werkzeug.
 
-## Was gebaut wird
+## Gebaut am 09.09. — `sweep.py` steht, gemessen ist noch nichts
 
-~80 Zeilen, eine Datei, kein Framework:
+```bash
+python3 PINNmodulusTwo/sweep.py --seeds 0 1 2 \
+    --vary delta-phys 1.0 0.4 0.2 -j 4 -- --epochs 20
+
+  -> artifacts/sweep/<punkt>/  je Lauf ein eigener Ordner: history.csv,
+                               op_metrics.csv, metrics.txt, model.pt, train.log
+  -> artifacts/sweep.csv       eine Zeile je (Konfiguration, Seed)
+  -> stdout                    Mittel und Std je Konfiguration über die val-OPs
+```
+
+Alles nach einem nackten `--` geht unverändert an `train.py` — der Sweep muss
+dessen Flags nicht kennen und kann nicht aus dem Takt geraten. `--vary` ist
+wiederholbar und ergibt dann ein Gitter.
+
+Kein Plot, kein Resume, kein Checkpoint-Merge — die kommen zuletzt und nur für
+die Achse, die wirklich Stunden läuft.
+
+**Zwei Abweichungen vom ursprünglichen Entwurf**, beide bewusst:
+
+* Es ruft **nicht** `train.fit()` in einer Schleife, sondern startet je Punkt
+  einen eigenen `train.py`-Prozess. Das ist der Grund, warum `-j` überhaupt
+  möglich ist (unten), und es kauft nebenbei Isolation: ein divergierter Punkt
+  wird als `[FAIL]` verbucht, der Rest des Sweeps läuft weiter. Elf fertige
+  Punkte an den zwölften zu verlieren wäre der teure Fehler.
+* `train.py` hat dafür `--artifacts-dir` bekommen. Ohne das schrieben alle
+  Läufe dieselbe `artifacts/model.pt` — die Kollision, vor der §Teil III
+  ohnehin warnt.
+
+Die Zeile, für die das Werkzeug existiert, steht am Ende der Ausgabe:
 
 ```
-python3 PINNmodulusTwo/sweep.py --seeds 0 1 2 --epochs 20
-  -> artifacts/sweep.csv : eine Zeile je (Konfiguration, Seed)
-  -> stdout              : Mittel und Std je Konfiguration über die val-OPs
+  [NOT SEPARATED] 'delta-phys=0.2' führt vor 'delta-phys=0.4' um 0.213 C,
+                  aber die Seed-Streuung ist 0.121 C. Das ist keine Differenz.
 ```
 
-Ruft `train.fit()` in einer Schleife, sonst nichts. Kein Plot, kein Resume, kein
-Checkpoint-Merge — die kommen zuletzt und nur für die Achse, die wirklich Stunden
-läuft.
+> **Gelaufen, aber nur auf der Fixture.** Am 09.09. gegen den echten `train.py`
+> auf dem synthetischen Cache: 4 Läufe (2 Punkte × 2 Seeds), `-j 4` auf 4 Kernen,
+> **17.2 s Wanduhr gegen 66 s Summe der Läufe = 3.9×**. `[NOT SEPARATED]` hat
+> korrekt ausgelöst (0.624 C Abstand gegen 3.859 C Seed-Streuung bei zwei Seeds),
+> und ein `[FAIL]`-Punkt bricht den Sweep nicht ab.
+>
+> Die 3.9× sind **CPU auf vier Kernen**, nicht die T4. Sie zeigen, dass der
+> Mechanismus greift und an den Kernen hängt — nicht, was er auf der Instanz
+> bringt. Absolute MAE aus der Fixture sagen ohnehin nichts. Der erste echte
+> Aufruf ist Achse 1.
 
 ## Warum zuerst das und nicht die nächste Achse
 
@@ -124,8 +158,150 @@ python3 PINNmodulusTwo/tools/analyse_history.py PINNmodulusTwo/artifacts/history
 | `late_bias`, `late_bias_frac`, `bias_early/mid/end` | `op_metrics.py` | der **signierte** Fehler. `late_bias_frac` nahe 1 heißt Drift, nahe 0 heißt Streuung — **das ist die Messung, die O13 entscheidet.** Steht ab dem nächsten Lauf in jeder OP-Zeile und in `metrics.txt` |
 | `test_the_divisor_tracks_its_loss_within_one_run` | `tests/` | O15 als `xfail` festgehalten. **Schlägt der Test eines Tages fehl, weil er besteht**, ist O15 behoben — dann Marker entfernen und den Punkt schließen |
 
-Noch nicht gebaut: `evaluate.py` (Checkpoint zurückladen) und `sweep.py` (die
-Seed-Schleife). Beide stehen weiter oben unter „Was gebaut wird".
+Noch nicht gebaut: `evaluate.py` (Checkpoint zurückladen). `sweep.py` ist am
+09.09. dazugekommen, siehe ganz oben.
+
+## Was am 09.09. dazugekommen ist — die Karte wird benutzt
+
+Ausgangspunkt war eine Beobachtung auf der g4dn.2xlarge: **ein Lauf belegt
+0.4 GB von 15 GB VRAM und lässt die GPU praktisch leer laufen.** Der Grund
+steckt in der Form der Last, nicht in einer Einstellung:
+
+* ~7000 **sequentielle** Rollout-Schritte je OP und Epoche, jeder ein
+  363×128-Matmul. Das sind ~50 CUDA-Kernel zu ~5 µs Startlatenz gegen ~1.5 µs
+  Rechenzeit — die Karte wartet darauf, dass Python ihr das nächste winzige
+  Matmul reicht.
+* Dazu kamen **~10 `cudaStreamSynchronize` je Optimiererschritt**: jedes
+  `float(L_data.detach())` und das `if not torch.isfinite(loss)` hielten die CPU
+  an, bis die GPU leergelaufen war. Bei elf OPs × 100 `inner_steps` sind das
+  ~11.000 volle Pipeline-Stalls je Epoche, platziert direkt nach dem
+  Vorwärtspass. CPU und GPU überlappten damit nie.
+
+**Größere Batches sind nicht die Antwort.** `batch_data`, `batch_phys` und
+`batch_bc` sind Experiment-Regler; sie hochzudrehen, um Speicher zu füllen,
+ändert das Gradientenrauschen — genau das, was ein Sweep festhalten muss. Es
+gibt in diesem Modell auch keinen Tensor, der 15 GB füllen könnte: das Netz hat
+~70k Parameter, der Rollout-Puffer ist `7000 × 363 × 4 B` ≈ 10 MB.
+
+Was die Karte füllt, ist **mehr unabhängige Arbeit gleichzeitig** — und genau
+daraus besteht ein Sweep.
+
+| was | wo | wofür |
+|---|---|---|
+| Syncs raus aus der inneren Schleife | `train.py` | `_LossBalancer` hält EMA, Divisoren und Akkumulatoren jetzt als 0-dim-Tensoren **auf dem Gerät**; die Finitheitsprüfung steht nach `backward()` statt davor. Ein Sync je Schritt statt zehn, und er liegt am *Ende* des Schritts, wenn Vor- und Rückwärtspass schon in der Warteschlange stehen |
+| `bc_index` einmal statt je Schritt | `train.py`, `physics.py` | `boundary_condition_loss` machte je Schritt ein `torch.where(bc_mask)` und fragte dessen Länge ab — eine datenabhängige Form, also ein weiterer Sync. Die Maske ist über den ganzen Lauf konstant |
+| `--artifacts-dir` | `train.py` | ein Ordner je Lauf. Ohne das kein paralleler Sweep |
+| `op_metrics.csv` | `train.py` | dieselben Zahlen wie die Tabelle in `metrics.txt`, nur maschinenlesbar. `sweep.py` liest daraus die val-MAE |
+| `sweep.py -j N` | neu | N Läufe gleichzeitig, je als eigener Prozess |
+
+**Die Zahlen ändern sich dadurch nicht — nachgemessen, nicht behauptet.**
+Derselbe Lauf (Seed 0, 3 Epochen, OP01/OP02, val OP06, echtes Modulus) auf dem
+Stand vor und nach dem Umbau:
+
+| verglichen | Ergebnis |
+|---|---|
+| `history.csv`, inkl. aller `div_*` auf 10 Stellen | **byte-identisch** |
+| `metrics.txt` | **byte-identisch** |
+| `pred_OP01/02/06.npz`, alle Arrays | **bitweise gleich** |
+| 25 Gewichtstensoren im Checkpoint | **bitweise gleich** |
+| Testsuite | 130 passed, 1 skipped, 1 xfailed — der O15-`xfail` bleibt `xfail` |
+
+Dazu ist der branchlose EMA-Update separat gegen die alte Python-float-Fassung
+durchgerechnet (NaN zuerst, NaN später, inf, 0, negativ, 400 Zufallsfolgen):
+null Abweichung, auch im EMA-Zustand selbst. Die Akkumulatoren sind float64 wie
+vorher.
+
+> **Was nicht gilt: „bit-identisch mit einem Einzellauf".** Das stand hier
+> zuerst und ist falsch. `sweep.py` setzt seinen Kindern `OMP_NUM_THREADS=1`,
+> und **die Thread-Zahl verschiebt die letzten Stellen** — mehrfädige
+> CPU-Reduktionen legen ihre Summationsreihenfolge nicht fest. Gegen einen
+> Einzellauf mit der Voreinstellung wich es ab der 8. Stelle ab; mit gleicher
+> Thread-Zahl auf beiden Seiten stimmte alles bitweise. Innerhalb eines Sweeps
+> ist das folgenlos, weil alle Punkte dieselbe Umgebung bekommen und nur ihr
+> Vergleich untereinander zählt. `--threads` setzt es, wenn eine von Hand
+> erzeugte Zahl getroffen werden muss.
+
+### Was das bringt — und was nicht
+
+| | heute, 1 Lauf | mit `-j 4…6` |
+|---|---|---|
+| `nvidia-smi` GPU-Util | ~5–15 % | 60–100 % |
+| VRAM | ~0.9 GB | ~4–6 GB |
+| Durchsatz (Läufe/h) | 1× | ~4–6× |
+| genutzte Rechenleistung der T4 | ~0.1 % | ~1 % |
+
+**Für einen Einzellauf** — GPU gegen die CPU dieser Box — ist Faktor **2–3** zu
+erwarten, nicht 10. Gerechnet aus einer Messung: 0.58 ms je Rollout-Schritt auf
+der CPU (09.09., synthetische Fixture, 4 Kerne). Hochgerechnet auf 11 OPs ×
+7000 Schritte × 100 inner_steps sind das ~45 s Rollout + ~33 s inner = ~78 s je
+Epoche auf der CPU, gegen geschätzte ~27 s + ~5 s = ~32 s auf der T4. Der
+Rollout gewinnt wenig, weil er nicht rechen-, sondern **Python-gebunden** ist —
+~50 Ops je Schritt zu ~7 µs Dispatch, und Python läuft auf beiden Seiten gleich
+schnell. Der Innenteil gewinnt viel: 2048×128-Matmuls plus doppeltes Autograd
+sind echte Parallelarbeit.
+
+Die Karte zahlt sich vor allem **in Kombination mit `-j`** aus: auf der CPU
+konkurrieren vier parallele Läufe um dieselben FLOPs, auf der GPU nur um vier
+Python-Kerne, während eine Karte die Mathematik für alle macht.
+
+**Ein einzelner Lauf wird davon nicht schneller** — die 7000 Schritte bleiben
+sequentiell. Schneller wird der *Sweep*. Die Grenze sind die 8 vCPU = **4
+physische Kerne**, nicht die Karte: jeder Lauf ist eine Python-Schleife, die
+Millionen Kernel-Starts absetzt, und will einen Kern für sich. `sweep.py` setzt
+dafür `OMP_NUM_THREADS=1` in den Kindprozessen.
+
+### Was der Sweep dadurch spart
+
+Gemessen: 4 Läufe mit `-j 4` auf 4 Kernen, **3.9×** (17.2 s Wanduhr gegen 66 s
+Summe), also ~97 % Effizienz solange `-j` ≤ Kernzahl. Bei ~4× ist Schluss.
+
+**Die Wanduhr ist `ceil(Läufe / j)` Lauf-Dauern, nicht `Läufe / j`** — eine
+letzte Welle mit weniger Läufen als Arbeitern kostet eine ganze Dauer. Eine
+Achse hier sind 9 Läufe (3 Punkte × 3 Seeds):
+
+| `-j` | Wanduhr | Faktor | |
+|---|---|---|---|
+| 1 (heute) | 9 Dauern | 1× | |
+| **3** | **3 Dauern** | **3×** | drei Kerne reichen |
+| 4 | 3 Dauern | 3× | **kein Gewinn** gegenüber 3 — die letzte Welle ist krumm |
+| 5+ | ~3 Dauern | ~3× | Läufe teilen sich Kerne |
+
+**`-j` auf einen Teiler der Laufzahl setzen.** 9 Läufe → `-j 3`. Alle 27 Läufe
+des Gitters auf einmal → `-j 4` = `ceil(27/4) = 7` Dauern, die vollen 3.9×.
+`sweep.py` rechnet die Wellen beim Start aus und warnt bei krummem `-j`.
+
+Die Verhältnisse sind exakt, die Minuten nicht: mit der geschätzten Lauf-Dauer
+(unten) wären das je Achse ~1.7 h seriell gegen ~35 min, und ~5 h gegen ~1.3 h
+für das ganze Gitter. **Die absoluten Zahlen stehen erst nach 6.3 auf der
+Instanz.**
+
+> **Der größere Hebel wäre ein anderer.** Die Achsen laufen nacheinander, weil
+> Achse 2 die Antwort von Achse 1 braucht — eine wissenschaftliche Abhängigkeit,
+> keine rechnerische. Solange das so bleibt, sind nie mehr als 9 Läufe
+> gleichzeitig unterwegs und die 4 Kerne sind die Decke. Deutlich mehr ginge nur
+> mit der `bmm`-Ensemble-Variante am Ende dieses Abschnitts.
+
+Einmal auf der Instanz, außerhalb des Skripts:
+
+```bash
+nvidia-cuda-mps-control -d    # sonst time-sliced der Treiber zwischen den Prozessen
+```
+
+> **Alle Zahlen oben sind gerechnet, nicht gemessen** — aus Kernel-Zählung, nicht
+> aus einem Lauf auf der T4. In diesem Repo steht keine einzige gemessene
+> GPU-Epochenzeit; die ~2 h für 60 Epochen aus Schritt 6 sind CPU (32 Threads),
+> und die 8 vCPUs der g4dn sind deutlich weniger. **Der erste Schritt auf der
+> Instanz ist deshalb README_GPU_SERVER §6.3**: ein kurzer Lauf, die Zeile
+> `[Xs/epoch = Y rollout + Z inner]` ablesen und hier eintragen. Erst dann steht
+> ein Budget auf einer Messung statt auf einer Schätzung.
+
+Die einzige Variante, die wirklich an die 15 GB und an echte Auslastung
+herankäme, wäre alle Replikate in *einem* Kernel zu rechnen (Gewichte als
+`(N, in, out)` gestapelt, `bmm` statt `FCLayer`). Das amortisiert die
+Startlatenz über den ganzen Sweep statt über einen Lauf und läge eher bei
+Faktor 20. Es braucht aber einen zweiten Pfad durch `ModulusMLP`, der gegen den
+Einzellauf validiert werden muss, bevor man einem Sweep-Ergebnis daraus glaubt.
+**Lohnt sich erst ab ~30 Läufen** — die drei Achsen oben liegen darunter.
 
 ## Die Auswahlregeln stehen fest
 

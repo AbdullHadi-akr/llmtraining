@@ -42,7 +42,7 @@ def boundary_condition_loss(
     Tn_seq: torch.Tensor,    # (n_t, n_points) history sequence (model's own predictions)
     dtn: float,
     tn_q: torch.Tensor,      # (B,) query times (normalised)
-    bc_mask: torch.Tensor,   # (P,) boolean mask for boundary points (x=0)
+    bc_mask: torch.Tensor,   # (P,) bool mask OR (n_bc,) long index for x=0
     bc_scale: float = 1.0,
     residual_norm: ResidualNorm = "rms",
 ) -> torch.Tensor:
@@ -50,8 +50,18 @@ def boundary_condition_loss(
     
     Returns residual for sampled boundary points and times.
     """
-    # Find boundary point indices where x ≈ 0
-    bc_indices = torch.where(bc_mask)[0]
+    # Find boundary point indices where x ≈ 0.
+    #
+    # A bool mask has to go through torch.where() to become indices, and that is
+    # a DATA-DEPENDENT shape: the very next line asks for its length, which makes
+    # the CPU wait for the GPU to finish. The mask is constant for a whole run,
+    # so paying that stall on every optimiser step bought nothing. train.py now
+    # hands the indices in directly. A bool mask is still accepted -- the tests
+    # and every other caller pass one -- and then behaves exactly as before.
+    if bc_mask.dtype == torch.bool:
+        bc_indices = torch.where(bc_mask)[0]
+    else:
+        bc_indices = bc_mask
     if len(bc_indices) == 0:
         return torch.tensor(0.0, device=xn.device)
     

@@ -339,6 +339,17 @@ und 8 hängen an dieser einen Zahl. Die Epochenzeile schlüsselt sie auf:
   epoch 1  L_data=...  [118.7s/epoch = 112.4s rollout + 6.3s x100 inner, ...]
 ```
 
+> **Diese Beispielzahl ist veraltet — nicht als Erwartung lesen.** Am 09.09. auf
+> der synthetischen Fixture gemessen: **0.58 ms je Rollout-Schritt** (CPU, 4
+> Kerne). Für dieselbe Konfiguration wie oben — 2 OPs, 7000 Schritte — sind das
+> ~8 s Rollout, nicht 112 s. Die 112.4 s stammen sichtbar aus der Zeit vor dem
+> `rollout_plan`-Fastpath: `level_rollout` reduzierte damals je Schritt den
+> ganzen Puffer-Präfix, also O(n_t²·P), und „dominierte die Epoche" (so der
+> Docstring in `model.py`). **Jede Budgetrechnung in Kapitel 7 und 8 hängt an
+> dieser einen Zahl und ist damit vermutlich um eine Größenordnung zu
+> pessimistisch.** Die Rechenvorschrift darunter stimmt weiter — nur `S` muss
+> aus einem heutigen Lauf kommen.
+
 Zwei Hälften, die sich völlig verschieden verhalten:
 
 - **rollout** — ~7000 sequentielle Schritte je OP. Latenzgebunden, hängt nur an
@@ -432,7 +443,85 @@ beiden Schritte müssen in jedem Hyperparameter übereinstimmen.
 
 ---
 
-### 6.4 Batchgrößen — was 20 GB VRAM hergeben
+### 6.4 Mehrere Läufe gleichzeitig — der Weg, der das Experiment nicht anfasst
+
+Ein einzelner Lauf lastet die Karte nicht aus und kann es nicht: ~7000
+**sequentielle** Rollout-Schritte je OP, jeder ein 363×128-Matmul. Das sind ~50
+Kernel zu ~5 µs Startlatenz gegen ~1.5 µs Rechenzeit — die GPU wartet auf Python.
+Kein Regler ändert daran etwas, denn die Schritte hängen voneinander ab.
+
+Was die Karte füllt, ist **mehr unabhängige Arbeit gleichzeitig**, und ein Sweep
+besteht aus nichts anderem — die Punkte und die Seeds sind getrennte Experimente,
+die sich gerade *nicht* beeinflussen dürfen:
+
+```bash
+nvidia-cuda-mps-control -d          # einmal je Boot, sonst time-sliced der Treiber
+
+python3 PINNmodulusTwo/sweep.py --seeds 0 1 2 \
+    --vary delta-phys 1.0 0.4 0.2 -j 4 -- --epochs 20
+```
+
+Jeder Punkt ist ein eigener `train.py`-Prozess mit eigenem `--artifacts-dir`.
+Prozesse teilen weder RNG noch Allokator noch Optimiererzustand — genau der
+Grund, warum es Prozesse sind und nicht eine Schleife über `train.fit()`.
+
+> **Eine Einschränkung, gemessen statt vermutet.** `sweep.py` setzt seinen
+> Kindern `OMP_NUM_THREADS=1`, und **die Thread-Zahl verschiebt die letzten
+> Stellen**: mehrfädige CPU-Reduktionen legen ihre Summationsreihenfolge nicht
+> fest. Auf der synthetischen Fixture geprüft — mit `OMP_NUM_THREADS=1` auf
+> beiden Seiten stimmten alle 25 Gewichtstensoren und alle Vorhersage-Arrays
+> bitweise überein; gegen einen Lauf mit der Voreinstellung wich es ab der
+> 8. Stelle ab. **Innerhalb eines Sweeps ist das folgenlos** — alle Punkte
+> bekommen dieselbe Umgebung, und nur ihr Vergleich untereinander zählt. Wer
+> gegen eine von Hand erzeugte Zahl vergleichen will, setzt `--threads` passend.
+
+Die Grenze ist die **CPU, nicht der Speicher**: jeder Lauf ist eine
+Python-Schleife, die Millionen Kernel-Starts absetzt, und will einen Kern für
+sich. Auf einer g4dn.2xlarge (8 vCPU, 4 physisch) sind 4–6 gleichzeitige Läufe
+der nutzbare Bereich; das landet bei ~4–6 GB VRAM. `sweep.py` setzt
+`OMP_NUM_THREADS=1` in den Kindprozessen, sonst öffnet jedes Kind einen
+Thread-Pool in Maschinenbreite und die Läufe verdrängen sich gegenseitig.
+
+`nvidia-smi` wird danach fast ausgelastet aussehen. Das täuscht: es zeigt, dass
+*irgendein* Kernel läuft, nicht dass die 40 SMs voll sind. Ein 363-Zeilen-Matmul
+belegt eine Handvoll Thread-Blocks, egal wie viele Prozesse gleichzeitig eins
+schicken. Der Gewinn kommt daher, dass sich die CPU-Arbeit der einen Läufe mit
+der GPU-Arbeit der anderen überlappt — Durchsatz, nicht Rechenleistung.
+
+#### Wie viel das spart, und warum bei ~4× Schluss ist
+
+**Gemessen am 09.09.:** 4 Läufe mit `-j 4` auf 4 Kernen — 17.2 s Wanduhr gegen
+66 s Summe der Läufe, also **3.9×**, ~97 % Effizienz solange `-j` ≤ Kernzahl.
+
+Die g4dn.2xlarge hat 8 vCPU = **4 physische Kerne**, und damit ist bei ~4×
+Schluss. Jeder Lauf ist eine Python-Schleife, die einen Kern für sich will; ab
+dem fünften teilen sie sich einen und die Lauf-Dauer wächst gegen den Gewinn an.
+Die Karte ist dabei nie die Grenze.
+
+**Die Wanduhr ist `ceil(Läufe / j)` Lauf-Dauern, nicht `Läufe / j`.** Der Pool
+rückt zwar nach, aber eine letzte Welle mit weniger Läufen als Arbeitern kostet
+trotzdem eine ganze Dauer. Eine Fahrplan-Achse sind **9 Läufe** (3 Punkte × 3
+Seeds):
+
+| `-j` | Wanduhr in Lauf-Dauern | Faktor | |
+|---|---|---|---|
+| 1 (heute) | 9 | 1× | |
+| 2 | 5 | 1.8× | |
+| **3** | **3** | **3×** | drei Kerne reichen schon |
+| 4 | 3 | 3× | **kein Gewinn** — der vierte Kern läuft in der letzten Welle leer |
+| 5+ | ~3 | ~3× | die Läufe teilen sich Kerne, die Dauer wächst |
+
+**Faustregel: `-j` auf einen Teiler der Laufzahl setzen.** 9 Läufe → `-j 3`.
+Das ganze Gitter aus 27 Läufen auf einmal → `-j 4`, das sind `ceil(27/4) = 7`
+Dauern statt 27, also die vollen **3.9×**. `sweep.py` rechnet die Wellenzahl beim
+Start selbst aus und weist auf ein krummes `-j` hin.
+
+Die Verhältnisse oben sind exakt; absolut hängen sie an der Lauf-Dauer, und die
+ist auf der T4 nicht gemessen (Kapitel 6.3).
+
+---
+
+### 6.5 Batchgrößen — was 20 GB VRAM hergeben
 
 Der erste Epochen-Log auf einer GPU nennt den gemessenen Spitzenverbrauch:
 
@@ -467,6 +556,16 @@ Danach **6.3 noch einmal fahren** und zwei Zahlen ablesen:
 Zwei Dinge, die **nicht** helfen: ein breiteres Netz (der Rollout dominiert, und
 der wird davon langsamer, nicht besser) und `--subsample` erhöhen (die CFL-Grenze
 liegt bei ~0.241 s, `dt = 0.2 s` ist schon nah dran).
+
+> **Nachtrag 09.09. — größere Batches sind nicht gratis.** Der Absatz oben sagt
+> „kostet fast keinen Speicher und kaum Zeit", und das stimmt. Er verschweigt,
+> was es sonst kostet: `--batch-data` ist die Zahl der (t, Punkt)-Paare je
+> Adam-Schritt, ein größerer Batch macht den Gradienten leiser, und **das ist
+> eine andere Optimierung** — nicht dieselbe Rechnung, nur schneller. Innerhalb
+> eines Sweeps ist das in Ordnung, solange **alle** Punkte dieselben Batchgrößen
+> benutzen; gegen die Zahlen aus Schritt 6 vergleichbar bleibt es nicht.
+>
+> Wer die Karte auslasten will, ohne am Experiment zu drehen, nimmt **6.4**.
 
 Was du hier wählst, muss über alle Läufe, die du miteinander vergleichst,
 identisch sein — sonst mischt der Vergleich zwei Experimente.
