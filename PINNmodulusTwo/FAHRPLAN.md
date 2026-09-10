@@ -390,6 +390,53 @@ Läufen als Arbeitern kostet eine ganze Dauer. **`-j` auf einen Teiler der
 Laufzahl setzen**, 9 Läufe → `-j 3`. `sweep.py` rechnet die Wellen beim Start aus
 und warnt bei krummem `-j`.
 
+### Was kostet ein Benchmark? Ein Rechenbeispiel
+
+Für die Frage „lohnt die Instanz" ist ein Beispiel greifbarer als ein Faktor.
+**Ein Gitter aus 10 × 10 Punkten** (`w_phys` × `w_bc`), 60 Epochen, elf OPs:
+
+| | seriell | mit `-j 4` |
+|---|---|---|
+| **100 Punkte, 1 Seed** | 193 h = **8.1 Tage** | 132 h = **5.5 Tage** |
+| 100 Punkte, 3 Seeds | 580 h = 24 Tage | 397 h = 17 Tage |
+
+Grundlage sind die gemessenen 116 s/Epoche bei elf OPs, also **1.93 h je Lauf**.
+Die Parallelität spart davon rund ein Drittel.
+
+**Die eigentliche Lehre steht in der Zeile darüber, nicht in der Tabelle:** mit
+der veralteten README-Zahl hätte derselbe Benchmark auf **45 Tage** geplant
+werden müssen. Der Unterschied kommt nicht von der Karte und nicht von `-j`,
+sondern vom `rollout_plan`-Fastpath, der längst im Code stand und nie gemessen
+wurde. Wer hier plant, plant mit `S` aus einem **heutigen** Lauf.
+
+> **Und ein 10×10-Gitter ist ohnehin die falsche Form.** Bei 100 Punkten ohne
+> Seeds misst man vor allem die Seed-Streuung und nennt sie Ergebnis — genau der
+> Fehler, gegen den `sweep.py` das `[NOT SEPARATED]` schreibt. Drei Punkte je
+> Achse mit drei Seeds (9 Läufe, ~8 h) sagen mehr als hundert Punkte mit einem.
+
+**Was die Karte selbst dazu beiträgt, ist nicht gemessen** — und zwei
+Anhaltspunkte legen nahe, dass es wenig ist:
+
+| je Schritt | T4 (10.09., echte Daten) | CPU, 4 Kerne (09.09., Fixture) |
+|---|---|---|
+| Rollout | ~1.00 ms | ~0.58 ms |
+| Inner | ~31.5 ms | ~30 ms |
+
+Verschiedene Maschinen und verschiedene torch-Versionen, also **kein Beweis** —
+aber es passt zu dem, was README §6.3 seit jeher sagt: der Rollout ist
+Python-gebunden, ~50 Ops je Schritt zu ~7 µs Dispatch, und Python läuft auf
+beiden Seiten gleich schnell. **Die eine Messung, die es entscheidet, dauert
+10 Minuten:**
+
+```bash
+python PINNmodulusTwo/train.py --ops OP01 OP02 --epochs 3 --device cpu
+# gegen dieselbe Zeile mit --device cuda
+```
+
+Solange die fehlt, ist die ehrliche Aussage über die Instanz: **sie macht die
+Studie planbar, aber welcher Anteil davon die Karte ist und welcher der Code,
+ist offen.**
+
 ## Die Auswahlregeln stehen fest
 
 Siehe §10 in Teil II. Kurz: Mittel über `--val-ops`, nie ein einzelner OP · nach
