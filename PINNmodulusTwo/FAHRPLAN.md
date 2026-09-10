@@ -1,10 +1,56 @@
 # Fahrplan — OP01–OP16 trainiert, OP19 als Messvergleich
 
-> ## ▶ Das Nächste: trägt der Physik-Term überhaupt?
+> ## ▶ Das Nächste: der Rollout läuft in einen Fixpunkt
 >
-> **Ab hier wieder Inhalt.** Die GPU-Seite ist abgeschlossen — `sweep.py` steht,
-> die Karte ist vermessen, die Zahlen stehen in „Was am 09.09./10.09.
-> dazugekommen ist". Nichts davon muss noch angefasst werden, um weiterzukommen.
+> **Achse 0 ist am 10.09. gelaufen und hat eine klare Antwort gegeben — eine
+> andere als erwartet.** Die Zahlen stehen in §11.8, die Kurzfassung hier:
+>
+> | Arm | val-MAE (Mittel OP06/OP09) | OP06 | OP09 |
+> |---|---|---|---|
+> | `w_phys = 0.1` (Physik an) | 6.090 ± 0.882 | 7.137 | 5.044 |
+> | `w_phys = 0` (Physik aus) | **5.248 ± 0.518** | **5.970** | **4.525** |
+> | Schritt 6, ein Seed, Physik an | 4.928 | 6.270 | 3.585 |
+>
+> `sweep.py` sagt `[NOT SEPARATED]`: 0.843 C Abstand gegen 0.882 C
+> Seed-Streuung. **Die Entscheidungsregel greift trotzdem** — sie fragte nicht
+> „wer gewinnt", sondern „liegt der Lauf ohne Physik bei ~11.6 / 8.5 C wie in 5b
+> oder bei ~6.27 / 3.59 C wie Schritt 6". Er liegt bei **5.97 / 4.53 C**, also
+> bei Schritt 6, nicht bei 5b.
+>
+> **Der Physik-Term trägt nicht.** Und er war nicht versehentlich aus: gemessen
+> über die Epochen 31–60 stellte er **~34 % des Losses** (alle drei Seeds:
+> 34.9 / 34.9 / 33.3 %). Ein Drittel des Gradienten, 21 % mehr Rechenzeit, kein
+> messbarer Gewinn.
+>
+> ### Wo der Fehler stattdessen sitzt — und das ist neu
+>
+> Dieselben sechs Läufe haben die Messung aus §11.7 mitgeliefert, und sie ist
+> eindeutig: **`late_bias_frac = 1.000` auf OP06 in allen sechs Läufen**, Median
+> 0.980 über alle 102 (OP, Lauf)-Paare. Der späte Fehler ist zu 100 % ein
+> einseitiger Versatz, kein Rauschen — und zwar **zu kalt**: die Drittel laufen
+> `+2.9 → −2.6 → −9.3` und wachsen monoton.
+>
+> §11.7 hätte das „Mechanismus 1, der Level-Integrator" gelesen. **Das kann
+> nicht sein**, `residual_output` steht auf `false` (`config.yaml:181`), der
+> Integrator ist gar nicht im Spiel. Der Blick auf `peak_pred` sagt, was es
+> wirklich ist:
+>
+> ```
+> OP06:  peak_true 59.55 C   ->   peak_pred 44.9 .. 49.5 C   (sechs Läufe)
+> OP07:  peak_true 50.44 C   ->   peak_pred 39.1 .. 43.7 C
+> OP12:  peak_true 41.55 C   ->   peak_pred 47.4 .. 76.9 C
+> ```
+>
+> **Der freilaufende Rollout konvergiert gegen ein Band bei ~45–50 C,
+> unabhängig davon, welcher OP gefahren wird.** In `timeseries.png` ist es in
+> dreizehn von sechzehn OPs zu sehen: die Vorhersage steigt, wird flach, und die
+> Wahrheit läuft ihr davon. Das Modell hat die *gepoolte* Endtemperatur des
+> Trainingssatzes gelernt, nicht die des jeweiligen Betriebspunkts. OP06 und
+> OP07 sind genau die beiden OPs, deren wahres Maximum am weitesten von diesem
+> Band entfernt liegt — und die beiden schlechtesten.
+>
+> Das ist ein **Konditionierungsproblem**, kein Gewichtungsproblem. Kein
+> Gewicht, kein δ und kein `w_bc` verschiebt einen Fixpunkt.
 >
 > ### Schritt für Schritt
 >
@@ -16,96 +62,66 @@
 > source modulus_env/bin/activate
 > ```
 >
-> `python`, nicht `python3`: das System-Python hat kein torch. `sweep.py` prüft
-> das vorab und bricht mit einer Zeile ab, statt jeden Punkt sterben zu lassen.
+> `python`, nicht `python3`: das System-Python hat kein torch.
 >
-> **2 — MPS starten. Nach JEDEM Neustart der Instanz.**
+> **2 — `evaluate.py` bauen.** Es fehlt, und es ist der Hebel: sechs
+> auskonvergierte Checkpoints liegen bereits in `artifacts/achse0/*/model.pt`.
+> `save_checkpoint` schreibt `model_config` mit, und
+> `test_checkpoint_round_trips_without_config_yaml` lädt es getestet zurück —
+> es fehlt **nur der Einstiegspunkt**, kein neues Training. §11.7.
 >
-> ```bash
-> nvidia-cuda-mps-control -d
-> ```
+> **3 — Die eine Messung: Teacher Forcing gegen freien Rollout.**
 >
-> „An instance of this daemon is already running" heißt: läuft schon, alles gut.
-> Die Meldung über `/var/log/nvidia-mps` ist folgenlos (nur Logs, nicht die
-> Funktion). **Der Daemon überlebt keinen Reboot** — und ihn zu vergessen kostet
-> Faktor 2.5, ohne dass irgendein Log es sagt. `sweep.py` warnt seit dem 10.09.
-> von sich aus, wenn er bei einem parallelen CUDA-Sweep fehlt.
+> Auf demselben Checkpoint, auf OP06, die späte MAE zweimal rechnen:
 >
-> Was MPS ist und warum es hier so viel ausmacht: **README_GPU_SERVER §6.4**.
-> Kurz: ohne den Daemon bedient die Karte immer nur einen CUDA-Kontext und
-> schaltet zeitscheibenweise zwischen den Läufen um — bei ~50 winzigen Kerneln je
-> Rollout-Schritt wird dann überwiegend umgeschaltet statt gerechnet. Es ist eine
-> NVIDIA-Sache, nichts an AWS oder an diesem Projekt.
->
-> **3 — Den Lauf starten.**
->
-> ```bash
-> nohup python PINNmodulusTwo/sweep.py --seeds 0 1 2 \
->     --vary w-phys 0.1 0 -j 6 \
->     --out artifacts/achse0 --csv artifacts/achse0.csv \
->     -- --epochs 60 --w-bc 0 > achse0.log 2>&1 &
-> ```
->
-> `nohup … &`, damit der Lauf eine getrennte SSH-Sitzung überlebt. Sechs Läufe zu
-> je ~1.9 h (gemessene 116 s/Epoche bei elf OPs), alle in einer Welle:
-> **grob 3 h.** Seriell wären es 12 h, ohne MPS ~8 h.
->
-> **4 — Danach auswerten.**
->
-> ```bash
-> tail -30 achse0.log          # Mittel und Std je Arm, plus [NOT SEPARATED]
-> cat artifacts/achse0.csv     # eine Zeile je (Konfiguration, Seed)
-> python PINNmodulusTwo/tools/analyse_history.py \
->     artifacts/achse0/w-phys=0.1__seed=0/history.csv
-> ```
->
-> Die letzte Zeile ist die Regel dieses Projekts: **nie die letzte Zeile eines
-> Laufs ablesen**, sondern Median und Streuung über die letzten Epochen. Genau
-> daraus entstand O12.
->
-> **5 — Ergebnis in die Stand-Tabelle**, mit Datum. Ein Haken ohne Zahl ist
-> wertlos.
->
-> **Das ist der Vergleichslauf zu Schritt 6**, mit genau einer Frage: trägt der
-> Physik-Term, wenn beide Seiten auskonvergiert sind?
->
-> **Warum das vor allem anderen kommt:** die Überschrift der letzten Sitzung
-> lautet „der Physik-Term trägt". Diese Aussage stammt aus **drei** Epochen
-> (Schritt 5b) — und **derselbe 5b-Lauf sagte auch, der `spread` kollabiere.
-> Das hat Schritt 6 widerlegt** (§11.3). Bei 60 Epochen ist nur der Lauf **mit**
-> Physik gemacht worden.
+> * **freilaufend** (wie heute, das Modell frisst seine eigene Vorhersage) —
+>   bekannt: 11.3 bis 18.3 C;
+> * **teacher-forced** (die Historie kommt aus den echten Labels).
 >
 > | Ergebnis | heißt | dann |
 > |---|---|---|
-> | val-MAE deutlich schlechter als 6.270 / 3.585 C (etwa 11 / 8 C wie in 5b) | **der Physik-Term trägt.** Bestätigt bei Konvergenz | weiter mit den Sweep-Achsen δ → `w_bc` → `w_phys` |
-> | val-MAE nahe 6.270 / 3.585 C | **er trägt nicht.** Die 5b-Differenz war Untertrainiertheit, wie schon beim `spread` | `w_phys` zurück auf 0 prüfen, Sweep-Achsen neu ordnen — O8 und O12 wären dann Nebensache |
+> | teacher-forced **klein** (~2–4 C) | Das Modell kann den Einzelschritt. Der Fehler ist reine **Akkumulation im Rollout** | Hebel ist die Rollout-Länge im Training (Scheduled Sampling / kürzere Trainingsfenster), nicht die Architektur |
+> | teacher-forced **ebenso groß** | Das Modell hat das späte Regime **nie gelernt** | Hebel ist die Konditionierung: die Betriebsbedingung erreicht die späte Trajektorie nicht. §11.8 |
 >
-> ### Warum als Sweep und nicht als ein Lauf
+> **Minuten, nicht Stunden**, und beides sind Wege, die die MAE um mehr als
+> 1 C bewegen könnten. Das ist die Latte: **die Seed-Streuung ist 0.5–0.9 C**
+> (Physik an 1.63 C auf OP06). Jede Achse, die weniger bewegt, ist mit drei
+> Seeds nicht messbar — das gilt für δ, `w_bc` und `w_phys` gleichermaßen.
 >
-> Der Plan sagte „ein Lauf, kein Sweep". **Das war richtig, solange es kein
-> `sweep.py` gab.** Jetzt widerspricht es dem eigenen Kernsatz dieser Datei: die
-> Entscheidungsregel oben sagt „*nahe* 6.270" gegen „*deutlich* schlechter" — und
-> „nahe" ist ohne Streuung nicht definiert. Genau daran ist §11.3 schon einmal
-> gescheitert.
+> **4 — Ergebnis in die Stand-Tabelle**, mit Datum. Ein Haken ohne Zahl ist
+> wertlos.
 >
-> Zwei Dinge fallen dabei gleichzeitig ab:
+> ### Wenn doch noch ein Sweep laufen soll
 >
-> 1. **Achse 0** — trägt der Physik-Term.
-> 2. **Die Seed-Streuung, einmal gemessen.** Das ist der eigentliche Gewinn: ab
->    dann ist jede spätere Achse lesbar, statt geraten. Ohne sie ist „6.27 gegen
->    6.51" kein Ergebnis.
+> Das Werkzeug steht und ist vermessen. Runbook:
 >
-> `sweep.py` sagt am Ende selbst `[NOT SEPARATED]`, wenn der Abstand zwischen
-> zwei Konfigurationen unter der Seed-Streuung liegt.
+> ```bash
+> nvidia-cuda-mps-control -d          # nach JEDEM Neustart der Instanz
+> nohup python PINNmodulusTwo/sweep.py --seeds 0 1 2 \
+>     --vary <flag> <v1> <v2> -j 4 \
+>     --out artifacts/<name> --csv artifacts/<name>.csv \
+>     -- --epochs 60 > <name>.log 2>&1 &
+> ```
 >
-> **`--w-bc 0` steht bewusst in beiden Armen.** Damit ist es der Vergleich, den
-> Achse 0 meint: Physik **und** BC gegen keins von beidem. Das 2×2-Gitter, das
-> `w_bc` mit isolieren würde (Achse 2), wären zwölf Läufe und ~16 h — und die
-> ursprüngliche Begründung für Achse 2 ist am 02.09. ohnehin weggefallen
-> (§11.6). Erst nach Achse 0 entscheiden, ob sie noch jemanden interessiert.
+> „An instance of this daemon is already running" heißt: läuft schon, alles gut.
+> Die Meldung über `/var/log/nvidia-mps` ist folgenlos. **Der Daemon überlebt
+> keinen Reboot**, und ihn zu vergessen kostet Faktor 2.5, ohne dass ein Log es
+> sagt; `sweep.py` warnt seit dem 10.09. von sich aus. Was MPS ist:
+> **README_GPU_SERVER §6.4**.
 >
-> Wie gut Schritt 6 wirklich war — in-sample gegen ausgehalten, und warum der
-> Volumenstrom die eigentliche Schwierigkeitsachse ist: **§11.5**.
+> **`-j 4`, nicht `-j 6`.** Am 10.09. gemessen: bei vier Workern 92 %
+> Effizienz, bei sechs nur noch ~67 % (§11.8). Der Knick liegt dazwischen.
+>
+> Auswerten, und dabei **nie die letzte Zeile eines Laufs ablesen** — Median und
+> Streuung über die letzten Epochen. Genau daraus entstand O12:
+>
+> ```bash
+> tail -30 <name>.log
+> python PINNmodulusTwo/tools/analyse_history.py artifacts/<name>/<punkt>/history.csv
+> ```
+>
+> Wie gut Schritt 6 wirklich war, und warum der Volumenstrom die eigentliche
+> Schwierigkeitsachse ist: **§11.5**.
 ---
 
 **Diese Datei ist der Einstieg.** Alles andere ist Nachschlagewerk. Wenn du nur
@@ -200,25 +216,29 @@ Schritt 6 hat dafür gerade das Lehrstück geliefert: nach drei Epochen stand
 `spread` bei 0.201 und sah aus wie ein Artefakt; nach sechzig steht er bei 0.968.
 **Drei Epochen sind kein Trend, und ein Seed ist keine Streuung.**
 
-## Die Achsen danach, in dieser Reihenfolge
+## Die Achsen danach — **am 10.09. neu geordnet**
 
-| # | Achse | warum in dieser Reihenfolge |
+Achse 0 hat die Reihenfolge umgeworfen. Die alte Liste stand auf der Annahme
+„der Physik-Term trägt, jetzt stellen wir ihn richtig ein". Diese Annahme ist
+gefallen (§11.8), und **alle drei geplanten Achsen hingen daran**: δ speist im
+Hybrid-Modus ausschließlich `L_phys`, `w_phys` ist das Gewicht dieses Terms,
+und `w_bc` hatte seine Begründung schon am 02.09. verloren.
+
+| # | Achse | Zustand am 10.09. |
 |---|---|---|
-| **0** | **`--w-phys 0 --w-bc 0` über 60 Epochen** — ein Lauf, kein Sweep | **Die Überschrift dieser Sitzung steht auf drei Epochen.** „Der Physik-Term trägt" kommt aus 5b, und derselbe 5b-Lauf sagte auch „der `spread` kollabiert" — das war falsch (§11.3). Bis das A/B bei 60 Epochen wiederholt ist, ist die Kernaussage ungeprüft. Zwei Stunden, und sie entscheidet, ob die Achsen 1–3 überhaupt die richtigen sind |
-| 1 | **δ (`--delta-phys`)**, O8 | sauber isoliert (speist im Hybrid-Modus nur `L_phys`), und der `[CFL WARN]` steht bei jedem Lauf: 1.0 s gegen Δt_max 0.24 s. **Drei Punkte: 1.0 (Default), 0.4, 0.2.** 0.2 ist das Datengitter und zugleich der Boden — darunter interpoliert `history_at` nur noch linear zwischen zwei Gitterzeilen, die Ableitung wird davon nicht genauer. **Der einzige bekannt falsche Parameter** |
-| 2 | **`w_bc`**, ehemals O12 | **02.09.: die ursprüngliche Begründung ist weggefallen** — `ratio_bc` zeigt über 30 Epochen keinen Abfall (Median 0.0581, die 0.0178 waren eine Epoche), und `--batch-bc 121` rechnet dieselbe Zeile wie 128. Die Achse bleibt als bewusste Gegenprobe stehen, nicht mehr als Verdacht. Kann gestrichen werden, wenn Rechenzeit knapp wird. §11.6 |
-| 3 | **`w_phys`**, O6 | erst wenn 1 und 2 stehen — sonst misst man δ mit dem Gewicht. **Und erst nach O15:** solange die Divisoren eingefroren sind, misst ein `w_phys`-Sweep den Anker des ersten Optimiererschritts mit |
+| **0** | `--w-phys 0` gegen `0.1`, 60 Epochen, 3 Seeds | ✅ **gelaufen 10.09.** Der Physik-Term trägt nicht — er stellte ~34 % des Losses und kostete 21 % Rechenzeit ohne messbaren Gewinn. §11.8 |
+| **neu 1** | **Teacher Forcing gegen freien Rollout auf OP06** | **das Nächste.** Trennt „kann den Einzelschritt nicht" von „akkumuliert über 7000 Schritte". Braucht kein Training, nur `evaluate.py` und einen der sechs vorhandenen Checkpoints. Minuten |
+| **neu 2** | **Konditionierung der späten Trajektorie**, O17 | folgt aus dem Befund: `peak_pred` liegt bei ~45–50 C, **egal welcher OP**. Was genau gemessen wird, entscheidet Achse 1 |
+| ~~1~~ | δ (`--delta-phys`), O8 | **zurückgestellt.** δ verändert nur `L_phys`, und `L_phys` bewegt die MAE nicht. Bleibt als *Physik*-Frage offen (der `[CFL WARN]` ist real), ist aber kein MAE-Hebel |
+| ~~2~~ | `w_bc`, ehemals O12 | **gestrichen als Verdacht.** Begründung schon am 02.09. weggefallen (§11.6); jetzt zusätzlich: derselbe Nulltest wie Achse 0 |
+| ~~3~~ | `w_phys`, O6 | **beantwortet, ohne Sweep.** 0 gegen 0.1 ist der interessante Teil der Achse gewesen, und 0 gewinnt (nicht separiert). Ein Gitter über 0.03 / 0.1 / 0.3 misst Abstufungen eines Terms, dessen Vorhandensein nichts bringt |
 
-> **Achse 0 braucht `sweep.py` nicht** und kann sofort laufen:
->
-> ```bash
-> python3 PINNmodulusTwo/train.py --epochs 60 --w-phys 0 --w-bc 0 2>&1 | tee 06b_ohne_physik.txt
-> ```
->
-> Kommt dort eine val-MAE nahe 6.270 / 3.585 C heraus, war der Physik-Term nie
-> der Grund — und O8, O12 und der halbe Sweep zielen daneben. Kommt sie bei
-> ~11.6 / 8.5 C heraus wie in 5b, ist die Aussage bestätigt und der Rest steht
-> auf festem Grund.
+> **Die Latte für jede künftige Achse: 1 C.** Die Seed-Streuung ist am 10.09.
+> zum ersten Mal gemessen — 0.518 C (Physik aus) bzw. 0.882 C (Physik an) auf
+> dem Mittel der val-OPs, auf OP06 allein bis 1.63 C. Eine Achse, die weniger
+> bewegt, ist mit drei Seeds nicht lesbar. **Das ist der eigentliche Gewinn aus
+> Achse 0** und der Grund, warum ab jetzt jede Zahl in dieser Datei mit einer
+> Streuung danebensteht oder gar nicht.
 
 ## Was am 02.09. dazugekommen ist
 
@@ -565,6 +585,12 @@ Nebenbedingung in [0.7, 1.3]** · Spanne zwischen Konfigurationen < Spanne zwisc
 Seeds → keine Rangfolge · **kein Befund aus der letzten Epoche** (neu 02.09.,
 §11.6): Median über die letzten k Epochen, nie die letzte Zeile.
 
+> **Die Streuung ist seit 10.09. eine Zahl und keine Ermahnung mehr:** 0.518 C
+> (Physik aus) bzw. 0.882 C (an) auf dem Mittel der val-OPs, auf OP06 allein bis
+> 1.63 C — drei Seeds, 60 Epochen, §11.8. **Eine Achse, die weniger als ~1 C
+> bewegt, ist mit drei Seeds nicht messbar.** Das ist keine Formalie: es
+> disqualifiziert genau die Achsen, die bis zum 09.09. geplant waren.
+
 ## Offene Punkte — nach Zuständigkeit
 
 > **Was „O5", „O11" usw. bedeuten:** **O** steht für *offener Punkt*. Sie werden
@@ -573,7 +599,7 @@ Seeds → keine Rangfolge · **kein Befund aus der letzten Epoche** (neu 02.09.,
 > einer Nachricht nach Wochen noch stimmt. Offene stehen hier, geschlossene in
 > Teil III unter „Geschlossene Punkte".
 
-### Index: alle Punkte, O1 bis O16
+### Index: alle Punkte, O1 bis O17
 
 | # | worum es geht | Zustand |
 |---|---|---|
@@ -582,25 +608,27 @@ Seeds → keine Rangfolge · **kein Befund aus der letzten Epoche** (neu 02.09.,
 | O3 | OP15: `cell_current` fehlt im Bündel | ✅ nie exportiert |
 | O4 | OP12: Profil endet bei 1440 s, Trajektorie bis 1605 s | ✅ Solver hielt den Wert |
 | **O5** | **tote Eingangskanäle** (`soc_start`, Rate-Kanäle) | **offen — Envelope-Grenze**, kein MAE-Hebel (02.09. geklärt) |
-| **O6** | **kein Gewicht auf Basis von Messungen gesetzt** | **offen — erstmals messbar**, aber blockiert durch O15 |
+| O6 | kein Gewicht auf Basis von Messungen gesetzt | ✅ **hinfällig 10.09.** — der Term, dessen Gewicht gesucht war, trägt nicht (§11.8) |
 | O7 | Energiebilanz ging um ~147x nicht auf | ✅ der 121er, behoben |
-| **O8** | **BDF-Stencil δ = 1.0 s gegen Δt_max 0.24 s** | **offen — entschieden: messen**, δ = 1.0 / 0.4 / 0.2 |
+| **O8** | **BDF-Stencil δ = 1.0 s gegen Δt_max 0.24 s** | **offen, aber zurückgestellt 10.09.** — δ speist nur `L_phys`, und `L_phys` bewegt die MAE nicht (§11.8) |
 | O9 | dämpft der Physik-Term nur, statt Dynamik zu lernen? | ✅ **widerlegt** — `spread` → 0.968 |
 | **O10** | **OP14s 0 °C sind geplant — nicht „reparieren"** | **stehende Warnung** |
 | **O11** | **OP19 wird schlechter, je besser das Modell wird** | **dauerhafte Envelope-Grenze** (Datensatz ist fix) |
 | O12 | BC-Term trägt fast nichts (`ratio` 0.0178) | ✅ **widerlegt** — 0.0178 war eine Epoche, Median 0.0581 |
-| **O13** | **Fehler wächst zum Trajektorienende** | **offen** — und **kein** Verallgemeinerungsproblem |
+| O13 | Fehler wächst zum Trajektorienende | ✅ **beantwortet 10.09.** — reiner Versatz (`frac` = 1.000), Ursache ist O17, nicht der Level-Integrator |
 | **O14** | **Volumenstrom ist die Schwierigkeitsachse** | **dauerhafte Envelope-Grenze** (Datensatz ist fix) |
-| **O15** | **das Loss-Balancing greift nach 60 Epochen nicht** | **offen** — blockiert O6 |
-| **O16** | **NEU: die Gehäusewand hat gar keine Randbedingung** | **offen** — Ziel ist gemessen, Umsetzung geplant |
+| **O15** | **das Loss-Balancing greift nach 60 Epochen nicht** | **offen — 10.09. gemessen statt vermutet.** Blockiert nichts mehr (O6 ist hinfällig), bleibt aber falsch: die EMA-Zeitkonstante ist 0.9 **je Epoche** |
+| **O16** | **die Gehäusewand hat gar keine Randbedingung** | **offen** — Ziel ist gemessen, Umsetzung geplant |
+| **O17** | **NEU 10.09.: der freilaufende Rollout hat einen OP-unabhängigen Fixpunkt** | **offen — das Nächste.** `peak_pred` bei 45–50 C, egal welcher Betriebspunkt. §11.8 |
 
 Die offenen im Detail, nach Dringlichkeit:
 
 | # | offen | wer / wann |
 |---|---|---|
-| **O15** | **NEU 02.09. Das Loss-Balancing hat nach 60 Epochen noch nicht eingesetzt.** Alle drei Divisoren fallen mit exakt 0.9000/Epoche — reiner geometrischer Zerfall, der aktuelle Loss trägt 0.009 % bei. `div_data/div_phys` ist damit über den ganzen Lauf **konstant**, das Balancing wirkt wie `fixed` mit Divisoren, die der erste Optimiererschritt gesetzt hat. Gemessen: `ratio_phys` = 0.586, wo `w_phys = 0.1` nominell 0.1 verspricht. Seit 02.09. als `xfail`-Test festgehalten und von `analyse_history.py` bei jedem Lauf gemeldet. §11.6 | **blockiert O6** |
+| **O15** | **NEU 02.09. Das Loss-Balancing hat nach 60 Epochen noch nicht eingesetzt.** Alle drei Divisoren fallen mit exakt 0.9000/Epoche — reiner geometrischer Zerfall, der aktuelle Loss trägt 0.009 % bei. `div_data/div_phys` ist damit über den ganzen Lauf **konstant**, das Balancing wirkt wie `fixed` mit Divisoren, die der erste Optimiererschritt gesetzt hat. Gemessen: `ratio_phys` = 0.586, wo `w_phys = 0.1` nominell 0.1 verspricht. Seit 02.09. als `xfail`-Test festgehalten und von `analyse_history.py` bei jedem Lauf gemeldet. **10.09. gemessen statt vermutet:** über drei Seeds ist das effektive `phys/data` auf zwei Stellen gleich (0.536 / 0.537 / 0.499) — genau das Muster, das ein eingefrorener Quotient erzeugt. **Die Ursache steht damit fest:** `ema_decay` ist 0.9 **je Epoche**, `L_data` fällt aber in vier Epochen um drei Größenordnungen; die EMA holt das nie ein. **Blockiert seit 10.09. nichts mehr** (O6 ist hinfällig), bleibt aber ein Fehler, solange irgendein Gewicht bedeuten soll, was es sagt. §11.6, §11.8 | **wenn wieder ein Gewicht gemessen wird** |
+| **O17** | **NEU 10.09. Der freilaufende Rollout hat einen OP-unabhängigen Fixpunkt.** `peak_pred` landet über alle sechzehn OPs in einem Band bei **45–50 C**, egal welcher Betriebspunkt gefahren wird: OP06 (wahr 59.55 C) wird zu 44.9…49.5, OP07 (50.44 C) zu 39.1…43.7, OP12 (41.55 C) zu 47.4…76.9. Über alle 102 (OP, Lauf)-Paare ist `peak_pred − peak_true` im Median +0.04 C und in der Hälfte der Fälle negativ — im Mittel richtig, im Einzelfall beliebig. In `timeseries.png` in dreizehn von sechzehn OPs zu sehen: die Vorhersage wird flach, die Wahrheit läuft ihr davon. **Das Modell hat die gepoolte Endtemperatur des Trainingssatzes gelernt, nicht die des OPs.** Erklärt O13, O14 und O11 auf einmal. **Es ist ein Konditionierungsproblem, kein Gewichtungsproblem** — kein Gewicht, kein δ und kein `w_bc` verschiebt einen Fixpunkt. §11.8 | **das Nächste: Teacher Forcing gegen freien Rollout** |
 | **O8** | Der BDF-Stencil nutzt δ = 1.0 s gegen Δt_max ≈ 0.24 s (`[CFL WARN]` bei jedem Lauf). **02.09. entschieden: wird gemessen, drei Punkte 1.0 / 0.4 / 0.2.** Nicht einfach richtiggestellt, weil es ein Zielkonflikt ist und kein Einheitenfehler — der Zähler `3T − 4T₋₁ + T₋₂` schrumpft mit δ, der Eigenfehler des Rollouts nicht. δ = 0.2 ist zugleich der Boden: darunter liest `history_at` nur noch die Gerade zwischen zwei Gitterpunkten. §11.2 | **Sweep-Achse 1** |
-| **O13** | **Der Fehler sitzt am Ende der Trajektorie.** OP06: MAE 6.270 C, aber `late(held out)` = **13.248 C** — doppelt. Gleiches Muster auf OP03 (3.341 / 7.371) und OP16 (3.476 / 6.959). **02.09.: OP03 ist ein Trainings-OP und `--holdout-tail` ist aus — das Modell hat diese späten Zeitschritte mit Beschriftung gesehen und verdoppelt dort trotzdem seinen Fehler. O13 ist also kein Verallgemeinerungsproblem, sondern mechanisch.** §11.7 | **Messung gebaut 02.09.**, läuft beim nächsten Lauf mit |
+| O13 | **Der Fehler sitzt am Ende der Trajektorie.** ✅ **Beantwortet 10.09.** Die am 02.09. dafür gebaute Messung hat geliefert: `late_bias_frac` = **1.000** auf OP06 in allen sechs Achse-0-Läufen, Median 0.980 über alle 102 (OP, Lauf)-Paare. Der späte Fehler ist **reiner einseitiger Versatz, zu kalt**, die Drittel wachsen monoton (`+2.9 → −2.6 → −9.3` C). **Nicht** Mechanismus 1 aus §11.7 — `residual_output` steht auf `false`, der Level-Integrator ist gar nicht im Spiel. Die Ursache ist O17. §11.8 | ✅ geht in O17 über |
 | **O16** | **NEU 02.09. Die Gehäusewand hat keine Randbedingung.** `grep -rin "convect\|robin\|htc\|h_conv\|wall.*flux"` über `physics.py`, `model.py` und `train.py` findet **nichts**. `heat_residual` ist reine Leitung plus Quelle, **ohne Senke**, und der einzige BC-Term sitzt per `bc_mask = |x| < 1e-6` an der Symmetrieebene (`train.py:603`, „BC points (x=0): 121/363"). Der Wärmeaustritt an der Gehäusewand ist damit physikalisch **unbeschränkt** — das Netz lernt ihn allein aus dem Datenterm, obwohl dort laut Energiebilanz bis zur Hälfte der Quellenergie hinausgeht. **Neu behebbar**, weil der Wärmestrom `Q̇(t)` gemessen im Rohexport liegt (`*_Heat Transfer.csv`, Spalte `Heat Transfer: solid to fluid Monitor (W)`) — ein Robin-Term an `x = 0.0219` mit `U(V̇)` auf `A = 0.0206 m²` wäre also nicht geraten, sondern **gegen eine Messung beaufsichtigt**. ⚠ **Erklärt die val-Fehler NICHT:** §11.5 sagt, V̇ = 0 ist der *schwierigere* Fall (5.374 gegen 2.928 C), also bliebe es dafür bei O14. Herleitung und Einbauregel in [`GridCNN/README.md`](../GridCNN/README.md) §6 | **erst nach GridCNN-Stufe 1** (Bilanzprobe), sonst baut man eine falsche BC in ein laufendes Modell |
 | **O6** | Kein Gewicht auf Basis von Messungen gesetzt. **02.09.: der Grund hat sich geändert.** Die fünf Gründe aus §10a (CFL-Verletzung, degenerierter Anker, saturierter Rollout, nie arbeitende Loss-Balance, 121er-Quelle) sind alle behoben — O6 ist nicht mehr „bewusst offen", sondern **erstmals messbar**. Nur nicht jetzt: solange O15 gilt, misst ein `w_phys`-Sweep den eingefrorenen Divisor mit | **nach O15** |
 | **O5** | **Tote Eingangskanäle — 02.09. umgewidmet.** `soc_start` ist über alle OPs konstant 10 % (`DEAD -> forced to 0`), die Rate-Kanäle von `c_rate` und `fluid_mass_flow` sind im Training tot, auf OP15/OP16/OP19 aber lebendig. **Das ist kein MAE-Hebel:** eine Spalte ohne Varianz kann nichts erklären, und die SOC-Wirkung steckt über `q_dot` ohnehin schon im Modell. Der Punkt ist eine **Envelope-Grenze** und damit Vorbedingung für O11, nicht eine Code-Änderung. Kein Kanal wird gestrichen. §10a | dokumentiert, nichts zu tun |
@@ -608,9 +636,11 @@ Die offenen im Detail, nach Dringlichkeit:
 | **O11** | **OP19 wird schlechter, je besser das Modell wird.** 10.334 C sind 88 % schlechter als die 5.507 C nach drei Epochen, während jeder Simulations-OP sich verbessert hat. 16.7 σ unter dem trainierten `c_rate` (OP19 ist ein Fahrzyklus, OP01–OP16 sind ausnahmslos Ladungen), `soc_start` 77 % gegen 10 % über einen toten Kanal (O5). **02.09.: da der Datensatz fix ist und OP17/OP18 nie simuliert wurden, ist der Envelope nicht erweiterbar.** Jede Code-Änderung, die OP19 besser aussehen ließe, wäre eine Anpassung an die eine vorhandene Messung — wovor `op_registry.py:185` ausdrücklich warnt. §11.4 | dauerhaft, nie Auswahlkriterium |
 | **O10** | **Warnung, kein Punkt.** OP14 startet über alle Punkte bei 0 °C. Das sieht nach Füllwert aus, ist aber die geplante Anfangsbedingung (`op_registry.py:123`: T0 = 0 °C, „coldest start in the set"). **Nicht maskieren, nicht ersetzen, OP14 nicht entfernen** — es ist einer von nur zwei OPs mit V̇ = 0, und die binden die Energiebilanz | nichts tun |
 
-**Geschlossen am 01.09.:** O1, O2, O3, O4, O7, O9. **Am 02.09.:** O12. Siehe Teil III.
+**Geschlossen am 01.09.:** O1, O2, O3, O4, O7, O9. **Am 02.09.:** O12. **Am 10.09.:** O13 (beantwortet, geht in O17 über) und O6 (hinfällig). Siehe Teil III.
 
 **Neu am 02.09.:** O16 — beim Entwurf von `GridCNN/` aufgefallen, siehe dort §6.
+
+**Neu am 10.09.:** O17 — aus Achse 0 gefallen, §11.8.
 
 ---
 
@@ -1160,6 +1190,13 @@ Wird beim Abhaken ausgefüllt. Leer = noch nicht gemessen.
 | 6.3 | **Planungszahl** | 10.55 s je OP und Epoche → ~116 s/Epoche bei elf OPs → **~1.9 h je 60-Epochen-Lauf** | **10.09.** |
 | 6.3 | README-Beispiel `118.7s/epoch` | **veraltet, Faktor 5.6.** `inner` ist in beiden Zeilen identisch 6.3 s, also dieselbe Konfiguration; der Rollout fiel von 112.4 auf 14.8 s (**7.6×**, der `rollout_plan`-Fastpath). Budgettabellen in Kapitel 7/8 entsprechend zu pessimistisch | **10.09.** |
 | 6 | Loss-Balance | arbeitet jetzt: `ratio phys/bc` 2.17/0.782 → **0.605/0.0178**, betas [0.91 …] → [0.98 2.64 3.9 3.99] | 01.09. |
+| **A0** | **Achse 0: `w_phys` 0.1 gegen 0** | **`[NOT SEPARATED]`** — 5.248 (Std 0.518) gegen 6.090 (Std 0.882), Abstand 0.843 C. Gegen die Entscheidungsregel: **der Physik-Term trägt nicht** (5.97/4.53 C liegt bei Schritt 6, nicht bei 5b) | **10.09.** |
+| **A0** | **Anteil des Physik-Terms am Loss** | **34.9 / 34.9 / 33.3 %** (Median Ep31–60, drei Seeds). Effektives `phys/data` = 0.536 / 0.537 / 0.499 — über Seeds identisch, weil der Divisor-Quotient eingefroren ist. **O15 gemessen statt vermutet** | **10.09.** |
+| **A0** | **Seed-Streuung, erstmals** | **0.518 C** (Physik aus) / **0.882 C** (an) auf dem val-Mittel; auf OP06 allein bis **1.63 C**. Die Latte für jede künftige Achse | **10.09.** |
+| **A0** | **`late_bias_frac`** | **1.000 auf OP06 in allen sechs Läufen**, Median 0.980 über alle 102 (OP, Lauf)-Paare, 70 % über 0.9. Drittel `+2.9 → −2.6 → −9.3` C. **Der späte Fehler ist reiner Versatz, zu kalt** | **10.09.** |
+| **A0** | **`peak_pred` gegen `peak_true`** | Vorhersage landet in einem Band bei **45–50 C, unabhängig vom OP**: OP06 59.55 → 44.9…49.5, OP07 50.44 → 39.1…43.7, OP12 41.55 → 47.4…76.9. **Der Rollout hat einen Fixpunkt. O17** | **10.09.** |
+| **A0** | **train / val / test** | 2.864 / 5.248 / 4.155 C (Physik aus). **Unteranpassung**, und `L_data` steht Ep31–60 flach — 60 Epochen sind auskonvergiert | **10.09.** |
+| **A0** | **Wanduhr `-j 6` mit MPS** | **9 016.8 s = 2 h 30 min** für sechs 60-Epochen-Läufe auf elf OPs, 6/6 `[ok]`. Summe/Wanduhr 5.46× ist die **Obergrenze**; geschätzt echt **~4.0×**, also ~67 % Effizienz gegen 92 % bei `-j 4`. **Künftig `-j 4`** | **10.09.** |
 
 Alles läuft aus dem Repo-Wurzelverzeichnis:
 
@@ -1955,8 +1992,10 @@ ersten Tag gemeldet statt nach sechzig Epochen. Er gehört zum ersten Schritt,
 der O15 anfasst.
 
 `--w-phys 0 --w-bc 0` ist davon nicht betroffen: bei `zero_weight_terms: skip`
-werden beide Terme gar nicht berechnet (`train.py:708`). **Achse 0 bleibt
-gültig und bleibt der erste Schritt.**
+werden beide Terme gar nicht berechnet (`train.py:708`). **Achse 0 war damit
+gültig — sie ist am 10.09. gelaufen, §11.8.** Und sie hat O15 nebenbei von einer
+Vermutung in eine Messung verwandelt: das effektive `phys/data` ist über drei
+Seeds auf zwei Stellen identisch, was genau ein eingefrorener Quotient tut.
 
 #### Was die Datei bestätigt
 
@@ -2028,6 +2067,16 @@ und Rauschen sahen identisch aus.
 
 Es braucht dafür **keinen eigenen Lauf** — die Zahlen fallen bei Achse 0 mit ab.
 
+> **Gemessen am 10.09., und die Tabelle war unvollständig.** `late_bias_frac` kam
+> als **1.000** zurück, auf OP06 in allen sechs Läufen. Nach der Zeile oben wäre
+> das „Mechanismus 1, der Level-Integrator". **Das kann nicht sein:**
+> `residual_output` steht auf `false` (`config.yaml:181`), `field()` gibt die
+> absolute Temperatur zurück, und der Integrator mit Verstärkung 1 ist damit gar
+> nicht im Spiel. Es fehlte ein vierter Fall — **der Rollout hat einen Fixpunkt**,
+> und zwar einen, der nicht vom Betriebspunkt abhängt. Der Befund steht als O17
+> in §11.8; die Mechanismen 1–3 oben bleiben als das stehen, was am 02.09.
+> denkbar war.
+
 > **Was dafür fehlt, ist weniger als es aussieht.** `save_checkpoint` schreibt
 > `model.pt` samt `model_config` (`train.py:1140`), und
 > `test_checkpoint_round_trips_without_config_yaml` lädt es bereits zurück:
@@ -2036,6 +2085,175 @@ Es braucht dafür **keinen eigenen Lauf** — die Zahlen fallen bei Achse 0 mit 
 > `--resume`, kein Auswertungs-Kommando. Ein `evaluate.py` (Checkpoint laden,
 > Rollout rechnen, Metriken berichten) ist damit wenige Zeilen und macht aus zwei
 > Stunden Minuten. Zu beachten: **jeder Lauf überschreibt `artifacts/model.pt`.**
+
+---
+
+### 11.8 Achse 0 — der Physik-Term trägt nicht, und der Rollout hat einen Fixpunkt (10.09.)
+
+**Sechs Läufe, 2 Arme × 3 Seeds, 60 Epochen, `--w-bc 0` in beiden Armen, elf
+Trainings-OPs, `-j 6` mit MPS auf der T4. Wanduhr 2 h 30 min, 6/6 `[ok]`.**
+
+```bash
+nvidia-cuda-mps-control -d
+nohup python PINNmodulusTwo/sweep.py --seeds 0 1 2 \
+    --vary w-phys 0.1 0 -j 6 \
+    --out artifacts/achse0 --csv artifacts/achse0.csv \
+    -- --epochs 60 --w-bc 0 > achse0.log 2>&1 &
+```
+
+#### Das Ergebnis
+
+Alle „±" sind die Streuung über die drei Seeds, in derselben Konvention, die
+`sweep.py` in seiner Schlusszeile druckt (Streuung der Stichprobe, nicht
+Standardfehler des Mittels).
+
+| Arm | val-MAE (Mittel) | OP06 | OP09 | Wanduhr je Lauf |
+|---|---|---|---|---|
+| `w_phys = 0.1` | 6.090 ± 0.882 | 7.137 ± 1.634 | 5.044 ± 0.838 | 149.7 min |
+| `w_phys = 0` | **5.248 ± 0.518** | **5.970 ± 0.756** | **4.525 ± 0.383** | 123.7 min |
+| Schritt 6, **ein** Seed, `w_bc = 0.1` | 4.928 | 6.270 | 3.585 | — |
+
+`sweep.py`: `[NOT SEPARATED]` — 0.843 C Abstand gegen 0.882 C Seed-Streuung.
+Die beiden Arme sind **nicht** getrennt; „ohne Physik ist besser" ist also
+**nicht** die Aussage.
+
+**Die Aussage ist die Entscheidungsregel**, und die fragte etwas anderes: liegt
+der Arm ohne Physik bei ~11.6 / 8.5 C wie in Schritt 5b, oder bei ~6.27 /
+3.59 C wie Schritt 6? Er liegt bei **5.97 / 4.53 C**. Damit ist entschieden:
+
+> **Der Physik-Term trägt nicht.** Die 10-%-Differenz aus 5b war
+> Untertrainiertheit — derselbe Fehlschluss, der in demselben Lauf schon beim
+> `spread` passiert ist (§11.3).
+
+#### Er war nicht versehentlich aus
+
+Die naheliegende Ausrede wäre O15: die Divisoren sind eingefroren, also hat
+`w_phys = 0.1` nie 0.1 bedeutet. Das stimmt — nur zeigt die Rechnung in die
+andere Richtung. Über die Epochen 31–60, aus `history.csv`:
+
+| Seed | Anteil des Physik-Terms am Loss (Median) | effektives `phys/data` |
+|---|---|---|
+| 0 | **34.9 %** | 0.536 |
+| 1 | **34.9 %** | 0.537 |
+| 2 | **33.3 %** | 0.499 |
+
+**Ein Drittel des Gradienten**, dazu 21 % mehr Rechenzeit (der Innenteil steigt
+von 8.5 auf ~30 s je Epoche). Der Term war nicht zu leise — er war laut und hat
+nichts bewirkt.
+
+Nebenbei bestätigt das den Mechanismus von O15 direkt: das effektive Verhältnis
+ist über drei Seeds auf zwei Stellen gleich (0.536 / 0.537 / 0.499), weil der
+Divisor-Quotient im ersten Optimiererschritt festgelegt wird und danach
+eingefroren bleibt. **O15 ist damit vom Verdacht zur Messung geworden.**
+
+#### Was die Läufe stattdessen zeigen — die Messung aus §11.7
+
+`late_bias_frac` ist genau dafür am 02.09. gebaut worden, und die Antwort ist
+die deutlichste in dieser Datei:
+
+```
+OP06, late_bias_frac:   1.000  1.000  1.000  1.000  1.000  1.000   (alle sechs Läufe)
+über alle 102 (OP, Lauf)-Paare:   Median 0.980,  70 % über 0.9
+```
+
+Der späte Fehler ist **zu 100 % ein einseitiger Versatz**, kein Rauschen, und
+zwar zu kalt. Die drei Drittel wachsen monoton: auf OP06 typisch
+`+2.9 → −2.6 → −9.3` C, und `late_mae = −late_bias` auf die dritte Stelle.
+
+**§11.7 hätte das „Mechanismus 1, der Level-Integrator" gelesen. Das ist
+falsch** — `residual_output` steht auf `false` (`config.yaml:181`), `field()`
+gibt die absolute Temperatur zurück, der Integrator mit Verstärkung 1 ist gar
+nicht im Spiel. Die Lesetabelle in §11.7 hätte einen dritten Fall gebraucht und
+hatte ihn nicht.
+
+#### Der dritte Fall: der Rollout hat einen Fixpunkt
+
+`peak_pred` gegen `peak_true`, über alle sechs Läufe:
+
+| OP | `peak_true` | `peak_pred` (sechs Läufe) |
+|---|---|---|
+| OP06 (val) | **59.55 C** | 44.88 … 49.49 |
+| OP07 | **50.44 C** | 39.12 … 43.70 |
+| OP14 | 45.56 C | 37.26 … 45.14 |
+| OP12 | **41.55 C** | 47.40 … 76.89 |
+| OP19 (Messung) | 28.98 C | 97.16 … 290.74 |
+
+Über alle 102 Paare ist `peak_pred − peak_true` im Median **+0.04 C** und in
+50 % der Fälle negativ — die Vorhersage ist also **im Mittel richtig und im
+Einzelfall beliebig**. Sie landet fast überall in einem Band bei **45–50 C**,
+unabhängig davon, welcher Betriebspunkt gefahren wird.
+
+In `timeseries.png` ist es in dreizehn von sechzehn OPs zu sehen: die
+Vorhersage steigt, wird flach, und die Wahrheit läuft ihr davon. **Der
+freilaufende Rollout konvergiert gegen einen Fixpunkt, und dieser Fixpunkt ist
+die gepoolte Endtemperatur des Trainingssatzes statt der des jeweiligen OPs.**
+
+Das erklärt drei bisher getrennt geführte Befunde auf einmal:
+
+* **O13** (der Fehler sitzt am Ende): der Fixpunkt wird gegen Ende erreicht.
+* **O14** (V̇ ist die Schwierigkeitsachse): OP06 und OP07 sind genau die beiden
+  OPs, deren wahres Maximum am weitesten von diesem Band liegt — und die beiden
+  schlechtesten.
+* **O11** (OP19 wird schlechter): weit außerhalb des Envelopes gibt es keinen
+  gelernten Fixpunkt mehr, der Rollout läuft ins Leere (97–291 C).
+
+**Es ist ein Konditionierungsproblem, kein Gewichtungsproblem.** Kein Gewicht,
+kein δ und kein `w_bc` verschiebt einen Fixpunkt. Damit sind die Achsen 1–3 vom
+Tisch, und O17 steht.
+
+#### Über- oder Unteranpassung?
+
+| Arm | train | val | test |
+|---|---|---|---|
+| `w_phys = 0.1` | 3.823 | 6.090 | 4.399 |
+| `w_phys = 0` | **2.864** | 5.248 | 4.155 |
+
+Trainings-MAE 2.9 C bei einem Modell, das seine eigenen OPs auswendig lernen
+dürfte. **Das Modell ist unter-, nicht überangepasst** — Regularisierung ist
+nicht der Hebel, und mehr Epochen sind es auch nicht: `L_data` steht über die
+Epochen 31–60 flach (Median 0.0472, relative Streuung 20 %, kein Trend). 60
+Epochen sind auskonvergiert.
+
+#### Was sonst noch abgefallen ist
+
+* **Die Seed-Streuung, zum ersten Mal gemessen.** 0.518 C (Physik aus) bzw.
+  0.882 C (Physik an) auf dem Mittel der val-OPs, auf OP06 allein bis 1.63 C.
+  **Das ist die Latte für jede künftige Achse.** Und es relativiert jede
+  Einzellauf-Zahl in dieser Datei: die 6.270 / 3.585 C aus Schritt 6 sind
+  **ein** Seed, und unser Physik-Arm streut auf OP06 zwischen 5.69 und 9.42 —
+  6.270 liegt am guten Rand einer Verteilung, nicht auf ihrem Mittel.
+* **`[SATURATED]` kam in allen sechs Läufen mindestens einmal.** Kein Abbruch,
+  alle sechs `exit 0`.
+* **O15 fährt in jedem Lauf mit.** `analyse_history.py` meldet für alle sechs:
+  `div_data` 5 752× bis 36 461× über `L_data`, Zerfall exakt 0.9000/Epoche. Die
+  EMA-Zeitkonstante (0.9 **je Epoche**) ist für einen Verlust, der in vier
+  Epochen um drei Größenordnungen fällt, schlicht zu träge; sie holt ihn über
+  60 Epochen nie ein.
+
+#### Was der Sweep an Zeit gebracht hat
+
+`-j 6` mit MPS, sechs 60-Epochen-Läufe auf elf OPs:
+
+| | |
+|---|---|
+| Wanduhr des Sweeps | **9 016.8 s = 2 h 30 min** |
+| Summe der sechs Lauf-Uhren | 49 214.6 s = 13 h 40 min |
+| Summe / Wanduhr | 5.46× — **Obergrenze, keine Messung** |
+| geschätzter echter Faktor | **~4.0×** |
+
+Die Schätzung, damit sie nachgerechnet werden kann: der Rollout kostet unter
+sechs gleichzeitigen Läufen ~115 s/Epoche, unter dreien (nachdem der
+`w_phys = 0`-Arm fertig war) nur noch **80 s** — und 80 s ist zugleich das, was
+die serielle Messung vom 10.09. für elf OPs vorhersagt (7.4 s je OP). Daraus:
+seriell 3 × 89.5 min + 3 × 111 min ≈ **10 h** gegen 2 h 30 min gemessen.
+
+**Praktische Folge: `-j 4`, nicht `-j 6`.** Bei vier Workern waren es 92 %
+Effizienz, bei sechs sind es ~67 %. Der Knick liegt dazwischen; sechs Läufe
+gleichzeitig zahlen 1.4× Konkurrenz je Lauf.
+
+Und eine Beobachtung fürs Planen: der Sweep wartet auf seinen **langsamsten**
+Arm. Die drei `w_phys = 0`-Läufe standen 25 Minuten fertig herum. Bei Armen
+unterschiedlicher Kosten ist `-j` = Zahl der Läufe nicht automatisch das Beste.
 
 ---
 
@@ -2396,23 +2614,28 @@ drei wären Umbauten gegen ein Problem gewesen, das es nicht gibt.
 
 **Geschlossen am 01.09.:** O1, O2, O3, O4, O7, **O9**. Schritte 4, 5, 5b, 6.
 
-## Die offene Kernfrage, im Klartext
+## Die offene Kernfrage — **beantwortet am 10.09.**
 
-**Trägt der Physik-Term, senkt er also die MAE — oder nicht?**
+**Trägt der Physik-Term, senkt er also die MAE?** — **Nein.**
 
-Gemessen ist bisher nur dies:
-
-| | mit Physik | ohne (`--w-phys 0 --w-bc 0`) |
+| | mit Physik | ohne (`--w-phys 0`) |
 |---|---|---|
-| **3 Epochen** (5b) | 10.540 / 7.494 C | 11.591 / 8.504 C |
-| **60 Epochen** (Schritt 6) | **6.270 / 3.585 C** | **nie gelaufen** |
+| **3 Epochen** (5b, ein Seed) | 10.540 / 7.494 C | 11.591 / 8.504 C |
+| **60 Epochen** (Schritt 6, ein Seed) | 6.270 / 3.585 C | nie gelaufen |
+| **60 Epochen, 3 Seeds** (Achse 0, 10.09.) | 7.137 / 5.044 C | **5.970 / 4.525 C** |
 
-Bei drei Epochen war die Physik ~10 % besser. Aber derselbe Lauf sagte auch, der
-`spread` kollabiere — und Schritt 6 hat das widerlegt (§11.3). Eine Aussage aus
-diesem Lauf ist gefallen; die andere ist ungeprüft.
+Bei drei Epochen war die Physik ~10 % besser. Bei sechzig ist sie es nicht — und
+die beiden Arme sind mit drei Seeds nicht einmal getrennt (`[NOT SEPARATED]`,
+0.843 C Abstand gegen 0.882 C Streuung). Damit ist es dieselbe Geschichte wie
+beim `spread`: **eine Aussage aus dem 5b-Lauf ist gefallen, jetzt auch die
+zweite.** Beide waren Untertrainiertheit.
 
-**Die Antwort braucht genau einen Lauf**, und er steht ganz oben in dieser Datei.
-Bis er gelaufen ist, gilt: *bei drei Epochen ja, bei Konvergenz unbekannt.*
+Der Term war dabei nicht leise: ~34 % des Losses in den Epochen 31–60, in allen
+drei Seeds. Ein Drittel des Gradienten und 21 % Rechenzeit für nichts. §11.8.
+
+**Die neue offene Kernfrage steht in O17:** der freilaufende Rollout konvergiert
+gegen einen Fixpunkt bei 45–50 C, unabhängig vom Betriebspunkt. Das ist der Ort,
+an dem der Fehler tatsächlich sitzt.
 
 ## Was der Code an diesem Tag gelernt hat
 

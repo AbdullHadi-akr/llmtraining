@@ -599,13 +599,32 @@ den SMs statt abzuwechseln.
 Laufzeiten / Wanduhr`, und unter Konkurrenz wird jeder Lauf selbst langsamer —
 das ist eine Obergrenze. Nur `-j 1` gegen `-j N` beantwortet es.
 
-**Wie weit `-j` gehen darf, ist offen.** Bei vier Workern sind 92 % erreicht, die
-vier physischen Kerne also nicht ausgereizt. Mit MPS ist nicht mehr die Karte die
-Grenze, sondern die CPU — jeder Lauf ist eine Python-Schleife und will einen
-Kern. `-j 6` auf 8 vCPU ist der nächste sinnvolle Versuch, gemessen ist er nicht.
+**Wie weit `-j` gehen darf — am 10.09. beantwortet: bis etwa vier.**
 
-Die Verhältnisse oben sind exakt; absolut hängen sie an der Lauf-Dauer, und die
-ist auf der T4 nicht gemessen (Kapitel 6.3).
+| `-j` | Effizienz | Konkurrenz je Lauf |
+|---|---|---|
+| 4 | **92 %** | 1.08× |
+| 6 | **~67 %** | ~1.4× |
+
+Die Sechser-Zahl kommt aus dem echten Achse-0-Sweep: sechs 60-Epochen-Läufe auf
+elf OPs, **2 h 30 min Wanduhr**. Die Epochenzeile zeigt die Konkurrenz direkt —
+der Rollout kostete unter sechs gleichzeitigen Läufen ~115 s/Epoche, unter dreien
+(nachdem der erste Arm fertig war) nur noch **80 s**, und 80 s ist genau das, was
+die serielle Messung für elf OPs vorhersagt. Seriell wären es ~10 h gewesen,
+also **~4.0×** statt der 5.46×, die `Summe / Wanduhr` behauptet.
+
+**Nimm `-j 4`.** Mit MPS ist nicht mehr die Karte die Grenze, sondern die CPU:
+jeder Lauf ist eine Python-Schleife und will einen Kern, und die Box hat vier
+physische. Der Knick liegt zwischen vier und sechs.
+
+Zwei Dinge, die beim Planen mehr ausmachen als das letzte Prozent:
+
+* **Der Sweep wartet auf seinen langsamsten Arm.** In Achse 0 standen die drei
+  billigen Läufe 25 Minuten fertig herum, weil der Physik-Arm 21 % länger
+  brauchte. Bei ungleich teuren Armen ist `-j` = Zahl der Läufe nicht automatisch
+  das Beste.
+* **Die Wanduhr ist `ceil(Läufe / j)` Lauf-Dauern.** Bei 9 Läufen ist `-j 4`
+  exakt so schnell wie `-j 3`; `sweep.py` weist darauf hin.
 
 ---
 
