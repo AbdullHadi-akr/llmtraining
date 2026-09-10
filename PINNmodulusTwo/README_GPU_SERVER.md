@@ -488,33 +488,41 @@ belegt eine Handvoll Thread-Blocks, egal wie viele Prozesse gleichzeitig eins
 schicken. Der Gewinn kommt daher, dass sich die CPU-Arbeit der einen Läufe mit
 der GPU-Arbeit der anderen überlappt — Durchsatz, nicht Rechenleistung.
 
-#### Wie viel das spart, und warum bei ~4× Schluss ist
+#### Wie viel das spart — **1.46×, auf dieser Karte gemessen**
 
-**Gemessen am 09.09.:** 4 Läufe mit `-j 4` auf 4 Kernen — 17.2 s Wanduhr gegen
-66 s Summe der Läufe, also **3.9×**, ~97 % Effizienz solange `-j` ≤ Kernzahl.
+Am 10.09. auf der Instanz, 4 Läufe (`--ops OP01 OP02 --epochs 6 --device cuda`):
 
-Die g4dn.2xlarge hat 8 vCPU = **4 physische Kerne**, und damit ist bei ~4×
-Schluss. Jeder Lauf ist eine Python-Schleife, die einen Kern für sich will; ab
-dem fünften teilen sie sich einen und die Lauf-Dauer wächst gegen den Gewinn an.
-Die Karte ist dabei nie die Grenze.
+| | `sweep_wall_s` | je Lauf |
+|---|---|---|
+| `-j 1` (seriell) | **596.2 s** (9.9 min) | 2.5 min |
+| `-j 4` (parallel) | **407.4 s** (6.8 min) | **6.8 min** |
 
-**Die Wanduhr ist `ceil(Läufe / j)` Lauf-Dauern, nicht `Läufe / j`.** Der Pool
-rückt zwar nach, aber eine letzte Welle mit weniger Läufen als Arbeitern kostet
-trotzdem eine ganze Dauer. Eine Fahrplan-Achse sind **9 Läufe** (3 Punkte × 3
-Seeds):
+**596.2 / 407.4 = 1.46×**, 37 % Effizienz auf vier Workern, 3.1 von 9.9 Minuten
+gespart.
 
-| `-j` | Wanduhr in Lauf-Dauern | Faktor | |
-|---|---|---|---|
-| 1 (heute) | 9 | 1× | |
-| 2 | 5 | 1.8× | |
-| **3** | **3** | **3×** | drei Kerne reichen schon |
-| 4 | 3 | 3× | **kein Gewinn** — der vierte Kern läuft in der letzten Welle leer |
-| 5+ | ~3 | ~3× | die Läufe teilen sich Kerne, die Dauer wächst |
+> **Nicht die `ratio`-Zeile der Ausgabe nehmen.** Die zeigte hier 3.99× — sie
+> rechnet `Summe der Laufzeiten / Wanduhr`, und unter Konkurrenz wird jeder Lauf
+> selbst langsamer, der Zähler wächst also mit (hier auf das 2.73-fache). Das ist
+> eine **Obergrenze**, keine Messung. Nur `-j 1` gegen `-j N` beantwortet es.
 
-**Faustregel: `-j` auf einen Teiler der Laufzahl setzen.** 9 Läufe → `-j 3`.
-Das ganze Gitter aus 27 Läufen auf einmal → `-j 4`, das sind `ceil(27/4) = 7`
-Dauern statt 27, also die vollen **3.9×**. `sweep.py` rechnet die Wellenzahl beim
-Start selbst aus und weist auf ein krummes `-j` hin.
+**Die aussagekräftige Spalte ist die rechte: 2.5 → 6.8 min je Lauf.** Vier
+gleichzeitige Läufe machen jeden einzelnen 2.7× langsamer — irgendetwas wird fast
+vollständig serialisiert. Zwei Verdächtige, und **ein Test trennt sie**:
+
+```bash
+nvidia-cuda-mps-control -d          # einmal je Boot, dann -j 4 wiederholen
+```
+
+* **Hilft MPS deutlich** → es war die Karte. Ohne den Daemon teilt der Treiber die
+  T4 zeitscheibenweise zwischen den CUDA-Kontexten der vier Prozesse.
+* **Hilft es nicht** → es sind die Kerne. Ein Kernel-Start kostet CPU im Treiber,
+  und bei ~50 Starts je Rollout-Schritt ist das bei vier Prozessen echte Last auf
+  vier physischen Kernen. Dann ist `-j 2` die bessere Aufteilung, oder der Sweep
+  gehört auf `--device cpu`, wo es keine Kontext-Konkurrenz gibt.
+
+**Mehr als vier gleichzeitig lohnt nicht.** Bei vier ist die Effizienz schon auf
+37 %; ein fünfter Prozess teilt dieselbe Karte und dieselben vier Kerne noch
+feiner. Der Hebel ist MPS oder ein anderes Gerät, nicht mehr Prozesse.
 
 Die Verhältnisse oben sind exakt; absolut hängen sie an der Lauf-Dauer, und die
 ist auf der T4 nicht gemessen (Kapitel 6.3).
