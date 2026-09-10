@@ -440,6 +440,37 @@ werden müssen. Der Unterschied kommt nicht von der Karte und nicht von `-j`,
 sondern vom `rollout_plan`-Fastpath, der längst im Code stand und nie gemessen
 wurde. Wer hier plant, plant mit `S` aus einem **heutigen** Lauf.
 
+#### Woher die Faktoren kommen — und wie viel jeder beiträgt
+
+Der Sprung von „45 Tage" auf „2.2 Tage" ist **nicht** hauptsächlich die
+Parallelität. Die Kette, Zahl für Zahl, für das 100-Punkte-Gitter:
+
+| | 100 Punkte | Faktor |
+|---|---|---|
+| 1. wie es im README geplant stand (`118.7 s/epoch`) | **45.3 Tage** | — |
+| 2. mit der **gemessenen** Epochenzeit (`21.1 s/epoch`) | 8.1 Tage | **5.63×** |
+| 3. + vier Läufe parallel, **ohne** MPS | 5.5 Tage | 1.46× |
+| 4. + **MPS** obendrauf | **2.2 Tage** | 2.53× |
+| | | **gesamt 20.8×** |
+
+**Zeile 2 ist der größte Einzelposten — und dafür wurde nichts gebaut.** Der
+`rollout_plan`-Fastpath lag längst im Code; nur die Zahl im README stammte aus
+der Zeit davor. Wer mit ihr geplant hätte, hätte 45 Tage veranschlagt für etwas,
+das schon damals 8 gedauert hätte.
+
+**Zeile 3 und 4 gehören zusammen.** „Vier parallel" bringt für sich genommen nur
+1.46× — die winzigen Rollout-Kernel serialisieren am Kontextwechsel. Erst MPS
+macht aus vier Prozessen fast Faktor vier (3.69× bei 92 % Effizienz). **Ohne den
+Daemon ist die halbe Parallelität weggeworfen.**
+
+**Was davon die Karte ist, steht nicht in dieser Tabelle.** Zeile 2 ist reiner
+Code und würde auf einer CPU genauso gelten. Zeile 3/4 ist paralleles Ausführen —
+MPS gibt es nur auf der GPU, aber ob vier CPU-Läufe auf vier Kernen ähnlich gut
+skalieren, ist **ungemessen**. Die ehrliche Aussage über die Instanz bleibt: sie
+trägt vier gleichzeitige Läufe fast zum Preis von einem (2.5 min allein, 2.7 min
+zu viert). Ob eine CPU das auch könnte, sagt erst `--device cpu` gegen
+`--device cuda`.
+
 > **Und ein 10×10-Gitter ist ohnehin die falsche Form.** Bei 100 Punkten ohne
 > Seeds misst man vor allem die Seed-Streuung und nennt sie Ergebnis — genau der
 > Fehler, gegen den `sweep.py` das `[NOT SEPARATED]` schreibt. Drei Punkte je
