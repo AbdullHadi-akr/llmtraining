@@ -498,57 +498,39 @@ belegt eine Handvoll Thread-Blocks, egal wie viele Prozesse gleichzeitig eins
 schicken. Der Gewinn kommt daher, dass sich die CPU-Arbeit der einen Läufe mit
 der GPU-Arbeit der anderen überlappt — Durchsatz, nicht Rechenleistung.
 
-#### Wie viel das spart — **1.46×, auf dieser Karte gemessen**
+#### Wie viel das spart — **3.69×, und MPS ist die halbe Miete**
 
 Am 10.09. auf der Instanz, 4 Läufe (`--ops OP01 OP02 --epochs 6 --device cuda`):
 
-| | `sweep_wall_s` | je Lauf |
-|---|---|---|
-| `-j 1` (seriell) | **596.2 s** (9.9 min) | 2.5 min |
-| `-j 4` (parallel) | **407.4 s** (6.8 min) | **6.8 min** |
-
-**596.2 / 407.4 = 1.46×**, 37 % Effizienz auf vier Workern, 3.1 von 9.9 Minuten
-gespart.
-
-> **Nicht die `ratio`-Zeile der Ausgabe nehmen.** Die zeigte hier 3.99× — sie
-> rechnet `Summe der Laufzeiten / Wanduhr`, und unter Konkurrenz wird jeder Lauf
-> selbst langsamer, der Zähler wächst also mit (hier auf das 2.73-fache). Das ist
-> eine **Obergrenze**, keine Messung. Nur `-j 1` gegen `-j N` beantwortet es.
-
-**Die aussagekräftige Spalte ist die rechte: 2.5 → 6.8 min je Lauf.** Vier
-gleichzeitige Läufe machen jeden einzelnen 2.7× langsamer — und die Epochenzeile
-sagt genau, *welcher* Teil das ist:
-
-| | seriell | `-j 4` | |
+| | `sweep_wall_s` | je Lauf | Faktor |
 |---|---|---|---|
-| Rollout | 14.8 s | **49.6 s** | **3.35× langsamer** |
-| Inner (×100) | 6.3 s | 7.9 s | 1.25× langsamer |
+| `-j 1` (seriell) | 596.2 s (9.9 min) | 2.5 min | — |
+| `-j 4` **ohne** MPS | 407.4 s (6.8 min) | **6.8 min** | 1.46× |
+| `-j 4` **mit** MPS | **161.7 s (2.7 min)** | **2.7 min** | **3.69×** |
 
-**Der Rollout serialisiert fast vollständig, der Innenteil kaum.** Das ist keine
-Überraschung, sondern die Diagnose: der Rollout ist ~50 *winzige* Kernel je
-Schritt (363×128), und winzige Kernel aus vier verschiedenen CUDA-Kontexten sind
-genau das, was der Treiber zeitscheibenweise abarbeitet. Der Innenteil rechnet in
-größeren Batches (2048 bzw. 256 mit doppeltem Autograd) — dort fällt ein
-Kontextwechsel kaum ins Gewicht.
+**92 % Effizienz.** Die Konkurrenz je Lauf fällt von 2.72× auf **1.08×** — vier
+gleichzeitige Läufe kosten fast so viel wie einer. **MPS allein bringt 2.52×.**
 
-**Damit ist MPS nicht ein Verdacht unter zweien, sondern der passende Hebel:** er
-lässt Kernel verschiedener Prozesse nebeneinander auf den SMs laufen, statt sie
-abzuwechseln. Genau der Fall, für den er gebaut wurde.
+> **`nvidia-cuda-mps-control -d` ist Pflicht, nicht Kür.** Einmal je Boot, vor
+> jedem Sweep. Ohne den Daemon verschenkt man Faktor 2.5 — lautlos, nichts im Log
+> sagt, dass er fehlt.
 
-```bash
-nvidia-cuda-mps-control -d          # einmal je Boot, dann -j 4 wiederholen
-```
+**Warum, stand vorher schon in der Epochenzeile.** Ohne MPS wurde der Rollout
+3.35× langsamer (14.8 → 49.6 s), der Innenteil nur 1.25× (6.3 → 7.9 s). Der
+Rollout sind ~50 *winzige* Kernel je Schritt (363×128), und winzige Kernel aus
+vier CUDA-Kontexten arbeitet der Treiber zeitscheibenweise ab; der Innenteil
+rechnet in größeren Batches, dort fällt ein Kontextwechsel kaum ins Gewicht.
+**MPS behebt genau das** — Kernel verschiedener Prozesse laufen nebeneinander auf
+den SMs statt abzuwechseln.
 
-* **Hilft MPS deutlich** → es war die Karte. Ohne den Daemon teilt der Treiber die
-  T4 zeitscheibenweise zwischen den CUDA-Kontexten der vier Prozesse.
-* **Hilft es nicht** → es sind die Kerne. Ein Kernel-Start kostet CPU im Treiber,
-  und bei ~50 Starts je Rollout-Schritt ist das bei vier Prozessen echte Last auf
-  vier physischen Kernen. Dann ist `-j 2` die bessere Aufteilung, oder der Sweep
-  gehört auf `--device cpu`, wo es keine Kontext-Konkurrenz gibt.
+**Nicht die `ratio`-Zeile der Ausgabe als Faktor nehmen.** Sie rechnet `Summe der
+Laufzeiten / Wanduhr`, und unter Konkurrenz wird jeder Lauf selbst langsamer —
+das ist eine Obergrenze. Nur `-j 1` gegen `-j N` beantwortet es.
 
-**Mehr als vier gleichzeitig lohnt nicht.** Bei vier ist die Effizienz schon auf
-37 %; ein fünfter Prozess teilt dieselbe Karte und dieselben vier Kerne noch
-feiner. Der Hebel ist MPS oder ein anderes Gerät, nicht mehr Prozesse.
+**Wie weit `-j` gehen darf, ist offen.** Bei vier Workern sind 92 % erreicht, die
+vier physischen Kerne also nicht ausgereizt. Mit MPS ist nicht mehr die Karte die
+Grenze, sondern die CPU — jeder Lauf ist eine Python-Schleife und will einen
+Kern. `-j 6` auf 8 vCPU ist der nächste sinnvolle Versuch, gemessen ist er nicht.
 
 Die Verhältnisse oben sind exakt; absolut hängen sie an der Lauf-Dauer, und die
 ist auf der T4 nicht gemessen (Kapitel 6.3).

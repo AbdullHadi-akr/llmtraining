@@ -13,16 +13,21 @@
 > git checkout main && git pull
 > source modulus_env/bin/activate
 >
-> python PINNmodulusTwo/sweep.py --seeds 0 1 2 \
->     --vary w-phys 0.1 0 -j 3 \
+> nvidia-cuda-mps-control -d          # PFLICHT, sonst Faktor 2.5 verschenkt
+>
+> nohup python PINNmodulusTwo/sweep.py --seeds 0 1 2 \
+>     --vary w-phys 0.1 0 -j 6 \
 >     --out artifacts/achse0 --csv artifacts/achse0.csv \
->     -- --epochs 60 --w-bc 0
+>     -- --epochs 60 --w-bc 0 > achse0.log 2>&1 &
 > ```
 >
-> **Über Nacht laufen lassen.** Sechs Läufe zu je ~1.9 h — das ist keine
-> Schätzung mehr, sondern die gemessenen 116 s je Epoche bei elf OPs. Bei
-> `ceil(6/3) = 2` Wellen und dem gemessenen Parallelitätsfaktor grob **8 h**,
-> seriell wären es 12 h.
+> Sechs Läufe zu je ~1.9 h (gemessene 116 s/Epoche bei elf OPs), alle sechs in
+> einer Welle: **grob 3 h**. Seriell wären es 12 h.
+>
+> **`nvidia-cuda-mps-control -d` ist nicht optional.** Ohne den Daemon
+> serialisieren die winzigen Rollout-Kernel am Kontextwechsel und derselbe Lauf
+> dauert 8 h statt 3 — lautlos, nichts im Log sagt es. Gemessen: 3.69× mit,
+> 1.46× ohne.
 >
 > **Das ist der Vergleichslauf zu Schritt 6**, mit genau einer Frage: trägt der
 > Physik-Term, wenn beide Seiten auskonvergiert sind?
@@ -328,80 +333,75 @@ genau dieser Fehlschluss steckt hinter O9.
 
 ---
 
-### Was der Sweep dadurch spart — **1.46×, gemessen auf der T4**
+### Was der Sweep dadurch spart — **3.69× mit MPS**
 
 **Am 10.09. auf der Instanz gemessen**, 4 Läufe (`--ops OP01 OP02 --epochs 6
 --device cuda`, Auswertung auf die Trainings-OPs beschränkt):
 
-| | `sweep_wall_s` | je Lauf | Summe `wall_s` |
+| | `sweep_wall_s` | je Lauf | Faktor |
 |---|---|---|---|
-| `-j 1` (seriell) | **596.2 s** (9.9 min) | 2.5 min | 596.2 s |
-| `-j 4` (parallel) | **407.4 s** (6.8 min) | **6.8 min** | 1625.9 s |
+| `-j 1` (seriell) | 596.2 s (9.9 min) | 2.5 min | — |
+| `-j 4` **ohne** MPS | 407.4 s (6.8 min) | **6.8 min** | 1.46× |
+| `-j 4` **mit** MPS | **161.7 s (2.7 min)** | **2.7 min** | **3.69×** |
 
-**Der Faktor ist 596.2 / 407.4 = 1.46×**, also 37 % Effizienz auf vier Workern.
-Gespart werden 3.1 von 9.9 Minuten.
+**92 % Effizienz auf vier Workern.** Die Konkurrenz je Lauf fällt von 2.72× auf
+**1.08×** — vier gleichzeitige Läufe kosten fast genauso viel wie einer.
+**MPS allein bringt den Faktor 2.52.**
 
-> **Vorher stand hier 3.9×. Das war falsch, und der Fehler ist lehrreich.**
-> Die 3.9× kamen aus `Summe der Laufzeiten / Wanduhr` — und genau das ist keine
-> Messung, sondern eine **Obergrenze**: unter Konkurrenz wird jeder Lauf selbst
-> langsamer, also wächst der Zähler mit. Hier auf 2.73× (596 → 1626 s), womit
-> der Quotient 3.99 anzeigt, wo 1.46 stimmt. Nur eine echte `-j 1`-Baseline
-> beantwortet die Frage. `sweep.py` schreibt die Warnung inzwischen selbst in
-> die Ausgabe.
+> ### `nvidia-cuda-mps-control -d` ist Pflicht, nicht Kür
+>
+> Einmal je Boot, vor jedem Sweep. Ohne den Daemon verschenkt man Faktor 2.5,
+> und zwar lautlos — nichts im Log sagt, dass er fehlt.
 
-**Die eigentliche Zahl ist die dritte Spalte: 2.5 → 6.8 min je Lauf.** Und die
-Epochenzeile sagt, *welcher* Teil das ist:
+**Warum das so wirkt, stand vorher schon in der Epochenzeile.** Ohne MPS:
 
-| | seriell | `-j 4` | |
+| | seriell | `-j 4` ohne MPS | |
 |---|---|---|---|
-| Rollout | 14.8 s | **49.6 s** | **3.35× langsamer** |
+| Rollout | 14.8 s | 49.6 s | **3.35× langsamer** |
 | Inner (×100) | 6.3 s | 7.9 s | 1.25× langsamer |
 
-**Der Rollout serialisiert fast vollständig, der Innenteil kaum** — und das ist
-die Diagnose, nicht mehr ein Verdacht. Der Rollout sind ~50 *winzige* Kernel je
-Schritt (363×128), und winzige Kernel aus vier CUDA-Kontexten arbeitet der
-Treiber zeitscheibenweise ab. Der Innenteil rechnet in größeren Batches (2048
-bzw. 256 mit doppeltem Autograd), dort fällt ein Kontextwechsel kaum ins Gewicht.
+Der Rollout serialisierte fast vollständig, der Innenteil kaum. Das war die
+Diagnose: der Rollout sind ~50 **winzige** Kernel je Schritt (363×128), und
+winzige Kernel aus vier verschiedenen CUDA-Kontexten arbeitet der Treiber
+zeitscheibenweise ab. Der Innenteil rechnet in größeren Batches (2048 bzw. 256
+mit doppeltem Autograd), dort fällt ein Kontextwechsel kaum ins Gewicht.
 
-**Damit ist MPS der passende Hebel**, nicht einer von zwei Verdächtigen: er lässt
-Kernel verschiedener Prozesse nebeneinander auf den SMs laufen. Genau der Fall,
-für den er gebaut wurde. Der Test (~7 min, noch nicht gelaufen):
+**MPS behebt genau das** — er lässt Kernel verschiedener Prozesse nebeneinander
+auf den SMs laufen, statt sie abzuwechseln. Die Vorhersage aus der Epochenzeile
+und das Ergebnis stimmen überein, und damit ist auch klar, warum mehr Prozesse
+vorher nicht geholfen hätten: es war nie die Zahl der Prozesse, sondern der
+Kontextwechsel zwischen ihnen.
 
-```bash
-nvidia-cuda-mps-control -d          # einmal je Boot
-# denselben -j-4-Lauf wiederholen und sweep_wall_s vergleichen
-```
+> **Vorher standen hier 3.9× und danach 1.46×, beide falsch.** Die 3.9× kamen aus
+> `Summe der Laufzeiten / Wanduhr` — eine **Obergrenze**, keine Messung, denn
+> unter Konkurrenz wird jeder Lauf selbst langsamer und der Zähler wächst mit.
+> Die 1.46× waren echt gemessen, aber ohne MPS. Erst `-j 1` gegen `-j N` **mit**
+> MPS ergibt die 3.69×. `sweep.py` schreibt die Obergrenzen-Warnung inzwischen
+> selbst in die Ausgabe.
 
-Hilft MPS deutlich, war die Kontext-Umschaltung das Problem — und dann liegt
-deutlich mehr als 1.46× drin, weil der Rollout 70 % der Epoche ausmacht. Hilft es
-nicht, sind es doch die vier Kerne, und der Sweep gehört auf `--device cpu`, wo
-es keine Kontext-Konkurrenz gibt.
+**Die Wanduhr bleibt `ceil(Läufe / j)` Lauf-Dauern** — eine letzte Welle mit
+weniger Läufen als Arbeitern kostet eine ganze Dauer. `-j` auf einen Teiler der
+Laufzahl setzen; `sweep.py` warnt bei krummem `-j`.
 
-**Mehr als 4 gleichzeitig lohnt nicht.** Bei vier ist die Effizienz schon auf
-37 %; ein fünfter Prozess teilt dieselbe Karte und dieselben vier Kerne noch
-feiner auf. Der Hebel ist MPS oder ein anderes Gerät, nicht mehr Prozesse.
-
-**Was bleibt: 1.46× ist geschenkt und kostet nichts** — ein Sweep über eine
-Achse (9 Läufe) fällt damit auf ~70 % seiner seriellen Zeit. Es ist nur nicht
-die Größenordnung, mit der der Abschnitt darüber geplant hatte.
-
-Die Wanduhr bleibt `ceil(Läufe / j)` Lauf-Dauern — eine letzte Welle mit weniger
-Läufen als Arbeitern kostet eine ganze Dauer. **`-j` auf einen Teiler der
-Laufzahl setzen**, 9 Läufe → `-j 3`. `sweep.py` rechnet die Wellen beim Start aus
-und warnt bei krummem `-j`.
+**Wie weit `-j` jetzt gehen darf, ist offen.** Bei vier Workern sind 92 %
+Effizienz erreicht, die vier physischen Kerne sind also noch nicht ausgereizt.
+Mit MPS ist nicht mehr die Karte die Grenze, sondern die CPU — jeder Lauf ist
+eine Python-Schleife und will einen Kern. `-j 6` auf 8 vCPU ist der nächste
+sinnvolle Versuch, gemessen ist er nicht.
 
 ### Was kostet ein Benchmark? Ein Rechenbeispiel
 
 Für die Frage „lohnt die Instanz" ist ein Beispiel greifbarer als ein Faktor.
 **Ein Gitter aus 10 × 10 Punkten** (`w_phys` × `w_bc`), 60 Epochen, elf OPs:
 
-| | seriell | mit `-j 4` |
+| | seriell | `-j 4` + MPS |
 |---|---|---|
-| **100 Punkte, 1 Seed** | 193 h = **8.1 Tage** | 132 h = **5.5 Tage** |
-| 100 Punkte, 3 Seeds | 580 h = 24 Tage | 397 h = 17 Tage |
+| **100 Punkte, 1 Seed** | 193 h = **8.1 Tage** | 52 h = **2.2 Tage** |
+| 100 Punkte, 3 Seeds | 580 h = 24 Tage | 157 h = 6.5 Tage |
 
-Grundlage sind die gemessenen 116 s/Epoche bei elf OPs, also **1.93 h je Lauf**.
-Die Parallelität spart davon rund ein Drittel.
+Grundlage sind die gemessenen 116 s/Epoche bei elf OPs (**1.93 h je Lauf**) und
+der gemessene Parallelitätsfaktor **3.69× mit MPS**. Ohne MPS wären es 5.5 statt
+2.2 Tage — derselbe Benchmark, ein vergessenes Kommando.
 
 **Die eigentliche Lehre steht in der Zeile darüber, nicht in der Tabelle:** mit
 der veralteten README-Zahl hätte derselbe Benchmark auf **45 Tage** geplant
@@ -1034,8 +1034,8 @@ Wird beim Abhaken ausgefüllt. Leer = noch nicht gemessen.
 | 6 | `L_data` | 100.5 → **0.0515** | 01.09. |
 | 6.3 | **läuft auf der Karte** | **Exit 0** auf `cuda:0 Tesla T4`, torch 2.6.0+cu124. 2 OPs, 3 Epochen, 600 Optimizer-Steps, ~2.7 min für den ganzen Aufruf (inkl. Auswertung und Plots) | **10.09.** |
 | 6.3 | **peak VRAM** | **0.11 GB von 15.6 GB** — bei 2 OPs und den Default-Batches | **10.09.** |
-| 6.3 | **Parallelität `-j 1` vs `-j 4`** | **1.46×** — `sweep_wall_s` 596.2 s seriell gegen 407.4 s parallel, 4 Läufe, `--epochs 6 --ops OP01 OP02 --device cuda`. Effizienz 37 %. Je Lauf 2.5 → 6.8 min, also **2.7× langsamer unter Konkurrenz** | **10.09.** |
-| 6.3 | MPS-Gegentest | **offen** — `nvidia-cuda-mps-control -d`, dann `-j 4` wiederholen. Trennt „die eine Karte bremst" von „die vier Kerne bremsen" | — |
+| 6.3 | **Parallelität `-j 1` vs `-j 4`** | ohne MPS **1.46×** (596.2 → 407.4 s, je Lauf 2.5 → 6.8 min). **Mit MPS 3.69×** (596.2 → **161.7 s**, je Lauf 2.5 → **2.7 min**), 92 % Effizienz | **10.09.** |
+| 6.3 | **MPS** | **entscheidend, Faktor 2.52 für sich allein.** Bestätigt die Diagnose aus der Epochenzeile: die winzigen Rollout-Kernel serialisierten am Kontextwechsel. `nvidia-cuda-mps-control -d` gehört vor jeden Sweep | **10.09.** |
 | 6.3 | **`s/epoch`** | **21.1 s = 14.8 rollout + 6.3 inner** (2 OPs, 100 inner_steps, seriell). Unter `-j 4`: 57.5 = 49.6 + 7.9 — **der Rollout wird 3.35× langsamer, der Innenteil nur 1.25×** | **10.09.** |
 | 6.3 | **Planungszahl** | 10.55 s je OP und Epoche → ~116 s/Epoche bei elf OPs → **~1.9 h je 60-Epochen-Lauf** | **10.09.** |
 | 6.3 | README-Beispiel `118.7s/epoch` | **veraltet, Faktor 5.6.** `inner` ist in beiden Zeilen identisch 6.3 s, also dieselbe Konfiguration; der Rollout fiel von 112.4 auf 14.8 s (**7.6×**, der `rollout_plan`-Fastpath). Budgettabellen in Kapitel 7/8 entsprechend zu pessimistisch | **10.09.** |
