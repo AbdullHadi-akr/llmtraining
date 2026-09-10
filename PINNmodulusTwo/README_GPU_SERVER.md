@@ -498,6 +498,78 @@ belegt eine Handvoll Thread-Blocks, egal wie viele Prozesse gleichzeitig eins
 schicken. Der Gewinn kommt daher, dass sich die CPU-Arbeit der einen Läufe mit
 der GPU-Arbeit der anderen überlappt — Durchsatz, nicht Rechenleistung.
 
+#### Was MPS überhaupt ist
+
+**Multi-Process Service, von NVIDIA, Teil des CUDA-Treibers.** Es hat nichts mit
+AWS, mit dieser Instanz oder mit diesem Projekt zu tun — auf einer Workstation im
+Keller ist es dasselbe. Seit CUDA 9 dabei, auf der T4 voll unterstützt.
+
+**Das Problem:** jeder Prozess bekommt normalerweise seinen eigenen
+CUDA-Kontext, und die Karte kann immer nur **einen** Kontext gleichzeitig
+bedienen. Der Treiber schaltet also im Zeitscheibenverfahren um — A, dann B,
+dann C, dann D. Vier Prozesse teilen sich die Karte **nacheinander**, nicht
+nebeneinander.
+
+Bei großen Kerneln fällt das kaum auf: ein Kernel, der 10 ms rechnet, überdeckt
+den Umschaltvorgang. **Bei winzigen Kerneln ist es fatal** — und genau das ist
+der Rollout hier: ~50 Kernel je Schritt auf einer 363×128-Matrix. Da wird
+überwiegend umgeschaltet und kaum gerechnet. Deshalb wurde unter `-j 4` der
+Rollout 3.35× langsamer und der Innenteil mit seinen größeren Batches nur 1.25×.
+
+**Was MPS macht:** ein Server-Prozess hält **einen** Kontext, alle Clients
+schicken ihre Kernel durch ihn hindurch. Die Karte sieht keine vier
+konkurrierenden Kontexte mehr, sondern einen — und Kernel aus verschiedenen
+Prozessen laufen **gleichzeitig auf verschiedenen SMs**.
+
+Drei Dinge, die man dazu wissen sollte:
+
+* Es ist ein **Hintergrunddienst**, kein Teil des Programms. Der Code merkt
+  nichts davon, CUDA-Anwendungen verbinden sich automatisch.
+* Er **stirbt beim Reboot.** Nach jedem Neustart der Instanz einmal starten.
+* **Kein Speicherschutz zwischen den Clients.** Stürzt ein Prozess hart ab, kann
+  er die anderen mitreißen. Für einen Sweep, in dem jeder Punkt ohnehin einzeln
+  protokolliert wird und ein `[FAIL]` den Rest nicht aufhält, ist das ein
+  akzeptabler Tausch.
+
+#### Der Arbeitsablauf für einen Sweep, komplett
+
+```bash
+# 1. Stand und Umgebung
+cd /home/student1/llmtraining
+git checkout main && git pull
+source modulus_env/bin/activate        # python, NICHT python3
+
+# 2. MPS -- nach jedem Neustart der Instanz einmal
+nvidia-cuda-mps-control -d
+#    "An instance of this daemon is already running" = laeuft schon, alles gut.
+#    Die Meldung ueber /var/log/nvidia-mps ist folgenlos (nur Logs).
+
+# 3. Sweep starten, abgekoppelt von der SSH-Sitzung
+nohup python PINNmodulusTwo/sweep.py --seeds 0 1 2 \
+    --vary <flag> <wert> <wert> -j <teiler der laufzahl> \
+    --out artifacts/<name> --csv artifacts/<name>.csv \
+    -- --epochs 60 > <name>.log 2>&1 &
+
+# 4. Auswerten
+tail -30 <name>.log                    # Mittel und Std je Konfiguration
+cat artifacts/<name>.csv               # eine Zeile je (Konfiguration, Seed)
+python PINNmodulusTwo/tools/analyse_history.py \
+    artifacts/<name>/<punkt>/history.csv
+```
+
+Vier Dinge, die dabei schiefgehen können, und was davor schützt:
+
+| | |
+|---|---|
+| `python3` statt `python` | `sweep.py` prüft den Interpreter vorab und bricht mit **einer** Zeile ab, statt jeden Punkt an `import torch` sterben zu lassen |
+| MPS vergessen | `sweep.py` warnt bei jedem parallelen CUDA-Sweep und nennt die gemessenen Zahlen. **Kein Abbruch** — ein fehlender Daemon ist kein Fehler |
+| krummes `-j` | die Wanduhr ist `ceil(Läufe / j)` Lauf-**Dauern**; bei 9 Läufen ist `-j 4` exakt so schnell wie `-j 3`. `sweep.py` rechnet es aus und weist darauf hin |
+| Artefakte überschreiben sich | jeder Punkt bekommt `--artifacts-dir` **und** `PINN_ART_DIR`. Ohne das schrieben alle Läufe dieselbe `model.pt` |
+
+Und die Regel, die nichts mit der GPU zu tun hat: **nie die letzte Zeile eines
+Laufs ablesen.** `analyse_history.py` gibt Median und Streuung über die letzten
+Epochen — genau aus dem Ablesen der letzten Zeile entstand O12.
+
 #### Wie viel das spart — **3.69×, und MPS ist die halbe Miete**
 
 Am 10.09. auf der Instanz, 4 Läufe (`--ops OP01 OP02 --epochs 6 --device cuda`):

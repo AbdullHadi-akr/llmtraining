@@ -31,6 +31,12 @@
 > Faktor 2.5, ohne dass irgendein Log es sagt. `sweep.py` warnt seit dem 10.09.
 > von sich aus, wenn er bei einem parallelen CUDA-Sweep fehlt.
 >
+> Was MPS ist und warum es hier so viel ausmacht: **README_GPU_SERVER §6.4**.
+> Kurz: ohne den Daemon bedient die Karte immer nur einen CUDA-Kontext und
+> schaltet zeitscheibenweise zwischen den Läufen um — bei ~50 winzigen Kerneln je
+> Rollout-Schritt wird dann überwiegend umgeschaltet statt gerechnet. Es ist eine
+> NVIDIA-Sache, nichts an AWS oder an diesem Projekt.
+>
 > **3 — Den Lauf starten.**
 >
 > ```bash
