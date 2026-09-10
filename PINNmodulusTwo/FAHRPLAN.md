@@ -2,16 +2,30 @@
 
 > ## ▶ Das Nächste: trägt der Physik-Term überhaupt?
 >
+> **Ab hier wieder Inhalt.** Die GPU-Seite ist abgeschlossen — `sweep.py` steht,
+> die Karte ist vermessen, die Zahlen stehen in „Was am 09.09./10.09.
+> dazugekommen ist". Nichts davon muss noch angefasst werden, um weiterzukommen.
+>
+> ### Der Lauf
+>
 > ```bash
-> cd /mnt/c/Users/M0245635/batterysurrogatemodell
+> cd /home/student1/llmtraining
 > git checkout main && git pull
 > source modulus_env/bin/activate
 >
-> python3 PINNmodulusTwo/train.py --epochs 60 --w-phys 0 --w-bc 0 2>&1 | tee 06b_ohne_physik.txt
+> python PINNmodulusTwo/sweep.py --seeds 0 1 2 \
+>     --vary w-phys 0.1 0 -j 3 \
+>     --out artifacts/achse0 --csv artifacts/achse0.csv \
+>     -- --epochs 60 --w-bc 0
 > ```
 >
-> ~2 h auf CPU. **Das ist der Vergleichslauf zu Schritt 6**, mit genau einer
-> Variablen: Physik- und BC-Term aus.
+> **Über Nacht laufen lassen.** Sechs Läufe zu je ~1.9 h — das ist keine
+> Schätzung mehr, sondern die gemessenen 116 s je Epoche bei elf OPs. Bei
+> `ceil(6/3) = 2` Wellen und dem gemessenen Parallelitätsfaktor grob **8 h**,
+> seriell wären es 12 h.
+>
+> **Das ist der Vergleichslauf zu Schritt 6**, mit genau einer Frage: trägt der
+> Physik-Term, wenn beide Seiten auskonvergiert sind?
 >
 > **Warum das vor allem anderen kommt:** die Überschrift der letzten Sitzung
 > lautet „der Physik-Term trägt". Diese Aussage stammt aus **drei** Epochen
@@ -19,13 +33,34 @@
 > Das hat Schritt 6 widerlegt** (§11.3). Bei 60 Epochen ist nur der Lauf **mit**
 > Physik gemacht worden.
 >
-> | Ergebnis von 06b | heißt | dann |
+> | Ergebnis | heißt | dann |
 > |---|---|---|
 > | val-MAE deutlich schlechter als 6.270 / 3.585 C (etwa 11 / 8 C wie in 5b) | **der Physik-Term trägt.** Bestätigt bei Konvergenz | weiter mit den Sweep-Achsen δ → `w_bc` → `w_phys` |
 > | val-MAE nahe 6.270 / 3.585 C | **er trägt nicht.** Die 5b-Differenz war Untertrainiertheit, wie schon beim `spread` | `w_phys` zurück auf 0 prüfen, Sweep-Achsen neu ordnen — O8 und O12 wären dann Nebensache |
 >
-> Zwei Stunden, die entscheiden, ob der halbe geplante Sweep überhaupt die
-> richtige Frage stellt. **Danach** `sweep.py` (Teil I).
+> ### Warum als Sweep und nicht als ein Lauf
+>
+> Der Plan sagte „ein Lauf, kein Sweep". **Das war richtig, solange es kein
+> `sweep.py` gab.** Jetzt widerspricht es dem eigenen Kernsatz dieser Datei: die
+> Entscheidungsregel oben sagt „*nahe* 6.270" gegen „*deutlich* schlechter" — und
+> „nahe" ist ohne Streuung nicht definiert. Genau daran ist §11.3 schon einmal
+> gescheitert.
+>
+> Zwei Dinge fallen dabei gleichzeitig ab:
+>
+> 1. **Achse 0** — trägt der Physik-Term.
+> 2. **Die Seed-Streuung, einmal gemessen.** Das ist der eigentliche Gewinn: ab
+>    dann ist jede spätere Achse lesbar, statt geraten. Ohne sie ist „6.27 gegen
+>    6.51" kein Ergebnis.
+>
+> `sweep.py` sagt am Ende selbst `[NOT SEPARATED]`, wenn der Abstand zwischen
+> zwei Konfigurationen unter der Seed-Streuung liegt.
+>
+> **`--w-bc 0` steht bewusst in beiden Armen.** Damit ist es der Vergleich, den
+> Achse 0 meint: Physik **und** BC gegen keins von beidem. Das 2×2-Gitter, das
+> `w_bc` mit isolieren würde (Achse 2), wären zwölf Läufe und ~16 h — und die
+> ursprüngliche Begründung für Achse 2 ist am 02.09. ohnehin weggefallen
+> (§11.6). Erst nach Achse 0 entscheiden, ob sie noch jemanden interessiert.
 >
 > Wie gut Schritt 6 wirklich war — in-sample gegen ausgehalten, und warum der
 > Volumenstrom die eigentliche Schwierigkeitsachse ist: **§11.5**.
@@ -103,14 +138,14 @@ Die Zeile, für die das Werkzeug existiert, steht am Ende der Ausgabe:
 
 > **Gelaufen, aber nur auf der Fixture.** Am 09.09. gegen den echten `train.py`
 > auf dem synthetischen Cache: 4 Läufe (2 Punkte × 2 Seeds), `-j 4` auf 4 Kernen,
-> **17.2 s Wanduhr gegen 66 s Summe der Läufe = 3.9×**. `[NOT SEPARATED]` hat
+> 17.2 s Wanduhr gegen 66 s Summe der Läufe. `[NOT SEPARATED]` hat
 > korrekt ausgelöst (0.624 C Abstand gegen 3.859 C Seed-Streuung bei zwei Seeds),
 > und ein `[FAIL]`-Punkt bricht den Sweep nicht ab.
 >
-> Die 3.9× sind **CPU auf vier Kernen**, nicht die T4. Sie zeigen, dass der
-> Mechanismus greift und an den Kernen hängt — nicht, was er auf der Instanz
-> bringt. Absolute MAE aus der Fixture sagen ohnehin nichts. Der erste echte
-> Aufruf ist Achse 1.
+> **Daraus keinen Faktor ableiten.** Summe/Wanduhr ist eine Obergrenze, nicht
+> eine Messung, und es war CPU auf vier Kernen statt der T4. Der Lauf zeigt nur,
+> dass der Mechanismus greift. Die echte Zahl von der Instanz — **1.46×** —
+> steht weiter unten. Absolute MAE aus der Fixture sagen ohnehin nichts.
 
 ## Warum zuerst das und nicht die nächste Achse
 
@@ -227,7 +262,7 @@ vorher.
 |---|---|---|
 | `nvidia-smi` GPU-Util | ~5–15 % | 60–100 % |
 | VRAM | ~0.9 GB | ~4–6 GB |
-| Durchsatz (Läufe/h) | 1× | ~4–6× |
+| Durchsatz (Läufe/h) | 1× | **1.46×** (gemessen, siehe unten) |
 | genutzte Rechenleistung der T4 | ~0.1 % | ~1 % |
 
 **Für einen Einzellauf** — GPU gegen die CPU dieser Box — ist Faktor **2–3** zu
@@ -293,58 +328,114 @@ genau dieser Fehlschluss steckt hinter O9.
 
 ---
 
-### Was der Sweep dadurch spart
+### Was der Sweep dadurch spart — **1.46×, gemessen auf der T4**
 
-Gemessen: 4 Läufe mit `-j 4` auf 4 Kernen, **3.9×** (17.2 s Wanduhr gegen 66 s
-Summe), also ~97 % Effizienz solange `-j` ≤ Kernzahl. Bei ~4× ist Schluss.
+**Am 10.09. auf der Instanz gemessen**, 4 Läufe (`--ops OP01 OP02 --epochs 6
+--device cuda`, Auswertung auf die Trainings-OPs beschränkt):
 
-**Die Wanduhr ist `ceil(Läufe / j)` Lauf-Dauern, nicht `Läufe / j`** — eine
-letzte Welle mit weniger Läufen als Arbeitern kostet eine ganze Dauer. Eine
-Achse hier sind 9 Läufe (3 Punkte × 3 Seeds):
-
-| `-j` | Wanduhr | Faktor | |
+| | `sweep_wall_s` | je Lauf | Summe `wall_s` |
 |---|---|---|---|
-| 1 (heute) | 9 Dauern | 1× | |
-| **3** | **3 Dauern** | **3×** | drei Kerne reichen |
-| 4 | 3 Dauern | 3× | **kein Gewinn** gegenüber 3 — die letzte Welle ist krumm |
-| 5+ | ~3 Dauern | ~3× | Läufe teilen sich Kerne |
+| `-j 1` (seriell) | **596.2 s** (9.9 min) | 2.5 min | 596.2 s |
+| `-j 4` (parallel) | **407.4 s** (6.8 min) | **6.8 min** | 1625.9 s |
 
-**`-j` auf einen Teiler der Laufzahl setzen.** 9 Läufe → `-j 3`. Alle 27 Läufe
-des Gitters auf einmal → `-j 4` = `ceil(27/4) = 7` Dauern, die vollen 3.9×.
-`sweep.py` rechnet die Wellen beim Start aus und warnt bei krummem `-j`.
+**Der Faktor ist 596.2 / 407.4 = 1.46×**, also 37 % Effizienz auf vier Workern.
+Gespart werden 3.1 von 9.9 Minuten.
 
-Die Verhältnisse sind exakt, die Minuten nicht: mit der geschätzten Lauf-Dauer
-(unten) wären das je Achse ~1.7 h seriell gegen ~35 min, und ~5 h gegen ~1.3 h
-für das ganze Gitter. **Die absoluten Zahlen stehen erst nach 6.3 auf der
-Instanz.**
+> **Vorher stand hier 3.9×. Das war falsch, und der Fehler ist lehrreich.**
+> Die 3.9× kamen aus `Summe der Laufzeiten / Wanduhr` — und genau das ist keine
+> Messung, sondern eine **Obergrenze**: unter Konkurrenz wird jeder Lauf selbst
+> langsamer, also wächst der Zähler mit. Hier auf 2.73× (596 → 1626 s), womit
+> der Quotient 3.99 anzeigt, wo 1.46 stimmt. Nur eine echte `-j 1`-Baseline
+> beantwortet die Frage. `sweep.py` schreibt die Warnung inzwischen selbst in
+> die Ausgabe.
 
-> **Der größere Hebel wäre ein anderer.** Die Achsen laufen nacheinander, weil
-> Achse 2 die Antwort von Achse 1 braucht — eine wissenschaftliche Abhängigkeit,
-> keine rechnerische. Solange das so bleibt, sind nie mehr als 9 Läufe
-> gleichzeitig unterwegs und die 4 Kerne sind die Decke. Deutlich mehr ginge nur
-> mit der `bmm`-Ensemble-Variante am Ende dieses Abschnitts.
+**Die eigentliche Zahl ist die dritte Spalte: 2.5 → 6.8 min je Lauf.** Und die
+Epochenzeile sagt, *welcher* Teil das ist:
 
-Einmal auf der Instanz, außerhalb des Skripts:
+| | seriell | `-j 4` | |
+|---|---|---|---|
+| Rollout | 14.8 s | **49.6 s** | **3.35× langsamer** |
+| Inner (×100) | 6.3 s | 7.9 s | 1.25× langsamer |
+
+**Der Rollout serialisiert fast vollständig, der Innenteil kaum** — und das ist
+die Diagnose, nicht mehr ein Verdacht. Der Rollout sind ~50 *winzige* Kernel je
+Schritt (363×128), und winzige Kernel aus vier CUDA-Kontexten arbeitet der
+Treiber zeitscheibenweise ab. Der Innenteil rechnet in größeren Batches (2048
+bzw. 256 mit doppeltem Autograd), dort fällt ein Kontextwechsel kaum ins Gewicht.
+
+**Damit ist MPS der passende Hebel**, nicht einer von zwei Verdächtigen: er lässt
+Kernel verschiedener Prozesse nebeneinander auf den SMs laufen. Genau der Fall,
+für den er gebaut wurde. Der Test (~7 min, noch nicht gelaufen):
 
 ```bash
-nvidia-cuda-mps-control -d    # sonst time-sliced der Treiber zwischen den Prozessen
+nvidia-cuda-mps-control -d          # einmal je Boot
+# denselben -j-4-Lauf wiederholen und sweep_wall_s vergleichen
 ```
 
-> **Alle Zahlen oben sind gerechnet, nicht gemessen** — aus Kernel-Zählung, nicht
-> aus einem Lauf auf der T4. In diesem Repo steht keine einzige gemessene
-> GPU-Epochenzeit; die ~2 h für 60 Epochen aus Schritt 6 sind CPU (32 Threads),
-> und die 8 vCPUs der g4dn sind deutlich weniger. **Der erste Schritt auf der
-> Instanz ist deshalb README_GPU_SERVER §6.3**: ein kurzer Lauf, die Zeile
-> `[Xs/epoch = Y rollout + Z inner]` ablesen und hier eintragen. Erst dann steht
-> ein Budget auf einer Messung statt auf einer Schätzung.
+Hilft MPS deutlich, war die Kontext-Umschaltung das Problem — und dann liegt
+deutlich mehr als 1.46× drin, weil der Rollout 70 % der Epoche ausmacht. Hilft es
+nicht, sind es doch die vier Kerne, und der Sweep gehört auf `--device cpu`, wo
+es keine Kontext-Konkurrenz gibt.
 
-Die einzige Variante, die wirklich an die 15 GB und an echte Auslastung
-herankäme, wäre alle Replikate in *einem* Kernel zu rechnen (Gewichte als
-`(N, in, out)` gestapelt, `bmm` statt `FCLayer`). Das amortisiert die
-Startlatenz über den ganzen Sweep statt über einen Lauf und läge eher bei
-Faktor 20. Es braucht aber einen zweiten Pfad durch `ModulusMLP`, der gegen den
-Einzellauf validiert werden muss, bevor man einem Sweep-Ergebnis daraus glaubt.
-**Lohnt sich erst ab ~30 Läufen** — die drei Achsen oben liegen darunter.
+**Mehr als 4 gleichzeitig lohnt nicht.** Bei vier ist die Effizienz schon auf
+37 %; ein fünfter Prozess teilt dieselbe Karte und dieselben vier Kerne noch
+feiner auf. Der Hebel ist MPS oder ein anderes Gerät, nicht mehr Prozesse.
+
+**Was bleibt: 1.46× ist geschenkt und kostet nichts** — ein Sweep über eine
+Achse (9 Läufe) fällt damit auf ~70 % seiner seriellen Zeit. Es ist nur nicht
+die Größenordnung, mit der der Abschnitt darüber geplant hatte.
+
+Die Wanduhr bleibt `ceil(Läufe / j)` Lauf-Dauern — eine letzte Welle mit weniger
+Läufen als Arbeitern kostet eine ganze Dauer. **`-j` auf einen Teiler der
+Laufzahl setzen**, 9 Läufe → `-j 3`. `sweep.py` rechnet die Wellen beim Start aus
+und warnt bei krummem `-j`.
+
+### Was kostet ein Benchmark? Ein Rechenbeispiel
+
+Für die Frage „lohnt die Instanz" ist ein Beispiel greifbarer als ein Faktor.
+**Ein Gitter aus 10 × 10 Punkten** (`w_phys` × `w_bc`), 60 Epochen, elf OPs:
+
+| | seriell | mit `-j 4` |
+|---|---|---|
+| **100 Punkte, 1 Seed** | 193 h = **8.1 Tage** | 132 h = **5.5 Tage** |
+| 100 Punkte, 3 Seeds | 580 h = 24 Tage | 397 h = 17 Tage |
+
+Grundlage sind die gemessenen 116 s/Epoche bei elf OPs, also **1.93 h je Lauf**.
+Die Parallelität spart davon rund ein Drittel.
+
+**Die eigentliche Lehre steht in der Zeile darüber, nicht in der Tabelle:** mit
+der veralteten README-Zahl hätte derselbe Benchmark auf **45 Tage** geplant
+werden müssen. Der Unterschied kommt nicht von der Karte und nicht von `-j`,
+sondern vom `rollout_plan`-Fastpath, der längst im Code stand und nie gemessen
+wurde. Wer hier plant, plant mit `S` aus einem **heutigen** Lauf.
+
+> **Und ein 10×10-Gitter ist ohnehin die falsche Form.** Bei 100 Punkten ohne
+> Seeds misst man vor allem die Seed-Streuung und nennt sie Ergebnis — genau der
+> Fehler, gegen den `sweep.py` das `[NOT SEPARATED]` schreibt. Drei Punkte je
+> Achse mit drei Seeds (9 Läufe, ~8 h) sagen mehr als hundert Punkte mit einem.
+
+**Was die Karte selbst dazu beiträgt, ist nicht gemessen** — und zwei
+Anhaltspunkte legen nahe, dass es wenig ist:
+
+| je Schritt | T4 (10.09., echte Daten) | CPU, 4 Kerne (09.09., Fixture) |
+|---|---|---|
+| Rollout | ~1.00 ms | ~0.58 ms |
+| Inner | ~31.5 ms | ~30 ms |
+
+Verschiedene Maschinen und verschiedene torch-Versionen, also **kein Beweis** —
+aber es passt zu dem, was README §6.3 seit jeher sagt: der Rollout ist
+Python-gebunden, ~50 Ops je Schritt zu ~7 µs Dispatch, und Python läuft auf
+beiden Seiten gleich schnell. **Die eine Messung, die es entscheidet, dauert
+10 Minuten:**
+
+```bash
+python PINNmodulusTwo/train.py --ops OP01 OP02 --epochs 3 --device cpu
+# gegen dieselbe Zeile mit --device cuda
+```
+
+Solange die fehlt, ist die ehrliche Aussage über die Instanz: **sie macht die
+Studie planbar, aber welcher Anteil davon die Karte ist und welcher der Code,
+ist offen.**
 
 ## Die Auswahlregeln stehen fest
 
@@ -943,7 +1034,11 @@ Wird beim Abhaken ausgefüllt. Leer = noch nicht gemessen.
 | 6 | `L_data` | 100.5 → **0.0515** | 01.09. |
 | 6.3 | **läuft auf der Karte** | **Exit 0** auf `cuda:0 Tesla T4`, torch 2.6.0+cu124. 2 OPs, 3 Epochen, 600 Optimizer-Steps, ~2.7 min für den ganzen Aufruf (inkl. Auswertung und Plots) | **10.09.** |
 | 6.3 | **peak VRAM** | **0.11 GB von 15.6 GB** — bei 2 OPs und den Default-Batches | **10.09.** |
-| 6.3 | `s/epoch` | **fehlt noch.** Die Zeile `[Xs/epoch = Y rollout + Z inner]` steht im Log, ist aber nicht abgelesen. Ohne sie steht kein Budget auf einer Messung | — |
+| 6.3 | **Parallelität `-j 1` vs `-j 4`** | **1.46×** — `sweep_wall_s` 596.2 s seriell gegen 407.4 s parallel, 4 Läufe, `--epochs 6 --ops OP01 OP02 --device cuda`. Effizienz 37 %. Je Lauf 2.5 → 6.8 min, also **2.7× langsamer unter Konkurrenz** | **10.09.** |
+| 6.3 | MPS-Gegentest | **offen** — `nvidia-cuda-mps-control -d`, dann `-j 4` wiederholen. Trennt „die eine Karte bremst" von „die vier Kerne bremsen" | — |
+| 6.3 | **`s/epoch`** | **21.1 s = 14.8 rollout + 6.3 inner** (2 OPs, 100 inner_steps, seriell). Unter `-j 4`: 57.5 = 49.6 + 7.9 — **der Rollout wird 3.35× langsamer, der Innenteil nur 1.25×** | **10.09.** |
+| 6.3 | **Planungszahl** | 10.55 s je OP und Epoche → ~116 s/Epoche bei elf OPs → **~1.9 h je 60-Epochen-Lauf** | **10.09.** |
+| 6.3 | README-Beispiel `118.7s/epoch` | **veraltet, Faktor 5.6.** `inner` ist in beiden Zeilen identisch 6.3 s, also dieselbe Konfiguration; der Rollout fiel von 112.4 auf 14.8 s (**7.6×**, der `rollout_plan`-Fastpath). Budgettabellen in Kapitel 7/8 entsprechend zu pessimistisch | **10.09.** |
 | 6 | Loss-Balance | arbeitet jetzt: `ratio phys/bc` 2.17/0.782 → **0.605/0.0178**, betas [0.91 …] → [0.98 2.64 3.9 3.99] | 01.09. |
 
 Alles läuft aus dem Repo-Wurzelverzeichnis:
