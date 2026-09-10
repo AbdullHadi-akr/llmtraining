@@ -339,16 +339,26 @@ und 8 hängen an dieser einen Zahl. Die Epochenzeile schlüsselt sie auf:
   epoch 1  L_data=...  [118.7s/epoch = 112.4s rollout + 6.3s x100 inner, ...]
 ```
 
-> **Diese Beispielzahl ist veraltet — nicht als Erwartung lesen.** Am 09.09. auf
-> der synthetischen Fixture gemessen: **0.58 ms je Rollout-Schritt** (CPU, 4
-> Kerne). Für dieselbe Konfiguration wie oben — 2 OPs, 7000 Schritte — sind das
-> ~8 s Rollout, nicht 112 s. Die 112.4 s stammen sichtbar aus der Zeit vor dem
-> `rollout_plan`-Fastpath: `level_rollout` reduzierte damals je Schritt den
-> ganzen Puffer-Präfix, also O(n_t²·P), und „dominierte die Epoche" (so der
-> Docstring in `model.py`). **Jede Budgetrechnung in Kapitel 7 und 8 hängt an
-> dieser einen Zahl und ist damit vermutlich um eine Größenordnung zu
-> pessimistisch.** Die Rechenvorschrift darunter stimmt weiter — nur `S` muss
-> aus einem heutigen Lauf kommen.
+> **Diese Beispielzahl ist veraltet. Am 10.09. auf der T4 gemessen:**
+>
+> ```
+>   epoch 1  L_data=...  [21.1s/epoch = 14.8s rollout + 6.3s x100 inner, ...]
+> ```
+>
+> **Der `inner`-Teil ist in beiden Zeilen identisch 6.3 s** — es ist also
+> dieselbe Konfiguration (2 OPs, 100 `inner_steps`), und der Vergleich ist
+> zulässig. Der Rollout ist von **112.4 s auf 14.8 s** gefallen, Faktor **7.6**.
+> Das ist der `rollout_plan`-Fastpath: `level_rollout` reduzierte davor je
+> Schritt den ganzen Puffer-Präfix, also O(n_t²·P), und „dominierte die Epoche"
+> (so der Docstring in `model.py`).
+>
+> **Damit sind alle Budgettabellen in Kapitel 7 und 8 um Faktor 5.6 zu
+> pessimistisch** (118.7 / 21.1). Die Rechenvorschrift darunter stimmt weiter —
+> nur `S` muss aus einem heutigen Lauf kommen.
+>
+> **Die Planungszahl für die echte Konfiguration:** 21.1 s bei 2 OPs sind
+> 10.55 s je OP und Epoche, also ~116 s/Epoche bei elf OPs und **~1.9 h für
+> einen 60-Epochen-Lauf.**
 
 Zwei Hälften, die sich völlig verschieden verhalten:
 
@@ -506,8 +516,24 @@ gespart.
 > eine **Obergrenze**, keine Messung. Nur `-j 1` gegen `-j N` beantwortet es.
 
 **Die aussagekräftige Spalte ist die rechte: 2.5 → 6.8 min je Lauf.** Vier
-gleichzeitige Läufe machen jeden einzelnen 2.7× langsamer — irgendetwas wird fast
-vollständig serialisiert. Zwei Verdächtige, und **ein Test trennt sie**:
+gleichzeitige Läufe machen jeden einzelnen 2.7× langsamer — und die Epochenzeile
+sagt genau, *welcher* Teil das ist:
+
+| | seriell | `-j 4` | |
+|---|---|---|---|
+| Rollout | 14.8 s | **49.6 s** | **3.35× langsamer** |
+| Inner (×100) | 6.3 s | 7.9 s | 1.25× langsamer |
+
+**Der Rollout serialisiert fast vollständig, der Innenteil kaum.** Das ist keine
+Überraschung, sondern die Diagnose: der Rollout ist ~50 *winzige* Kernel je
+Schritt (363×128), und winzige Kernel aus vier verschiedenen CUDA-Kontexten sind
+genau das, was der Treiber zeitscheibenweise abarbeitet. Der Innenteil rechnet in
+größeren Batches (2048 bzw. 256 mit doppeltem Autograd) — dort fällt ein
+Kontextwechsel kaum ins Gewicht.
+
+**Damit ist MPS nicht ein Verdacht unter zweien, sondern der passende Hebel:** er
+lässt Kernel verschiedener Prozesse nebeneinander auf den SMs laufen, statt sie
+abzuwechseln. Genau der Fall, für den er gebaut wurde.
 
 ```bash
 nvidia-cuda-mps-control -d          # einmal je Boot, dann -j 4 wiederholen

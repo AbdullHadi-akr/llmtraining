@@ -6,17 +6,7 @@
 > die Karte ist vermessen, die Zahlen stehen in „Was am 09.09./10.09.
 > dazugekommen ist". Nichts davon muss noch angefasst werden, um weiterzukommen.
 >
-> ### Vorweg, 5 Sekunden: die letzte offene technische Zahl
->
-> ```bash
-> grep "s/epoch" /tmp/par_j1/*/train.log | head -1
-> ```
->
-> Die Logs von der Zeitmessung liegen noch da. Diese Zeile ist das Einzige, was
-> der Stand-Tabelle noch fehlt, und sie ist die Grundlage für jedes Budget
-> unten — **jede Stundenangabe in diesem Abschnitt ist bis dahin geschätzt.**
->
-> ### Dann der Lauf
+> ### Der Lauf
 >
 > ```bash
 > cd /home/student1/llmtraining
@@ -24,10 +14,15 @@
 > source modulus_env/bin/activate
 >
 > python PINNmodulusTwo/sweep.py --seeds 0 1 2 \
->     --vary w-phys 0.1 0 --vary w-bc 0.1 0 -j 4 \
+>     --vary w-phys 0.1 0 -j 3 \
 >     --out artifacts/achse0 --csv artifacts/achse0.csv \
->     -- --epochs 60
+>     -- --epochs 60 --w-bc 0
 > ```
+>
+> **Über Nacht laufen lassen.** Sechs Läufe zu je ~1.9 h — das ist keine
+> Schätzung mehr, sondern die gemessenen 116 s je Epoche bei elf OPs. Bei
+> `ceil(6/3) = 2` Wellen und dem gemessenen Parallelitätsfaktor grob **8 h**,
+> seriell wären es 12 h.
 >
 > **Das ist der Vergleichslauf zu Schritt 6**, mit genau einer Frage: trägt der
 > Physik-Term, wenn beide Seiten auskonvergiert sind?
@@ -51,23 +46,21 @@
 > „nahe" ist ohne Streuung nicht definiert. Genau daran ist §11.3 schon einmal
 > gescheitert.
 >
-> Drei Dinge fallen dabei gleichzeitig ab:
+> Zwei Dinge fallen dabei gleichzeitig ab:
 >
 > 1. **Achse 0** — trägt der Physik-Term.
-> 2. **Achse 2 gratis** — das 2×2-Gitter enthält `w_bc` allein, also die Achse,
->    deren ursprüngliche Begründung am 02.09. weggefallen ist. Danach ist sie
->    entweder erledigt oder bestätigt, ohne einen eigenen Sweep.
-> 3. **Die Seed-Streuung, einmal gemessen.** Das ist der eigentliche Gewinn: ab
+> 2. **Die Seed-Streuung, einmal gemessen.** Das ist der eigentliche Gewinn: ab
 >    dann ist jede spätere Achse lesbar, statt geraten. Ohne sie ist „6.27 gegen
 >    6.51" kein Ergebnis.
 >
 > `sweep.py` sagt am Ende selbst `[NOT SEPARATED]`, wenn der Abstand zwischen
 > zwei Konfigurationen unter der Seed-Streuung liegt.
 >
-> **Kosten:** 12 Läufe, `ceil(12/4) = 3` Lauf-Dauern. Mit dem gemessenen 1.46×
-> und einer geschätzten Lauf-Dauer von ~1.5 h sind das grob **6–7 h** — die Zahl
-> steht erst nach dem `grep` oben. Wenn das zu viel ist: `--seeds 0 1` (8 Läufe,
-> 2 Dauern) oder `--vary w-phys 0.1 0` allein (6 Läufe, nur Achse 0).
+> **`--w-bc 0` steht bewusst in beiden Armen.** Damit ist es der Vergleich, den
+> Achse 0 meint: Physik **und** BC gegen keins von beidem. Das 2×2-Gitter, das
+> `w_bc` mit isolieren würde (Achse 2), wären zwölf Läufe und ~16 h — und die
+> ursprüngliche Begründung für Achse 2 ist am 02.09. ohnehin weggefallen
+> (§11.6). Erst nach Achse 0 entscheiden, ob sie noch jemanden interessiert.
 >
 > Wie gut Schritt 6 wirklich war — in-sample gegen ausgehalten, und warum der
 > Volumenstrom die eigentliche Schwierigkeitsachse ist: **§11.5**.
@@ -356,25 +349,33 @@ Gespart werden 3.1 von 9.9 Minuten.
 > beantwortet die Frage. `sweep.py` schreibt die Warnung inzwischen selbst in
 > die Ausgabe.
 
-**Die eigentliche Zahl ist die dritte Spalte: 2.5 → 6.8 min je Lauf.** Vier
-gleichzeitige Läufe machen jeden einzelnen **2.7× langsamer**, also wird
-irgendeine Ressource fast vollständig serialisiert. Der Hauptverdacht ist die
-Karte: **es gibt genau eine T4, und `-j 4` sind vier Prozesse auf derselben** —
-ohne MPS teilt der Treiber sie zeitscheibenweise zwischen den CUDA-Kontexten,
-statt die Kernel nebeneinander laufen zu lassen. Der zweite Verdacht sind die
-Kerne: ein Kernel-Start kostet CPU im Treiber, und bei ~50 Starts je
-Rollout-Schritt ist das bei vier Prozessen echte Last auf vier physischen Kernen.
+**Die eigentliche Zahl ist die dritte Spalte: 2.5 → 6.8 min je Lauf.** Und die
+Epochenzeile sagt, *welcher* Teil das ist:
 
-**Der eine Test, der die beiden trennt** (~7 min, noch nicht gelaufen):
+| | seriell | `-j 4` | |
+|---|---|---|---|
+| Rollout | 14.8 s | **49.6 s** | **3.35× langsamer** |
+| Inner (×100) | 6.3 s | 7.9 s | 1.25× langsamer |
+
+**Der Rollout serialisiert fast vollständig, der Innenteil kaum** — und das ist
+die Diagnose, nicht mehr ein Verdacht. Der Rollout sind ~50 *winzige* Kernel je
+Schritt (363×128), und winzige Kernel aus vier CUDA-Kontexten arbeitet der
+Treiber zeitscheibenweise ab. Der Innenteil rechnet in größeren Batches (2048
+bzw. 256 mit doppeltem Autograd), dort fällt ein Kontextwechsel kaum ins Gewicht.
+
+**Damit ist MPS der passende Hebel**, nicht einer von zwei Verdächtigen: er lässt
+Kernel verschiedener Prozesse nebeneinander auf den SMs laufen. Genau der Fall,
+für den er gebaut wurde. Der Test (~7 min, noch nicht gelaufen):
 
 ```bash
 nvidia-cuda-mps-control -d          # einmal je Boot
 # denselben -j-4-Lauf wiederholen und sweep_wall_s vergleichen
 ```
 
-Hilft MPS deutlich, war die Kontext-Umschaltung das Problem. Hilft es nicht,
-sind es die Kerne — dann ist `-j 2` mit längeren Läufen die bessere Aufteilung,
-oder der Sweep gehört auf `--device cpu`, wo es keine Kontext-Konkurrenz gibt.
+Hilft MPS deutlich, war die Kontext-Umschaltung das Problem — und dann liegt
+deutlich mehr als 1.46× drin, weil der Rollout 70 % der Epoche ausmacht. Hilft es
+nicht, sind es doch die vier Kerne, und der Sweep gehört auf `--device cpu`, wo
+es keine Kontext-Konkurrenz gibt.
 
 **Mehr als 4 gleichzeitig lohnt nicht.** Bei vier ist die Effizienz schon auf
 37 %; ein fünfter Prozess teilt dieselbe Karte und dieselben vier Kerne noch
@@ -988,7 +989,9 @@ Wird beim Abhaken ausgefüllt. Leer = noch nicht gemessen.
 | 6.3 | **peak VRAM** | **0.11 GB von 15.6 GB** — bei 2 OPs und den Default-Batches | **10.09.** |
 | 6.3 | **Parallelität `-j 1` vs `-j 4`** | **1.46×** — `sweep_wall_s` 596.2 s seriell gegen 407.4 s parallel, 4 Läufe, `--epochs 6 --ops OP01 OP02 --device cuda`. Effizienz 37 %. Je Lauf 2.5 → 6.8 min, also **2.7× langsamer unter Konkurrenz** | **10.09.** |
 | 6.3 | MPS-Gegentest | **offen** — `nvidia-cuda-mps-control -d`, dann `-j 4` wiederholen. Trennt „die eine Karte bremst" von „die vier Kerne bremsen" | — |
-| 6.3 | `s/epoch` | **fehlt noch.** Die Zeile `[Xs/epoch = Y rollout + Z inner]` steht im Log, ist aber nicht abgelesen. Ohne sie steht kein Budget auf einer Messung | — |
+| 6.3 | **`s/epoch`** | **21.1 s = 14.8 rollout + 6.3 inner** (2 OPs, 100 inner_steps, seriell). Unter `-j 4`: 57.5 = 49.6 + 7.9 — **der Rollout wird 3.35× langsamer, der Innenteil nur 1.25×** | **10.09.** |
+| 6.3 | **Planungszahl** | 10.55 s je OP und Epoche → ~116 s/Epoche bei elf OPs → **~1.9 h je 60-Epochen-Lauf** | **10.09.** |
+| 6.3 | README-Beispiel `118.7s/epoch` | **veraltet, Faktor 5.6.** `inner` ist in beiden Zeilen identisch 6.3 s, also dieselbe Konfiguration; der Rollout fiel von 112.4 auf 14.8 s (**7.6×**, der `rollout_plan`-Fastpath). Budgettabellen in Kapitel 7/8 entsprechend zu pessimistisch | **10.09.** |
 | 6 | Loss-Balance | arbeitet jetzt: `ratio phys/bc` 2.17/0.782 → **0.605/0.0178**, betas [0.91 …] → [0.98 2.64 3.9 3.99] | 01.09. |
 
 Alles läuft aus dem Repo-Wurzelverzeichnis:
