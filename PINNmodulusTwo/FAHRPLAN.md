@@ -6,28 +6,59 @@
 > die Karte ist vermessen, die Zahlen stehen in „Was am 09.09./10.09.
 > dazugekommen ist". Nichts davon muss noch angefasst werden, um weiterzukommen.
 >
-> ### Der Lauf
+> ### Schritt für Schritt
+>
+> **1 — Stand holen.**
 >
 > ```bash
 > cd /home/student1/llmtraining
 > git checkout main && git pull
 > source modulus_env/bin/activate
+> ```
 >
-> nvidia-cuda-mps-control -d          # PFLICHT, sonst Faktor 2.5 verschenkt
+> `python`, nicht `python3`: das System-Python hat kein torch. `sweep.py` prüft
+> das vorab und bricht mit einer Zeile ab, statt jeden Punkt sterben zu lassen.
 >
+> **2 — MPS starten. Nach JEDEM Neustart der Instanz.**
+>
+> ```bash
+> nvidia-cuda-mps-control -d
+> ```
+>
+> „An instance of this daemon is already running" heißt: läuft schon, alles gut.
+> Die Meldung über `/var/log/nvidia-mps` ist folgenlos (nur Logs, nicht die
+> Funktion). **Der Daemon überlebt keinen Reboot** — und ihn zu vergessen kostet
+> Faktor 2.5, ohne dass irgendein Log es sagt. `sweep.py` warnt seit dem 10.09.
+> von sich aus, wenn er bei einem parallelen CUDA-Sweep fehlt.
+>
+> **3 — Den Lauf starten.**
+>
+> ```bash
 > nohup python PINNmodulusTwo/sweep.py --seeds 0 1 2 \
 >     --vary w-phys 0.1 0 -j 6 \
 >     --out artifacts/achse0 --csv artifacts/achse0.csv \
 >     -- --epochs 60 --w-bc 0 > achse0.log 2>&1 &
 > ```
 >
-> Sechs Läufe zu je ~1.9 h (gemessene 116 s/Epoche bei elf OPs), alle sechs in
-> einer Welle: **grob 3 h**. Seriell wären es 12 h.
+> `nohup … &`, damit der Lauf eine getrennte SSH-Sitzung überlebt. Sechs Läufe zu
+> je ~1.9 h (gemessene 116 s/Epoche bei elf OPs), alle in einer Welle:
+> **grob 3 h.** Seriell wären es 12 h, ohne MPS ~8 h.
 >
-> **`nvidia-cuda-mps-control -d` ist nicht optional.** Ohne den Daemon
-> serialisieren die winzigen Rollout-Kernel am Kontextwechsel und derselbe Lauf
-> dauert 8 h statt 3 — lautlos, nichts im Log sagt es. Gemessen: 3.69× mit,
-> 1.46× ohne.
+> **4 — Danach auswerten.**
+>
+> ```bash
+> tail -30 achse0.log          # Mittel und Std je Arm, plus [NOT SEPARATED]
+> cat artifacts/achse0.csv     # eine Zeile je (Konfiguration, Seed)
+> python PINNmodulusTwo/tools/analyse_history.py \
+>     artifacts/achse0/w-phys=0.1__seed=0/history.csv
+> ```
+>
+> Die letzte Zeile ist die Regel dieses Projekts: **nie die letzte Zeile eines
+> Laufs ablesen**, sondern Median und Streuung über die letzten Epochen. Genau
+> daraus entstand O12.
+>
+> **5 — Ergebnis in die Stand-Tabelle**, mit Datum. Ein Haken ohne Zahl ist
+> wertlos.
 >
 > **Das ist der Vergleichslauf zu Schritt 6**, mit genau einer Frage: trägt der
 > Physik-Term, wenn beide Seiten auskonvergiert sind?
@@ -436,6 +467,58 @@ python PINNmodulusTwo/train.py --ops OP01 OP02 --epochs 3 --device cpu
 Solange die fehlt, ist die ehrliche Aussage über die Instanz: **sie macht die
 Studie planbar, aber welcher Anteil davon die Karte ist und welcher der Code,
 ist offen.**
+
+### Bilanz der Sitzung 09./10.09. — was gebaut, was gemessen, was falsch war
+
+**Anlass:** „ein Lauf belegt 0.4 GB von 15 GB VRAM." Die Antwort darauf ist
+nicht, den Speicher zu füllen — es gibt in diesem Modell keinen Tensor, der das
+könnte, und die Batchgrößen sind Experiment-Regler. Die Antwort ist **mehr
+unabhängige Arbeit gleichzeitig**, und genau daraus besteht ein Sweep.
+
+**Gebaut:**
+
+| | |
+|---|---|
+| `sweep.py` | das Werkzeug aus Teil I. `--vary` × `--seeds`, `-j N` parallel, ein Prozess je Punkt, `[NOT SEPARATED]`, Preflight gegen das System-Python, MPS-Warnung |
+| Syncs raus | `_LossBalancer` auf dem Gerät, Finitheitsprüfung nach `backward()`. Von ~10 auf 1 Sync je Optimiererschritt |
+| `bc_index` | die konstante BC-Maske wird nicht mehr je Schritt durch `torch.where` geschickt |
+| `--artifacts-dir` / `PINN_ART_DIR` | ein Ordner je Lauf — ohne das kein paralleler Sweep |
+| `op_metrics.csv` | die Zahlen aus `metrics.txt`, maschinenlesbar |
+
+Der Umbau ist **numerisch neutral, nachgewiesen**: `history.csv` und
+`metrics.txt` byte-identisch, alle Vorhersage-Arrays und alle 25
+Gewichtstensoren bitweise gleich, vor gegen nach.
+
+**Gemessen (alles neu, alles vorher unbekannt):**
+
+| | |
+|---|---|
+| `s/epoch` | **21.1 s** bei 2 OPs = 14.8 rollout + 6.3 inner → **1.93 h je 60-Epochen-Lauf** über elf OPs |
+| peak VRAM | **0.11 GB von 15.6** |
+| Parallelität | **3.69× mit MPS**, 1.46× ohne, 92 % Effizienz |
+| MPS allein | **2.52×** |
+
+**Vier Zahlen im Repo waren falsch und stehen jetzt richtig:**
+
+1. **`118.7 s/epoch` im README** — gemessen sind 21.1 s. Der `inner`-Teil ist in
+   beiden Zeilen identisch 6.3 s, also dieselbe Konfiguration; der Rollout fiel
+   von 112.4 auf 14.8 s (**7.6×**, der `rollout_plan`-Fastpath, der längst im
+   Code stand). **Alle Budgets in Kapitel 7/8 waren Faktor 5.6 zu pessimistisch.**
+2. **3.9× Parallelität** — war `Summe / Wanduhr`, also eine Obergrenze statt
+   einer Messung.
+3. **1.46×** — echt gemessen, aber ohne MPS.
+4. **„bit-identisch mit einem Einzellauf"** — gilt nur bei gleicher Thread-Zahl;
+   mehrfädige CPU-Reduktionen legen ihre Summationsreihenfolge nicht fest.
+
+**Die Lehre, die über diese Sitzung hinausgeht:** der größte Zeitgewinn lag
+nicht in neuem Code, sondern in einer **veralteten Zahl**. Mit ihr wäre der
+100-Punkte-Benchmark auf 45 Tage geplant worden; gemessen sind es 2.2. Wer hier
+ein Budget rechnet, rechnet mit `S` aus einem heutigen Lauf — nie aus dem
+README.
+
+**Offen geblieben:** wie weit `-j` gehen darf (bei vier Workern 92 %, die vier
+Kerne sind nicht ausgereizt), und was die Karte gegenüber reiner CPU bringt —
+dafür fehlt `--device cpu` gegen `--device cuda` auf derselben Box, 10 Minuten.
 
 ## Die Auswahlregeln stehen fest
 
