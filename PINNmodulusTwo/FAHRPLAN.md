@@ -109,18 +109,39 @@
 > Stunden verbrennt:
 >
 > ```bash
-> python PINNmodulusTwo/train.py --epochs 2 --ops OP01 OP02 --device cuda \
+> python PINNmodulusTwo/train.py --epochs 3 --ops OP01 OP02 --device cuda \
 >     --delta-phys 0.2 --ema-decay 0.5 \
 >     --artifacts-dir artifacts/vorlauf 2>&1 | tee vorlauf.log
 > ```
 >
-> Zwei Dinge müssen stimmen, sonst misst Lauf 1 dasselbe wie Achse 0:
+> Drei Dinge müssen stimmen, sonst misst Lauf 1 dasselbe wie Achse 0:
 >
 > | prüfen | erwartet |
 > |---|---|
+> | `grep '^\[device\]' vorlauf.log` | `[device] cuda:0 Tesla T4 …` — **nicht** `cpu`, und **nicht** die `ask`-Rückfallzeile |
 > | `grep CFL vorlauf.log` | die Zeile `[CFL WARN] the PHYSICS stencil…` ist **weg** (0.2 s < Δt_max 0.241 s) |
-> | `cut -d, -f1,2,9 artifacts/vorlauf/history.csv` | `div_data` liegt **nahe** `L_data`, nicht Faktor 1 000 darüber |
-> | `grep "^\[device\]" vorlauf.log` | `[device] cuda:0 Tesla T4 …` — **nicht** `cpu`, und **nicht** die `ask`-Rückfallzeile |
+> | `div_data`-Zerfallsrate (Kommando unten) | **≈ 0.50 je Epoche**, nicht 0.90 |
+>
+> > **Nicht auf „`div_data` liegt nahe `L_data`" prüfen — das ist nach drei
+> > Epochen bei beiden Einstellungen falsch.** Die EMA startet am ersten
+> > Optimiererschritt bei `L_data ≈ 3.3e4` und braucht auch mit `0.5` rund
+> > **18 Epochen**, um diesen Anker loszuwerden. Nach drei Epochen steht sie so
+> > oder so drei Größenordnungen zu hoch. Ablesbar ist in dieser Zeit nur die
+> > **Rate**, und die ist eindeutig:
+> >
+> > | | Ep2/Ep1 | Ep3/Ep2 |
+> > |---|---|---|
+> > | `--ema-decay 0.9` (Default, kaputt) | 0.900 | 0.900 |
+> > | `--ema-decay 0.5` (repariert) | **0.501** | **0.500** |
+> >
+> > ```bash
+> > awk -F, 'NR>1{if(p)printf "  Ep%s/Ep%s  div_data %-12s  Rate %.3f\n",$1,$1-1,$9,$9/p; p=$9}' \
+> >     artifacts/vorlauf/history.csv
+> > ```
+> >
+> > Steht dort 0.9, ist `--ema-decay` nicht angekommen. Steht dort 0.5, greift
+> > die Reparatur — und über 60 Epochen holt die EMA den Anker dann tatsächlich
+> > ein (nachgerechnet: Faktor 1.1 statt 1 439, §11.8).
 >
 > **3 — Lauf 1: die δ-Achse, mit Physik UND BC an.** Über Nacht.
 >
