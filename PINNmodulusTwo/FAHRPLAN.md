@@ -198,7 +198,23 @@
 > echo "PID=$!"
 > ```
 >
-> Neun Läufe, drei Wellen, **grob 5–6 h**. `w_phys = 0.1` und `w_bc = 0.1` sind
+> Neun Läufe, drei Wellen, **grob 6 h** — nachgerechnet aus gemessenen Zahlen:
+>
+> | | |
+> |---|---|
+> | Rollout je Epoche, 11 OPs, bei 3 gleichzeitigen Läufen | **80 s** (Achse 0, gemessen) |
+> | Innenteil je Epoche, Physik **und** BC an | **~35 s** (Vorlauf: 6.4 s bei 2 OPs → ×5.5) |
+> | je Epoche | ~115 s |
+> | je Lauf, 60 Epochen + Auswertung | **~2 h** |
+> | drei Wellen | **~6 h** |
+>
+> `sweep.py` startet die Punkte in der Reihenfolge, die `build_points` erzeugt —
+> erst alle Seeds von `δ = 1.0`, dann `0.4`, dann `0.2`. Da alle Läufe etwa
+> gleich teuer sind, ist **jede Welle genau ein δ-Arm**: nach ~2 h steht
+> `δ = 1.0` vollständig, nach ~4 h `0.4`, nach ~6 h `0.2`. Zwischenstände sind
+> also lesbar, ohne auf das Ende zu warten.
+>
+> `w_phys = 0.1` und `w_bc = 0.1` sind
 > Default, stehen also **beide an** — es ist der erste 60-Epochen-Lauf mit BC
 > überhaupt.
 >
@@ -424,7 +440,7 @@ danach gibt es wieder Gewichte zu messen.
 | # | Achse | Zustand |
 |---|---|---|
 | **0** | `--w-phys 0` gegen `0.1`, 60 Epochen, 3 Seeds | ✅ **gelaufen 10.09.** Nullmessung steht: **5.248 ± 0.518 C** ohne Physik und BC. Wird nicht wiederholt — sie ist ab jetzt die Vergleichslinie |
-| **1** | **δ (`--delta-phys`) 1.0 / 0.4 / 0.2, mit Physik UND BC an**, O8 + O15 | **das Nächste.** 9 Läufe, ~6–7 h. δ = 0.2 unterschreitet Δt_max (0.241 s), die `[CFL WARN]` verschwindet dort. `--ema-decay 0.5` repariert gleichzeitig O15, und der `δ = 1.0`-Arm dient als Anker, um beides auseinanderzuhalten |
+| **1** | **δ (`--delta-phys`) 1.0 / 0.4 / 0.2, mit Physik UND BC an**, O8 + O15 | **das Nächste.** 9 Läufe, ~6 h. δ = 0.2 unterschreitet Δt_max (0.241 s), die `[CFL WARN]` verschwindet dort. `--ema-decay 0.5` repariert gleichzeitig O15, und der `δ = 1.0`-Arm dient als Anker, um beides auseinanderzuhalten |
 | **2** | **O16 — die Randbedingung an der Gehäusewand** | **danach, und es ist Code.** Robin-Term bei `x = 0.0219` mit `U(V̇)` auf `A = 0.0206 m²`, beaufsichtigt gegen den **gemessenen** Wärmestrom aus dem Rohexport. Kein geratener Term. Tor: erst nach der GridCNN-Bilanzprobe |
 | **3** | `w_phys` und `w_bc` als echtes Gitter, O6 | **erst nach 1 und 2.** Vorher misst man den Anker des ersten Optimiererschritts (O15) oder ein falsches Residuum (O8/O16). Danach sind es zum ersten Mal echte Achsen |
 | **4** | **O17 — der Fixpunkt des Rollouts** | **läuft parallel, ohne GPU-Zeit.** `evaluate.py` plus Teacher Forcing gegen freien Rollout auf den sechs vorhandenen Checkpoints. Unabhängig von 1–3 und der Ort, an dem der Fehler nachweislich sitzt |
