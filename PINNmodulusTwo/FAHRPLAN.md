@@ -120,20 +120,49 @@
 > |---|---|
 > | `grep CFL vorlauf.log` | die Zeile `[CFL WARN] the PHYSICS stencil…` ist **weg** (0.2 s < Δt_max 0.241 s) |
 > | `cut -d, -f1,2,9 artifacts/vorlauf/history.csv` | `div_data` liegt **nahe** `L_data`, nicht Faktor 1 000 darüber |
+> | `grep "^\[device\]" vorlauf.log` | `[device] cuda:0 Tesla T4 …` — **nicht** `cpu`, und **nicht** die `ask`-Rückfallzeile |
 >
 > **3 — Lauf 1: die δ-Achse, mit Physik UND BC an.** Über Nacht.
 >
 > ```bash
+> cd /home/student1/llmtraining
+> source modulus_env/bin/activate
+>
+> # a) MPS. Nach JEDEM Neustart der Instanz. Kostet sonst Faktor 2.5, lautlos.
 > nvidia-cuda-mps-control -d
+>
+> # b) Laeuft noch etwas? Der doppelte Start vom 10.09. darf sich nicht wiederholen.
+> pgrep -af "sweep.py|PINNmodulusTwo/train.py" || echo "frei"
+>
+> # c) Der Lauf.
 > nohup python PINNmodulusTwo/sweep.py --seeds 0 1 2 \
->     --vary delta-phys 1.0 0.4 0.2 -j 4 \
+>     --vary delta-phys 1.0 0.4 0.2 -j 3 \
 >     --out artifacts/achse1 --csv artifacts/achse1.csv \
->     -- --epochs 60 --ema-decay 0.5 > achse1.log 2>&1 &
+>     -- --epochs 60 --ema-decay 0.5 --device cuda > achse1.log 2>&1 &
+> echo "PID=$!"
 > ```
 >
-> Neun Läufe, `-j 4` → drei Wellen, **grob 6–7 h**. `w_phys = 0.1` und
-> `w_bc = 0.1` sind Default, stehen also **beide an** — es ist der erste
-> 60-Epochen-Lauf mit BC überhaupt.
+> Neun Läufe, drei Wellen, **grob 5–6 h**. `w_phys = 0.1` und `w_bc = 0.1` sind
+> Default, stehen also **beide an** — es ist der erste 60-Epochen-Lauf mit BC
+> überhaupt.
+>
+> **`--device cuda` gehört hinter das `--`, nicht davor.** Es ist ein
+> `train.py`-Flag; alles nach dem nackten `--` reicht `sweep.py` unverändert
+> durch. Und es gehört **hin**: `config.yaml` steht auf `device: ask`, und unter
+> `nohup` ist stdin kein Terminal, also fällt jeder Lauf auf `auto` zurück und
+> sagt das auch (`[device] --device ask, but this is not an interactive
+> terminal`). Das trifft heute zufällig `cuda`. Bei einem kaputten Treiber
+> träfe es **`cpu`, und neun Läufe rechneten tagelang still auf vier Kernen.**
+> Genau dagegen steht die Regel in **README_GPU_SERVER §6.1**: bewusst
+> `--device cuda` statt `auto`, damit ein falsch aufgesetzter Server mit einer
+> Fehlermeldung abbricht statt leise weiterzurechnen.
+>
+> **`-j 3`, nicht `-j 4`.** Die Wanduhr ist `ceil(Läufe / j)` Lauf-Dauern — bei
+> neun Läufen sind beide **drei Wellen**, `-j 4` ist also keine Minute schneller
+> und teilt nur schlechter auf (4 + 4 + 1 statt 3 + 3 + 3). Drei gleichzeitige
+> Läufe kosteten in Achse 0 gemessen **80 s Rollout je Epoche**, sechs dagegen
+> 115 s; bei `-j 4` zahlen die ersten beiden Wellen diesen Aufschlag umsonst.
+> `sweep.py` rechnet das selbst aus und weist mit `[HINT]` darauf hin.
 >
 > **Warum diese drei Punkte und nicht zwei.** Das Gitter beantwortet drei Fragen
 > auf einmal, weil `δ = 1.0` als Ankerarm mitläuft:
@@ -182,6 +211,19 @@
 > | ebenso groß (11–18 C) | Das späte Regime wurde **nie gelernt** — Konditionierung |
 >
 > Minuten statt Stunden, und es hängt an keinem Sweep.
+>
+> ### Die ersten zehn Zeilen von `achse1.log` prüfen, bevor du weggehst
+>
+> ```
+> 9 runs (3 configuration(s) x 3 seed(s)), 3 at a time -> 3 run-duration(s) of wall time
+> artifacts: /home/student1/llmtraining/artifacts/achse1
+> passed to train.py: --epochs 60 --ema-decay 0.5 --device cuda
+>   [MPS] control daemon detected -- kernels from the runs can share the SMs.
+> ```
+>
+> Fehlt die `[MPS]`-Zeile, läuft der Daemon nicht — abbrechen, `-d` nachholen,
+> neu starten. Steht dort `--device` nicht in der Durchreich-Zeile, ist es vor
+> dem `--` gelandet und `sweep.py` hat es verschluckt.
 >
 > **4 — Ergebnis in die Stand-Tabelle**, mit Datum und Streuung. Ein Haken ohne
 > Zahl ist wertlos.

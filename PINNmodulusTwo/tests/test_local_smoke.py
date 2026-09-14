@@ -867,3 +867,44 @@ def test_every_op_gets_the_signed_metrics(synthetic_cache):
         assert key in m, key
     # and the formatter has to survive them
     assert "late_bias" in op_metrics_mod.format_op_metrics(op.op_id, "T0-in-time", m)
+
+
+# --------------------------------------------------------------------------
+# sweep.py -- the two things that are expensive to forget and invisible after
+# --------------------------------------------------------------------------
+
+def test_sweep_warns_when_no_device_was_passed_through(capsys):
+    """A missing --device is a silent CPU fallback across every point.
+
+    ``config.yaml`` ships ``device: ask``; under ``nohup`` stdin is not a tty,
+    so each run resolves that to ``auto``. On a healthy box the guess is right.
+    On one whose driver broke it is ``cpu``, and a nine-point sweep spends days
+    on four cores and writes numbers that look exactly like GPU numbers. The
+    rule is README_GPU_SERVER 6.1; this asserts the sweep says it out loud.
+    """
+    import sweep as sweep_mod
+
+    sweep_mod.warn_if_device_implicit(["--epochs", "60", "--ema-decay", "0.5"])
+    out = capsys.readouterr().out
+    assert "--device" in out and "README_GPU_SERVER" in out
+    # and it must not abort: a deliberate `auto` is a legitimate choice
+    assert "Continuing anyway" in out
+
+    for explicit in (["--device", "cuda"], ["--device=cpu"], ["--DEVICE", "cuda"]):
+        sweep_mod.warn_if_device_implicit(["--epochs", "60", *explicit])
+        assert capsys.readouterr().out == "", explicit
+
+
+def test_sweep_mps_warning_stays_quiet_where_it_would_be_noise(capsys):
+    """No MPS warning for a serial sweep or a CPU one -- there is nothing to fix.
+
+    The warning is worth a factor of 2.5 when it applies. Printing it when it
+    cannot apply is how a warning stops being read.
+    """
+    import sweep as sweep_mod
+
+    sweep_mod.warn_if_no_mps(1, ["--device", "cuda"])
+    assert capsys.readouterr().out == ""
+
+    sweep_mod.warn_if_no_mps(4, ["--device", "cpu"])
+    assert capsys.readouterr().out == ""

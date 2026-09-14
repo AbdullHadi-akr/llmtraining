@@ -57,9 +57,16 @@ same cores, and each gets its own ``--artifacts-dir`` -- without that they would
 all write ``artifacts/model.pt``, which is exactly the collision the Fahrplan
 warns about.
 
-Worth doing on the instance, once, outside this script: start the CUDA MPS daemon
-(``nvidia-cuda-mps-control -d``). Without it the driver time-slices between
-processes rather than letting their kernels share the SMs.
+Two things to say out loud at the start of every sweep, because both are cheap
+to forget and expensive to miss, and neither shows up in any log afterwards:
+
+* Start the CUDA MPS daemon on the instance, once per boot
+  (``nvidia-cuda-mps-control -d``). Without it the driver time-slices between
+  processes rather than letting their kernels share the SMs -- a factor of 2.5,
+  measured. :func:`warn_if_no_mps`.
+* Pass ``--device`` through to train.py. ``config.yaml`` says ``device: ask``,
+  and under ``nohup`` that resolves to ``auto``, which is a guess.
+  :func:`warn_if_device_implicit`.
 
 **``-j 4`` is four processes on ONE card, not a four-GPU sweep.** There is a
 single T4 in this machine. Parallel can therefore come out SLOWER than serial,
@@ -218,6 +225,41 @@ def warn_if_no_mps(jobs: int, passthrough: list[str]) -> None:
         "         is invisible in every log. Start it once per boot:\n"
         "             nvidia-cuda-mps-control -d\n"
         "         Continuing anyway.",
+        flush=True,
+    )
+
+
+def warn_if_device_implicit(passthrough: list[str]) -> None:
+    """Say it out loud when no ``--device`` was passed through to train.py.
+
+    ``config.yaml`` ships ``device: ask``, and under ``nohup`` stdin is not a
+    terminal, so every run falls back to ``auto`` -- which is ``cuda`` when a
+    card answers and ``cpu`` when the driver is broken, the container lost
+    ``/dev/nvidia*``, or torch was installed without CUDA. On a healthy box that
+    guess is right and nothing happens. On a sick one a nine-point sweep spends
+    days on four cores, finishes, and writes numbers that look exactly like GPU
+    numbers.
+
+    README_GPU_SERVER 6.1 already states the rule -- "bewusst ``--device cuda``
+    statt ``auto``, so a wrongly set-up server aborts with a clear error instead
+    of quietly computing on the CPU" -- and ``device_utils`` prints "Pass
+    --device explicitly to be sure" on the fallback path. Both are easy to miss
+    in a command someone pastes at 23:00. This says it where the sweep starts.
+
+    Not an error: a deliberate ``auto`` is a legitimate choice, and a sweep must
+    never refuse to start over a default.
+    """
+    if any(a.lower() == "--device" or a.lower().startswith("--device=")
+           for a in passthrough):
+        return
+    print(
+        "  [WARN] no --device passed through to train.py, so each run resolves\n"
+        "         config.yaml's `device: ask`. Under nohup stdin is not a tty,\n"
+        "         so that falls back to `auto` -- cuda if a card answers, CPU if\n"
+        "         anything is wrong with the driver, and the sweep would finish\n"
+        "         either way. Say which one you mean, AFTER the bare `--`:\n"
+        "             ... -- --epochs 60 --device cuda\n"
+        "         See README_GPU_SERVER 6.1. Continuing anyway.",
         flush=True,
     )
 
@@ -473,6 +515,7 @@ def main() -> None:
     if args.passthrough:
         print(f"passed to train.py: {' '.join(args.passthrough)}")
     if not args.dry_run:
+        warn_if_device_implicit(args.passthrough)
         warn_if_no_mps(jobs, args.passthrough)
     if args.dry_run:
         for pt in points:

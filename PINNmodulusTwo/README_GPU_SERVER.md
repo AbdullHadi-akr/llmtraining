@@ -613,6 +613,21 @@ der Rollout kostete unter sechs gleichzeitigen Läufen ~115 s/Epoche, unter drei
 die serielle Messung für elf OPs vorhersagt. Seriell wären es ~10 h gewesen,
 also **~4.0×** statt der 5.46×, die `Summe / Wanduhr` behauptet.
 
+**Und `--device` gehoert hinter das `--`.** `config.yaml` steht auf
+`device: ask`; unter `nohup` ist stdin kein Terminal, also faellt jeder Lauf auf
+`auto` zurueck — das ist eine *Vermutung*, keine Ansage. Auf einer gesunden Box
+trifft sie `cuda` und nichts passiert; bei einem kaputten Treiber trifft sie
+`cpu`, und der ganze Sweep rechnet tagelang still auf vier Kernen und schreibt
+Zahlen, die wie GPU-Zahlen aussehen. Das ist dieselbe Regel wie in §6.1, nur
+eine Ebene hoeher:
+
+```bash
+python PINNmodulusTwo/sweep.py ... -- --epochs 60 --device cuda
+#                                  ^^ alles danach geht an train.py
+```
+
+`sweep.py` warnt seit dem 14.09. von sich aus, wenn `--device` fehlt.
+
 **Nimm `-j 4`.** Mit MPS ist nicht mehr die Karte die Grenze, sondern die CPU:
 jeder Lauf ist eine Python-Schleife und will einen Kern, und die Box hat vier
 physische. Der Knick liegt zwischen vier und sechs.
