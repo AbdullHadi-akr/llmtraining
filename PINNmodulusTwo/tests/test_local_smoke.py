@@ -935,3 +935,32 @@ def test_delta_is_logged_from_the_flag_and_not_hardcoded():
             "the banner must print the value --delta-phys actually set: "
             + line.strip()
         )
+
+
+def test_mps_process_check_uses_a_name_pgrep_can_actually_match():
+    """`pgrep -x nvidia-cuda-mps-control` can never match -- comm is 15 chars.
+
+    Linux keeps a process name in 16 bytes including the NUL, so /proc/<pid>/comm
+    (what `pgrep -x` compares against) holds at most 15 characters. Both MPS
+    daemon names are longer, so both truncate to "nvidia-cuda-mps"; pgrep itself
+    warns "pattern that searches for process name longer than 15 characters will
+    result in zero matches".
+
+    Until 14.09. the fallback asked for the full 23-character name, which made it
+    dead code -- it only ever returned True because the pipe check above it
+    happened to succeed. Caught on the instance: `pgrep -x
+    nvidia-cuda-mps-control` printed nothing while the daemon was demonstrably
+    running and sweep.py reported it as detected.
+    """
+    import sweep as sweep_mod
+
+    assert len(sweep_mod._MPS_COMM) <= 15, (
+        f"{sweep_mod._MPS_COMM!r} is longer than comm can hold, so pgrep -x "
+        "will silently never match it"
+    )
+    src = (PKG_DIR / "sweep.py").read_text(encoding="utf-8")
+    body = src[src.index("def mps_is_running"):src.index("def warn_if_no_mps")]
+    assert '"pgrep", "-x"' in body, "the process check must stay -x, never -f"
+    assert "nvidia-cuda-mps-control" not in body.split('"""')[-1], (
+        "the untruncated daemon name is back in the pgrep call"
+    )
