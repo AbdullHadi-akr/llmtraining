@@ -1,6 +1,6 @@
 # Fahrplan — OP01–OP16 trainiert, OP19 als Messvergleich
 
-> ## ▶ Das Nächste: der Rollout läuft in einen Fixpunkt
+> ## ▶ Das Nächste: den Physik-Term reparieren, dann messen
 >
 > **Achse 0 ist am 10.09. gelaufen und hat eine klare Antwort gegeben — eine
 > andere als erwartet.** Die Zahlen stehen in §11.8, die Kurzfassung hier:
@@ -68,8 +68,28 @@
 > OP07 sind genau die beiden OPs, deren wahres Maximum am weitesten von diesem
 > Band entfernt liegt — und die beiden schlechtesten.
 >
-> Das ist ein **Konditionierungsproblem**, kein Gewichtungsproblem. Kein
-> Gewicht, kein δ und kein `w_bc` verschiebt einen Fixpunkt.
+> Das ist ein **Konditionierungsproblem**, kein Gewichtungsproblem — und hier
+> ist der ehrliche Punkt: **kein Gewicht verschiebt einen Fixpunkt, ein
+> korrektes Residuum vielleicht schon.** Genau das ist die Wette der nächsten
+> Läufe. Die Physik *soll* dem Rollout sagen, dass eine Zelle mit laufender
+> Quelle nicht bei 46 C stehenbleibt — sie kann es heute nur nicht, weil ihr
+> Residuum selbst falsch ist (O8) und keine Senke kennt (O16).
+>
+> ### Die Richtung ist entschieden: Physik und BC sollen tragen
+>
+> **Beschluss 14.09.** Nicht „Physik weg", sondern „Physik reparieren". Damit
+> rücken **O8** (δ) und **O16** (Wand-Randbedingung) von der Seitenlinie auf die
+> Hauptlinie — sie sind die beiden bekannten Gründe, warum das Residuum heute
+> nicht erfüllbar ist. Und **O15** kommt mit, weil ein Gewicht erst dann
+> bedeutet, was es sagt.
+>
+> Drei Reparaturen, zwei davon sind Flags:
+>
+> | # | was | wie | Kosten |
+> |---|---|---|---|
+> | **O8** | δ = 1.0 s ist 4.1× über Δt_max (0.241 s) | `--delta-phys 0.2` | Flag |
+> | **O15** | Divisor eingefroren, `w_phys` bedeutet nicht 0.1 | `--ema-decay 0.5` | Flag |
+> | **O16** | keine Senke an der Gehäusewand | Robin-Term in `physics.py` | Code |
 >
 > ### Schritt für Schritt
 >
@@ -83,32 +103,88 @@
 >
 > `python`, nicht `python3`: das System-Python hat kein torch.
 >
-> **2 — `evaluate.py` bauen.** Es fehlt, und es ist der Hebel: sechs
-> auskonvergierte Checkpoints liegen bereits in `artifacts/achse0/*/model.pt`.
-> `save_checkpoint` schreibt `model_config` mit, und
-> `test_checkpoint_round_trips_without_config_yaml` lädt es getestet zurück —
-> es fehlt **nur der Einstiegspunkt**, kein neues Training. §11.7.
+> **2 — Vorlauf, 15 Minuten. Nicht überspringen.**
 >
-> **3 — Die eine Messung: Teacher Forcing gegen freien Rollout.**
+> Beide Flags greifen sichtbar oder gar nicht. Das prüft man, bevor man sieben
+> Stunden verbrennt:
 >
-> Auf demselben Checkpoint, auf OP06, die späte MAE zweimal rechnen:
+> ```bash
+> python PINNmodulusTwo/train.py --epochs 2 --ops OP01 OP02 --device cuda \
+>     --delta-phys 0.2 --ema-decay 0.5 \
+>     --artifacts-dir artifacts/vorlauf 2>&1 | tee vorlauf.log
+> ```
 >
-> * **freilaufend** (wie heute, das Modell frisst seine eigene Vorhersage) —
->   bekannt: 11.3 bis 18.3 C;
-> * **teacher-forced** (die Historie kommt aus den echten Labels).
+> Zwei Dinge müssen stimmen, sonst misst Lauf 1 dasselbe wie Achse 0:
 >
-> | Ergebnis | heißt | dann |
+> | prüfen | erwartet |
+> |---|---|
+> | `grep CFL vorlauf.log` | die Zeile `[CFL WARN] the PHYSICS stencil…` ist **weg** (0.2 s < Δt_max 0.241 s) |
+> | `cut -d, -f1,2,9 artifacts/vorlauf/history.csv` | `div_data` liegt **nahe** `L_data`, nicht Faktor 1 000 darüber |
+>
+> **3 — Lauf 1: die δ-Achse, mit Physik UND BC an.** Über Nacht.
+>
+> ```bash
+> nvidia-cuda-mps-control -d
+> nohup python PINNmodulusTwo/sweep.py --seeds 0 1 2 \
+>     --vary delta-phys 1.0 0.4 0.2 -j 4 \
+>     --out artifacts/achse1 --csv artifacts/achse1.csv \
+>     -- --epochs 60 --ema-decay 0.5 > achse1.log 2>&1 &
+> ```
+>
+> Neun Läufe, `-j 4` → drei Wellen, **grob 6–7 h**. `w_phys = 0.1` und
+> `w_bc = 0.1` sind Default, stehen also **beide an** — es ist der erste
+> 60-Epochen-Lauf mit BC überhaupt.
+>
+> **Warum diese drei Punkte und nicht zwei.** Das Gitter beantwortet drei Fragen
+> auf einmal, weil `δ = 1.0` als Ankerarm mitläuft:
+>
+> | Vergleich | isoliert |
+> |---|---|
+> | δ = 0.2 gegen δ = 1.0, **innerhalb** des Sweeps | **δ allein.** Sauber, gleiche Seeds, gleiche Flags |
+> | δ = 1.0 (neu) gegen Achse-0-Physikarm (6.090 ± 0.882) | **Balancer-Reparatur + BC an.** Gleiches δ, alles andere neu |
+> | δ = 0.2 gegen die Nullmessung (**5.248 ± 0.518**) | **die eigentliche Frage:** schlägt die reparierte Physik den reinen Datenterm? |
+>
+> Die Nullmessung ist schon gemessen und muss **nicht** wiederholt werden.
+>
+> ### Wie Lauf 1 gelesen wird
+>
+> Die Latte ist die Seed-Streuung: **~1 C**. Alles darunter ist kein Ergebnis.
+>
+> | δ = 0.2 gegen 5.248 C | heißt | dann |
 > |---|---|---|
-> | teacher-forced **klein** (~2–4 C) | Das Modell kann den Einzelschritt. Der Fehler ist reine **Akkumulation im Rollout** | Hebel ist die Rollout-Länge im Training (Scheduled Sampling / kürzere Trainingsfenster), nicht die Architektur |
-> | teacher-forced **ebenso groß** | Das Modell hat das späte Regime **nie gelernt** | Hebel ist die Konditionierung: die Betriebsbedingung erreicht die späte Trajektorie nicht. §11.8 |
+> | **deutlich besser** (unter ~4.3 C) | **Physik trägt, sobald das Residuum stimmt.** δ war der Grund | `w_phys`/`w_bc`-Gitter — jetzt sind es echte Achsen — dann O16 obendrauf |
+> | **gleich** (4.7 – 5.8 C) | δ war es nicht. Bleibt **O16** als der verbleibende bekannte Grund | O16 bauen, Lauf 1 mit Wand-BC wiederholen |
+> | **schlechter** | das Residuum stört auch korrigiert | O16 bauen. Ändert auch das nichts, ist die Formulierung für **diesen** Datensatz falsch — und das ist dann ein Ergebnis, kein Scheitern |
 >
-> **Minuten, nicht Stunden**, und beides sind Wege, die die MAE um mehr als
-> 1 C bewegen könnten. Das ist die Latte: **die Seed-Streuung ist 0.5–0.9 C**
-> (Physik an 1.63 C auf OP06). Jede Achse, die weniger bewegt, ist mit drei
-> Seeds nicht messbar — das gilt für δ, `w_bc` und `w_phys` gleichermaßen.
+> Zusätzlich, unabhängig vom MAE-Ausgang, immer mitlesen:
 >
-> **4 — Ergebnis in die Stand-Tabelle**, mit Datum. Ein Haken ohne Zahl ist
-> wertlos.
+> * **Fällt `L_phys` jetzt?** In Achse 0 fiel es um Faktor 3–5, während `L_data`
+>   um 2 700 fiel. Fällt es mit δ = 0.2 deutlich steiler, ist das Residuum
+>   erfüllbar geworden — **auch wenn die MAE sich noch nicht rührt.** Das ist das
+>   empfindlichste Signal, das der Lauf hat.
+> * **`ratio_bc`** — die erste Zahl zu `w_bc` bei 60 Epochen überhaupt.
+> * **`late_bias_frac` und `peak_pred`** — verschiebt die Physik den Fixpunkt
+>   (O17)? Genau das wäre ihre Aufgabe.
+> * **`analyse_history.py` je Lauf**, nie die letzte Zeile.
+>
+> ### Parallel, kostet keine GPU-Zeit: `evaluate.py`
+>
+> Läuft Lauf 1 über Nacht, ist der Tag frei für den Punkt, an dem der Fehler
+> nachweislich sitzt (**O17**). `evaluate.py` fehlt noch — Checkpoint laden,
+> Rollout rechnen, Metriken berichten. Die **sechs auskonvergierten `model.pt`
+> aus Achse 0 liegen schon da**, und `model_config` lädt getestet zurück
+> (§11.7). Damit dann die eine Messung: **Teacher Forcing gegen freien Rollout
+> auf OP06.**
+>
+> | teacher-forced | heißt |
+> |---|---|
+> | klein (~2–4 C) | Das Modell kann den Einzelschritt. Der Fehler ist **Akkumulation** über 7 000 Schritte |
+> | ebenso groß (11–18 C) | Das späte Regime wurde **nie gelernt** — Konditionierung |
+>
+> Minuten statt Stunden, und es hängt an keinem Sweep.
+>
+> **4 — Ergebnis in die Stand-Tabelle**, mit Datum und Streuung. Ein Haken ohne
+> Zahl ist wertlos.
 >
 > ### Wenn doch noch ein Sweep laufen soll
 >
@@ -235,30 +311,43 @@ Schritt 6 hat dafür gerade das Lehrstück geliefert: nach drei Epochen stand
 `spread` bei 0.201 und sah aus wie ein Artefakt; nach sechzig steht er bei 0.968.
 **Drei Epochen sind kein Trend, und ein Seed ist keine Streuung.**
 
-## Die Achsen danach — **am 10.09. neu geordnet**
+## Die Achsen — **Stand 14.09.: Reparieren, dann messen**
 
-Achse 0 hat die Reihenfolge umgeworfen. Die alte Liste stand auf der Annahme
-„der Physik-Term trägt, jetzt stellen wir ihn richtig ein". Diese Annahme ist
-gefallen (§11.8), und **alle drei geplanten Achsen hingen daran**: δ speist im
-Hybrid-Modus ausschließlich `L_phys`, `w_phys` ist das Gewicht dieses Terms,
-und `w_bc` hatte seine Begründung schon am 02.09. verloren.
+Achse 0 hat zweimal umgeworfen. Am 10.09. sah es so aus, als wäre der
+Physik-Term erledigt. Bei genauem Hinsehen sagt derselbe Lauf etwas Genaueres:
+**der Term war richtig gewichtet und trotzdem wirkungslos, weil das Residuum
+nicht erfüllbar ist** (§11.8). Das ist kein Grund, ihn wegzuwerfen — es ist eine
+Liste mit zwei Einträgen.
 
-| # | Achse | Zustand am 10.09. |
+**Beschluss 14.09.: Physik und BC bleiben, sie werden repariert.** Damit ändert
+sich, was die Achsen *sind*: aus Gewichtsachsen werden Reparaturen, und erst
+danach gibt es wieder Gewichte zu messen.
+
+| # | Achse | Zustand |
 |---|---|---|
-| **0** | `--w-phys 0` gegen `0.1`, 60 Epochen, 3 Seeds | ✅ **gelaufen 10.09.** Der Physik-Term trägt nicht — er stellte ~34 % des Losses und kostete 21 % Rechenzeit ohne messbaren Gewinn. §11.8 |
-| **neu 1** | **Teacher Forcing gegen freien Rollout auf OP06** | **das Nächste.** Trennt „kann den Einzelschritt nicht" von „akkumuliert über 7000 Schritte". Braucht kein Training, nur `evaluate.py` und einen der sechs vorhandenen Checkpoints. Minuten |
-| **neu 2** | **Konditionierung der späten Trajektorie**, O17 | folgt aus dem Befund: `peak_pred` liegt bei ~45–50 C, **egal welcher OP**. Was genau gemessen wird, entscheidet Achse 1 |
-| ~~1~~ | δ (`--delta-phys`), O8 | **keine Achse mehr, sondern eine Reparatur.** δ = 1.0 s gegen Δt_max 0.241 s heißt: das Residuum ist systematisch falsch, das Modell *kann* es nicht erfüllen (`L_phys` fällt in 60 Epochen um Faktor 3–5, `L_data` um 2 700). Zusammen mit **O16** ist das die Vorbedingung dafür, dass „trägt der Physik-Term“ überhaupt beantwortbar ist. Ein `w_phys`-Sweep davor misst nichts |
-| ~~2~~ | `w_bc`, ehemals O12 | **gestrichen als Verdacht.** Begründung schon am 02.09. weggefallen (§11.6); jetzt zusätzlich: derselbe Nulltest wie Achse 0 |
-| ~~3~~ | `w_phys`, O6 | **beantwortet, ohne Sweep — aber nicht so, wie es klingt.** Der Term war bei ~34 % Anteil am Loss und `ratio_phys` ≈ 0.85 **richtig gewichtet** und trotzdem wirkungslos. Mehr Gewicht drückt nur den Datenterm weg (§6). Die Achse wird erst nach O8 + O16 wieder interessant |
-| ~~2b~~ | `w_bc` bei 60 Epochen | **ungetestet, nicht widerlegt.** `--w-bc 0` stand in **beiden** Armen von Achse 0. Der Term sitzt an der Symmetrieebene `x = 0` und damit nicht dort, wo der Fehler ist — gemessen ist er trotzdem nicht |
+| **0** | `--w-phys 0` gegen `0.1`, 60 Epochen, 3 Seeds | ✅ **gelaufen 10.09.** Nullmessung steht: **5.248 ± 0.518 C** ohne Physik und BC. Wird nicht wiederholt — sie ist ab jetzt die Vergleichslinie |
+| **1** | **δ (`--delta-phys`) 1.0 / 0.4 / 0.2, mit Physik UND BC an**, O8 + O15 | **das Nächste.** 9 Läufe, ~6–7 h. δ = 0.2 unterschreitet Δt_max (0.241 s), die `[CFL WARN]` verschwindet dort. `--ema-decay 0.5` repariert gleichzeitig O15, und der `δ = 1.0`-Arm dient als Anker, um beides auseinanderzuhalten |
+| **2** | **O16 — die Randbedingung an der Gehäusewand** | **danach, und es ist Code.** Robin-Term bei `x = 0.0219` mit `U(V̇)` auf `A = 0.0206 m²`, beaufsichtigt gegen den **gemessenen** Wärmestrom aus dem Rohexport. Kein geratener Term. Tor: erst nach der GridCNN-Bilanzprobe |
+| **3** | `w_phys` und `w_bc` als echtes Gitter, O6 | **erst nach 1 und 2.** Vorher misst man den Anker des ersten Optimiererschritts (O15) oder ein falsches Residuum (O8/O16). Danach sind es zum ersten Mal echte Achsen |
+| **4** | **O17 — der Fixpunkt des Rollouts** | **läuft parallel, ohne GPU-Zeit.** `evaluate.py` plus Teacher Forcing gegen freien Rollout auf den sechs vorhandenen Checkpoints. Unabhängig von 1–3 und der Ort, an dem der Fehler nachweislich sitzt |
 
-> **Die Latte für jede künftige Achse: 1 C.** Die Seed-Streuung ist am 10.09.
-> zum ersten Mal gemessen — 0.518 C (Physik aus) bzw. 0.882 C (Physik an) auf
-> dem Mittel der val-OPs, auf OP06 allein bis 1.63 C. Eine Achse, die weniger
-> bewegt, ist mit drei Seeds nicht lesbar. **Das ist der eigentliche Gewinn aus
-> Achse 0** und der Grund, warum ab jetzt jede Zahl in dieser Datei mit einer
-> Streuung danebensteht oder gar nicht.
+> **Warum nicht sofort O16, wo es doch der plausiblere Verdacht ist?** Weil δ ein
+> Flag ist und O16 ein Code-Änderung mit einem Tor davor. Die billigere
+> Reparatur zuerst zu messen kostet eine Nacht und macht die teurere danach
+> lesbar — bei O16 wüsste man sonst nicht, ob die Wand geholfen hat oder das
+> Stencil.
+
+> **Die Latte für jede dieser Achsen: ~1 C.** Die Seed-Streuung ist am 10.09.
+> zum ersten Mal gemessen — 0.518 C (Physik aus) bzw. 0.882 C (an) auf dem
+> Mittel der val-OPs. Eine Achse, die weniger bewegt, ist mit drei Seeds nicht
+> lesbar. **Das ist der eigentliche Gewinn aus Achse 0** und der Grund, warum ab
+> jetzt jede Zahl in dieser Datei mit einer Streuung danebensteht oder gar nicht.
+
+> **Ein zweites Signal, das nicht die MAE ist.** `L_phys` fiel in Achse 0 über 60
+> Epochen um Faktor 3–5, `L_data` um 2 700. Fällt `L_phys` mit δ = 0.2 deutlich
+> steiler, ist das Residuum **erfüllbar geworden** — auch wenn die MAE sich noch
+> nicht rührt. Das ist empfindlicher als jede MAE-Differenz und sollte in Achse 1
+> zuerst angeschaut werden.
 
 ## Was am 02.09. dazugekommen ist
 
@@ -628,9 +717,9 @@ Seeds → keine Rangfolge · **kein Befund aus der letzten Epoche** (neu 02.09.,
 | O3 | OP15: `cell_current` fehlt im Bündel | ✅ nie exportiert |
 | O4 | OP12: Profil endet bei 1440 s, Trajektorie bis 1605 s | ✅ Solver hielt den Wert |
 | **O5** | **tote Eingangskanäle** (`soc_start`, Rate-Kanäle) | **offen — Envelope-Grenze**, kein MAE-Hebel (02.09. geklärt) |
-| O6 | kein Gewicht auf Basis von Messungen gesetzt | ✅ **hinfällig 10.09.** — der Term, dessen Gewicht gesucht war, trägt nicht (§11.8) |
+| **O6** | **kein Gewicht auf Basis von Messungen gesetzt** | **offen — 14.09. wieder aufgenommen.** Am 10.09. als hinfällig geführt; das war zu schnell. Der Term trägt heute nicht, **weil sein Residuum falsch ist** — nach O8 und O16 ist das Gewicht zum ersten Mal eine sinnvolle Frage. **Achse 3** |
 | O7 | Energiebilanz ging um ~147x nicht auf | ✅ der 121er, behoben |
-| **O8** | **BDF-Stencil δ = 1.0 s gegen Δt_max 0.24 s** | **offen, aber zurückgestellt 10.09.** — δ speist nur `L_phys`, und `L_phys` bewegt die MAE nicht (§11.8) |
+| **O8** | **BDF-Stencil δ = 1.0 s gegen Δt_max 0.24 s** | **offen — 14.09. auf die Hauptlinie.** Reparatur, keine Achse: `--delta-phys 0.2`. **Achse 1, das Nächste** |
 | O9 | dämpft der Physik-Term nur, statt Dynamik zu lernen? | ✅ **widerlegt** — `spread` → 0.968. **10.09. Nachtrag:** er dämpft früh sehr wohl (Ep3: 1.73 gegen 7.96), nur holt der Datenterm das bis Ep60 allein ein. §11.8 |
 | **O10** | **OP14s 0 °C sind geplant — nicht „reparieren"** | **stehende Warnung** |
 | **O11** | **OP19 wird schlechter, je besser das Modell wird** | **dauerhafte Envelope-Grenze** (Datensatz ist fix) |
@@ -638,8 +727,8 @@ Seeds → keine Rangfolge · **kein Befund aus der letzten Epoche** (neu 02.09.,
 | O13 | Fehler wächst zum Trajektorienende | ✅ **beantwortet 10.09.** — reiner Versatz (`frac` = 1.000), Ursache ist O17, nicht der Level-Integrator |
 | **O14** | **Volumenstrom ist die Schwierigkeitsachse** | **dauerhafte Envelope-Grenze** (Datensatz ist fix) |
 | **O15** | **das Loss-Balancing greift nach 60 Epochen nicht** | **offen — 10.09. gemessen statt vermutet.** Blockiert nichts mehr (O6 ist hinfällig), bleibt aber falsch: die EMA-Zeitkonstante ist 0.9 **je Epoche**. **Abhilfe ohne Code-Änderung: `--ema-decay 0.5`** (§11.8) |
-| **O16** | **die Gehäusewand hat gar keine Randbedingung** | **offen — 10.09. aufgewertet.** Ein Residuum ohne Senke ist nicht erfüllbar; zusammen mit O8 erklärt das, warum `L_phys` nicht fällt. §11.8 |
-| **O17** | **NEU 10.09.: der freilaufende Rollout hat einen OP-unabhängigen Fixpunkt** | **offen — das Nächste.** `peak_pred` bei 45–50 C, egal welcher Betriebspunkt. §11.8 |
+| **O16** | **die Gehäusewand hat gar keine Randbedingung** | **offen — 14.09. auf die Hauptlinie.** Ein Residuum ohne Senke ist nicht erfüllbar; zusammen mit O8 erklärt das, warum `L_phys` nicht fällt. **Achse 2** (Code, nach der GridCNN-Bilanzprobe). §11.8 |
+| **O17** | **NEU 10.09.: der freilaufende Rollout hat einen OP-unabhängigen Fixpunkt** | **offen — Achse 4, läuft parallel.** `peak_pred` bei 45–50 C, egal welcher Betriebspunkt. Braucht `evaluate.py` und keine GPU-Stunden. §11.8 |
 
 Die offenen im Detail, nach Dringlichkeit:
 
