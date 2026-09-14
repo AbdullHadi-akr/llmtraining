@@ -143,6 +143,41 @@
 > > die Reparatur — und über 60 Epochen holt die EMA den Anker dann tatsächlich
 > > ein (nachgerechnet: Faktor 1.1 statt 1 439, §11.8).
 >
+> > ### ✅ Vorlauf gelaufen, 14.09. — alle drei Prüfungen grün
+> >
+> > | | Ergebnis |
+> > |---|---|
+> > | Gerät | `[device] cuda:0 Tesla T4 14.6 GiB sm_75 torch=2.6.0+cu124` ✅ |
+> > | CFL | `[CFL OK] data Δt=0.200s, Δt_max≈0.241s -> STABLE`, und die Zeile `[CFL WARN] the PHYSICS stencil…` **fehlt** ✅ |
+> > | Balancer | `ema_decay=0.5/epoch (=0.99654/step over 200 steps/epoch)`, gemessene Rate **0.500 je Epoche** (`div_data` 14 952 → 3 739 über zwei Epochen) ✅ |
+> >
+> > **Und er hat einen Fehler gefunden, für den er nicht gedacht war.** Der
+> > Startbanner meldete `delta=1.0s`, obwohl `--delta-phys 0.2` gesetzt war.
+> > Die Zeichenkette `1.0s` stand **hartkodiert** im Format-String
+> > (`train.py:721`). Der normierte Wert daneben war immer richtig
+> > (`0.0001384 × 1444.8 s = 0.2 s`), weshalb es jahrelang durchging — und
+> > weshalb die verschwundene `[CFL WARN]` beweist, dass δ tatsächlich 0.2 war.
+> >
+> > **Genau diese Achse hätte der Bug zerstört:** Achse 1 variiert δ über
+> > 1.0 / 0.4 / 0.2, und alle neun `train.log` hätten `delta=1.0s` behauptet.
+> > Behoben am 14.09., mit Test.
+> >
+> > **Was der Vorlauf NICHT sagt.** Er lief auf zwei OPs über drei Epochen, und
+> > dort divergierte OP02 (MAE 2.5e25) und es kam `[FLAT]` in Epoche 2 und 3
+> > (`spread s/t` 0.13/0.14). **Das ist für diese Konfiguration bekannt:** der
+> > Referenzlauf vom 10.09. (gleiche 2 OPs, 3 Epochen, δ = 1.0, `ema 0.9`)
+> > meldete ebenfalls `[SATURATED]` in Epoche 1 und `[FLAT]` in 2–3, mit
+> > `spread` 0.055/0.111 — noch flacher. Zwei OPs mit drei toten Kanälen über
+> > drei Epochen sind kein Trainingslauf, sondern ein Rauchtest.
+> >
+> > **Eine Beobachtung bleibt und gehört in die Auswertung von Achse 1:** die
+> > Größenordnung der Divergenz (1e25) ist neu. Ein Verdacht dafür steht schon
+> > in O8 — der BDF-Zähler `3T − 4T₋₁ + T₋₂` schrumpft mit δ, der Eigenfehler
+> > des Rollouts nicht, also ist die Ableitung bei δ = 0.2 um Faktor 5
+> > rauschempfindlicher. **Wenn der `δ = 0.2`-Arm in Achse 1 divergiert, ist das
+> > das Ergebnis der Achse**, kein kaputter Sweep: `sweep.py` verbucht den Punkt
+> > als `[FAIL]` und rechnet weiter.
+>
 > **3 — Lauf 1: die δ-Achse, mit Physik UND BC an.** Über Nacht.
 >
 > ```bash
@@ -1370,6 +1405,8 @@ Wird beim Abhaken ausgefüllt. Leer = noch nicht gemessen.
 | **A0** | **`peak_pred` gegen `peak_true`** | Vorhersage landet in einem Band bei **45–50 C, unabhängig vom OP**: OP06 59.55 → 44.9…49.5, OP07 50.44 → 39.1…43.7, OP12 41.55 → 47.4…76.9. **Der Rollout hat einen Fixpunkt. O17** | **10.09.** |
 | **A0** | **`spread s/t`, beide Arme** | Ep3: **1.73/0.85 mit** gegen **7.96/3.97 ohne** Physik — der 5b-Effekt, echt. Median Ep31–60: **1.210/0.976 gegen 1.212/0.953** — auf drei Stellen gleich. **Der Physik-Term ist ein Stützrad** | **10.09.** |
 | **A0** | **train / val / test** | 2.864 / 5.248 / 4.155 C (Physik aus). **Unteranpassung**, und `L_data` steht Ep31–60 flach — 60 Epochen sind auskonvergiert | **10.09.** |
+| **V** | **Vorlauf Achse 1** | **alle drei grün 14.09.**: `cuda:0 Tesla T4`; `[CFL WARN]`-Physikzeile weg bei δ = 0.2; `--ema-decay 0.5` greift, gemessene Rate **0.500/Epoche** | **14.09.** |
+| **V** | **Bug gefunden** | `delta=1.0s` stand **hartkodiert** im Startbanner (`train.py:721`) — jedes `train.log` dieses Projekts behauptete δ = 1.0 s, unabhängig von `--delta-phys`. Hätte Achse 1 unlesbar gemacht. Behoben mit Test | **14.09.** |
 | **A0** | **Wanduhr `-j 6` mit MPS** | **9 016.8 s = 2 h 30 min** für sechs 60-Epochen-Läufe auf elf OPs, 6/6 `[ok]`. Summe/Wanduhr 5.46× ist die **Obergrenze**; geschätzt echt **~4.0×**, also ~67 % Effizienz gegen 92 % bei `-j 4`. **Künftig `-j 4`** | **10.09.** |
 
 Alles läuft aus dem Repo-Wurzelverzeichnis:

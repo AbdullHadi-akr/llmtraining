@@ -908,3 +908,30 @@ def test_sweep_mps_warning_stays_quiet_where_it_would_be_noise(capsys):
 
     sweep_mod.warn_if_no_mps(4, ["--device", "cpu"])
     assert capsys.readouterr().out == ""
+
+
+def test_delta_is_logged_from_the_flag_and_not_hardcoded():
+    """`delta=1.0s` was a literal in the startup banner (train.py, until 14.09.).
+
+    Every train.log this project ever wrote therefore claimed `delta=1.0s`, no
+    matter what `--delta-phys` said. The normalised value printed next to it was
+    always correct, which is exactly what made it survivable and invisible:
+    `0.0001384` against `T_span_ref=1444.8s` IS 0.2s -- it just did not match its
+    own label.
+
+    O8 is an axis over 1.0 / 0.4 / 0.2. Without this fix that sweep would have
+    written nine logs that all say the same delta, and the one artifact a later
+    reader trusts most -- the run's own banner -- would have been wrong about the
+    only thing the run varied.
+    """
+    src = (PKG_DIR / "train.py").read_text(encoding="utf-8")
+    banner = [ln for ln in src.splitlines() if "normalised" in ln and "delta=" in ln]
+    assert banner, "the startup banner no longer prints delta -- update this test"
+    for line in banner:
+        assert "delta=1.0s" not in line, (
+            "delta is hardcoded in the banner again: " + line.strip()
+        )
+        assert "{delta_phys_s" in line, (
+            "the banner must print the value --delta-phys actually set: "
+            + line.strip()
+        )

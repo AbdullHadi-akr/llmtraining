@@ -613,6 +613,37 @@ der Rollout kostete unter sechs gleichzeitigen Läufen ~115 s/Epoche, unter drei
 die serielle Messung für elf OPs vorhersagt. Seriell wären es ~10 h gewesen,
 also **~4.0×** statt der 5.46×, die `Summe / Wanduhr` behauptet.
 
+#### MPS dauerhaft machen — einmal, statt jeden Morgen
+
+Der Daemon ist ein Prozess, kein Schalter: **er ueberlebt keinen Neustart der
+Instanz.** Ihn zu vergessen kostet Faktor 2.5, lautlos. Also einmal als Dienst
+einrichten (braucht root):
+
+```bash
+sudo cp PINNmodulusTwo/deploy/nvidia-mps.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now nvidia-mps
+systemctl status nvidia-mps          # "active (running)"
+```
+
+Danach ist MPS nach jedem Boot da. Pruefen laesst es sich jederzeit mit
+
+```bash
+ls /tmp/nvidia-mps/control && pgrep -x nvidia-cuda-mps-control
+```
+
+und `sweep.py` sagt es in Zeile 4 seiner Ausgabe ohnehin von selbst.
+
+**MPS schadet kleinen Laeufen nicht.** Es gibt keinen Grund, ihn fuer einen
+einzelnen `train.py`-Aufruf abzuschalten — er kostet dort nichts und ist bei der
+naechsten parallelen Messung schon da. „Immer an" ist die richtige Einstellung.
+
+**Parallelitaet ist etwas anderes und NICHT immer an.** Sie entsteht
+ausschliesslich durch `-j` an `sweep.py`. Ein einzelner `train.py`-Lauf ist ein
+Prozess und laesst sich nicht parallelisieren — die ~7000 Rollout-Schritte je
+Epoche haengen voneinander ab. Genau deshalb ist der Sweep die Stelle, an der
+die Karte gefuellt wird, und nicht der einzelne Lauf.
+
 **Und `--device` gehoert hinter das `--`.** `config.yaml` steht auf
 `device: ask`; unter `nohup` ist stdin kein Terminal, also faellt jeder Lauf auf
 `auto` zurueck — das ist eine *Vermutung*, keine Ansage. Auf einer gesunden Box
