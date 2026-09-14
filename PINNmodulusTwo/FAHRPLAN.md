@@ -1,69 +1,320 @@
 # Fahrplan — OP01–OP16 trainiert, OP19 als Messvergleich
 
-> ## ▶ Das Nächste: trägt der Physik-Term überhaupt?
+> ## ▶ Das Nächste: den Physik-Term reparieren, dann messen
 >
-> **Ab hier wieder Inhalt.** Die GPU-Seite ist abgeschlossen — `sweep.py` steht,
-> die Karte ist vermessen, die Zahlen stehen in „Was am 09.09./10.09.
-> dazugekommen ist". Nichts davon muss noch angefasst werden, um weiterzukommen.
+> **Achse 0 ist am 10.09. gelaufen und hat eine klare Antwort gegeben — eine
+> andere als erwartet.** Die Zahlen stehen in §11.8, die Kurzfassung hier:
 >
-> ### Der Lauf
+> | Arm | val-MAE (Mittel OP06/OP09) | OP06 | OP09 |
+> |---|---|---|---|
+> | `w_phys = 0.1` (Physik an) | 6.090 ± 0.882 | 7.137 | 5.044 |
+> | `w_phys = 0` (Physik aus) | **5.248 ± 0.518** | **5.970** | **4.525** |
+> | Schritt 6, ein Seed, Physik an | 4.928 | 6.270 | 3.585 |
+>
+> `sweep.py` sagt `[NOT SEPARATED]`: 0.843 C Abstand gegen 0.882 C
+> Seed-Streuung. **Die Entscheidungsregel greift trotzdem** — sie fragte nicht
+> „wer gewinnt", sondern „liegt der Lauf ohne Physik bei ~11.6 / 8.5 C wie in 5b
+> oder bei ~6.27 / 3.59 C wie Schritt 6". Er liegt bei **5.97 / 4.53 C**, also
+> bei Schritt 6, nicht bei 5b.
+>
+> **Der Physik-Term trägt nicht.** Und er war weder aus noch schlecht
+> gewichtet: über die Epochen 31–60 stellte er **~34 % des Losses** (alle drei
+> Seeds: 34.9 / 34.9 / 33.3 %), und `ratio_phys` lag bei **0.8–0.9** — genau da,
+> wo der Balancer ihn haben will. Ein Drittel des Gradienten, 21 % mehr
+> Rechenzeit, kein messbarer Gewinn.
+>
+> **Nein, die Gewichte waren nicht unglücklich.** Der Term war richtig
+> dimensioniert und ist trotzdem wirkungslos: `L_phys` fällt über 60 Epochen um
+> Faktor 3–5, während `L_data` um Faktor 2 700 fällt, und die **Trainings**-MAE
+> wird mit Physik schlechter (3.823 gegen 2.864 C). Das ist die Signatur eines
+> Residuums, das das Modell **nicht erfüllen kann** — nicht eines, das zu leise
+> ist. Mehr Gewicht macht es schlimmer, nicht besser (§6).
+>
+> Warum es nicht erfüllbar ist, steht schon in dieser Datei, und beides meldet
+> sich in jedem Lauf: **O8** (δ = 1.0 s gegen Δt_max 0.241 s — das Residuum ist
+> systematisch falsch, die Daten selbst erfüllen es nicht) und **O16** (keine
+> Randbedingung an der Gehäusewand — Leitung plus Quelle **ohne Senke**). Beide
+> sind damit vom Nebenschauplatz zur **Vorbedingung** geworden: ohne sie ist
+> „trägt der Physik-Term" keine beantwortbare Frage. §11.8.
+>
+> **Was Achse 0 nicht sagt:** über `w_bc` gar nichts (`--w-bc 0` stand in beiden
+> Armen), über die `w_phys`-Achse nur einen Punkt, und mit drei Seeds reicht es
+> für „trägt nicht", nicht für „schadet".
+>
+> ### Wo der Fehler stattdessen sitzt — und das ist neu
+>
+> Dieselben sechs Läufe haben die Messung aus §11.7 mitgeliefert, und sie ist
+> eindeutig: **`late_bias_frac = 1.000` auf OP06 in allen sechs Läufen**, Median
+> 0.980 über alle 102 (OP, Lauf)-Paare. Der späte Fehler ist zu 100 % ein
+> einseitiger Versatz, kein Rauschen — und zwar **zu kalt**: die Drittel laufen
+> `+2.9 → −2.6 → −9.3` und wachsen monoton.
+>
+> §11.7 hätte das „Mechanismus 1, der Level-Integrator" gelesen. **Das kann
+> nicht sein**, `residual_output` steht auf `false` (`config.yaml:181`), der
+> Integrator ist gar nicht im Spiel. Der Blick auf `peak_pred` sagt, was es
+> wirklich ist:
+>
+> ```
+> OP06:  peak_true 59.55 C   ->   peak_pred 44.9 .. 49.5 C   (sechs Läufe)
+> OP07:  peak_true 50.44 C   ->   peak_pred 39.1 .. 43.7 C
+> OP12:  peak_true 41.55 C   ->   peak_pred 47.4 .. 76.9 C
+> ```
+>
+> **Der freilaufende Rollout konvergiert gegen ein Band bei ~45–50 C,
+> unabhängig davon, welcher OP gefahren wird.** In `timeseries.png` ist es in
+> dreizehn von sechzehn OPs zu sehen: die Vorhersage steigt, wird flach, und die
+> Wahrheit läuft ihr davon. Das Modell hat die *gepoolte* Endtemperatur des
+> Trainingssatzes gelernt, nicht die des jeweiligen Betriebspunkts. OP06 und
+> OP07 sind genau die beiden OPs, deren wahres Maximum am weitesten von diesem
+> Band entfernt liegt — und die beiden schlechtesten.
+>
+> Das ist ein **Konditionierungsproblem**, kein Gewichtungsproblem — und hier
+> ist der ehrliche Punkt: **kein Gewicht verschiebt einen Fixpunkt, ein
+> korrektes Residuum vielleicht schon.** Genau das ist die Wette der nächsten
+> Läufe. Die Physik *soll* dem Rollout sagen, dass eine Zelle mit laufender
+> Quelle nicht bei 46 C stehenbleibt — sie kann es heute nur nicht, weil ihr
+> Residuum selbst falsch ist (O8) und keine Senke kennt (O16).
+>
+> ### Die Richtung ist entschieden: Physik und BC sollen tragen
+>
+> **Beschluss 14.09.** Nicht „Physik weg", sondern „Physik reparieren". Damit
+> rücken **O8** (δ) und **O16** (Wand-Randbedingung) von der Seitenlinie auf die
+> Hauptlinie — sie sind die beiden bekannten Gründe, warum das Residuum heute
+> nicht erfüllbar ist. Und **O15** kommt mit, weil ein Gewicht erst dann
+> bedeutet, was es sagt.
+>
+> Drei Reparaturen, zwei davon sind Flags:
+>
+> | # | was | wie | Kosten |
+> |---|---|---|---|
+> | **O8** | δ = 1.0 s ist 4.1× über Δt_max (0.241 s) | `--delta-phys 0.2` | Flag |
+> | **O15** | Divisor eingefroren, `w_phys` bedeutet nicht 0.1 | `--ema-decay 0.5` | Flag |
+> | **O16** | keine Senke an der Gehäusewand | Robin-Term in `physics.py` | Code |
+>
+> ### Schritt für Schritt
+>
+> **1 — Stand holen.**
 >
 > ```bash
 > cd /home/student1/llmtraining
 > git checkout main && git pull
 > source modulus_env/bin/activate
->
-> python PINNmodulusTwo/sweep.py --seeds 0 1 2 \
->     --vary w-phys 0.1 0 -j 3 \
->     --out artifacts/achse0 --csv artifacts/achse0.csv \
->     -- --epochs 60 --w-bc 0
 > ```
 >
-> **Über Nacht laufen lassen.** Sechs Läufe zu je ~1.9 h — das ist keine
-> Schätzung mehr, sondern die gemessenen 116 s je Epoche bei elf OPs. Bei
-> `ceil(6/3) = 2` Wellen und dem gemessenen Parallelitätsfaktor grob **8 h**,
-> seriell wären es 12 h.
+> `python`, nicht `python3`: das System-Python hat kein torch.
 >
-> **Das ist der Vergleichslauf zu Schritt 6**, mit genau einer Frage: trägt der
-> Physik-Term, wenn beide Seiten auskonvergiert sind?
+> **2 — Vorlauf, 15 Minuten. Nicht überspringen.**
 >
-> **Warum das vor allem anderen kommt:** die Überschrift der letzten Sitzung
-> lautet „der Physik-Term trägt". Diese Aussage stammt aus **drei** Epochen
-> (Schritt 5b) — und **derselbe 5b-Lauf sagte auch, der `spread` kollabiere.
-> Das hat Schritt 6 widerlegt** (§11.3). Bei 60 Epochen ist nur der Lauf **mit**
-> Physik gemacht worden.
+> Beide Flags greifen sichtbar oder gar nicht. Das prüft man, bevor man sieben
+> Stunden verbrennt:
 >
-> | Ergebnis | heißt | dann |
+> ```bash
+> python PINNmodulusTwo/train.py --epochs 3 --ops OP01 OP02 --device cuda \
+>     --delta-phys 0.2 --ema-decay 0.5 \
+>     --artifacts-dir artifacts/vorlauf 2>&1 | tee vorlauf.log
+> ```
+>
+> Drei Dinge müssen stimmen, sonst misst Lauf 1 dasselbe wie Achse 0:
+>
+> | prüfen | erwartet |
+> |---|---|
+> | `grep '^\[device\]' vorlauf.log` | `[device] cuda:0 Tesla T4 …` — **nicht** `cpu`, und **nicht** die `ask`-Rückfallzeile |
+> | `grep CFL vorlauf.log` | die Zeile `[CFL WARN] the PHYSICS stencil…` ist **weg** (0.2 s < Δt_max 0.241 s) |
+> | `div_data`-Zerfallsrate (Kommando unten) | **≈ 0.50 je Epoche**, nicht 0.90 |
+>
+> > **Nicht auf „`div_data` liegt nahe `L_data`" prüfen — das ist nach drei
+> > Epochen bei beiden Einstellungen falsch.** Die EMA startet am ersten
+> > Optimiererschritt bei `L_data ≈ 3.3e4` und braucht auch mit `0.5` rund
+> > **18 Epochen**, um diesen Anker loszuwerden. Nach drei Epochen steht sie so
+> > oder so drei Größenordnungen zu hoch. Ablesbar ist in dieser Zeit nur die
+> > **Rate**, und die ist eindeutig:
+> >
+> > | | Ep2/Ep1 | Ep3/Ep2 |
+> > |---|---|---|
+> > | `--ema-decay 0.9` (Default, kaputt) | 0.900 | 0.900 |
+> > | `--ema-decay 0.5` (repariert) | **0.501** | **0.500** |
+> >
+> > ```bash
+> > awk -F, 'NR>1{if(p)printf "  Ep%s/Ep%s  div_data %-12s  Rate %.3f\n",$1,$1-1,$9,$9/p; p=$9}' \
+> >     artifacts/vorlauf/history.csv
+> > ```
+> >
+> > Steht dort 0.9, ist `--ema-decay` nicht angekommen. Steht dort 0.5, greift
+> > die Reparatur — und über 60 Epochen holt die EMA den Anker dann tatsächlich
+> > ein (nachgerechnet: Faktor 1.1 statt 1 439, §11.8).
+>
+> > ### ✅ Vorlauf gelaufen, 14.09. — alle drei Prüfungen grün
+> >
+> > | | Ergebnis |
+> > |---|---|
+> > | Gerät | `[device] cuda:0 Tesla T4 14.6 GiB sm_75 torch=2.6.0+cu124` ✅ |
+> > | CFL | `[CFL OK] data Δt=0.200s, Δt_max≈0.241s -> STABLE`, und die Zeile `[CFL WARN] the PHYSICS stencil…` **fehlt** ✅ |
+> > | Balancer | `ema_decay=0.5/epoch (=0.99654/step over 200 steps/epoch)`, gemessene Rate **0.500 je Epoche** (`div_data` 14 952 → 3 739 über zwei Epochen) ✅ |
+> >
+> > **Und er hat einen Fehler gefunden, für den er nicht gedacht war.** Der
+> > Startbanner meldete `delta=1.0s`, obwohl `--delta-phys 0.2` gesetzt war.
+> > Die Zeichenkette `1.0s` stand **hartkodiert** im Format-String
+> > (`train.py:721`). Der normierte Wert daneben war immer richtig
+> > (`0.0001384 × 1444.8 s = 0.2 s`), weshalb es jahrelang durchging — und
+> > weshalb die verschwundene `[CFL WARN]` beweist, dass δ tatsächlich 0.2 war.
+> >
+> > **Genau diese Achse hätte der Bug zerstört:** Achse 1 variiert δ über
+> > 1.0 / 0.4 / 0.2, und alle neun `train.log` hätten `delta=1.0s` behauptet.
+> > Behoben am 14.09., mit Test.
+> >
+> > **Was der Vorlauf NICHT sagt.** Er lief auf zwei OPs über drei Epochen, und
+> > dort divergierte OP02 (MAE 2.5e25) und es kam `[FLAT]` in Epoche 2 und 3
+> > (`spread s/t` 0.13/0.14). **Das ist für diese Konfiguration bekannt:** der
+> > Referenzlauf vom 10.09. (gleiche 2 OPs, 3 Epochen, δ = 1.0, `ema 0.9`)
+> > meldete ebenfalls `[SATURATED]` in Epoche 1 und `[FLAT]` in 2–3, mit
+> > `spread` 0.055/0.111 — noch flacher. Zwei OPs mit drei toten Kanälen über
+> > drei Epochen sind kein Trainingslauf, sondern ein Rauchtest.
+> >
+> > **Eine Beobachtung bleibt und gehört in die Auswertung von Achse 1:** die
+> > Größenordnung der Divergenz (1e25) ist neu. Ein Verdacht dafür steht schon
+> > in O8 — der BDF-Zähler `3T − 4T₋₁ + T₋₂` schrumpft mit δ, der Eigenfehler
+> > des Rollouts nicht, also ist die Ableitung bei δ = 0.2 um Faktor 5
+> > rauschempfindlicher. **Wenn der `δ = 0.2`-Arm in Achse 1 divergiert, ist das
+> > das Ergebnis der Achse**, kein kaputter Sweep: `sweep.py` verbucht den Punkt
+> > als `[FAIL]` und rechnet weiter.
+>
+> **3 — Lauf 1: die δ-Achse, mit Physik UND BC an.** Über Nacht.
+>
+> ```bash
+> cd /home/student1/llmtraining
+> source modulus_env/bin/activate
+>
+> # a) MPS. Nach JEDEM Neustart der Instanz. Kostet sonst Faktor 2.5, lautlos.
+> nvidia-cuda-mps-control -d
+>
+> # b) Laeuft noch etwas? Der doppelte Start vom 10.09. darf sich nicht wiederholen.
+> pgrep -af "sweep.py|PINNmodulusTwo/train.py" || echo "frei"
+>
+> # c) Der Lauf.
+> nohup python PINNmodulusTwo/sweep.py --seeds 0 1 2 \
+>     --vary delta-phys 1.0 0.4 0.2 -j 3 \
+>     --out artifacts/achse1 --csv artifacts/achse1.csv \
+>     -- --epochs 60 --ema-decay 0.5 --device cuda > achse1.log 2>&1 &
+> echo "PID=$!"
+> ```
+>
+> Neun Läufe, drei Wellen, **grob 5–6 h**. `w_phys = 0.1` und `w_bc = 0.1` sind
+> Default, stehen also **beide an** — es ist der erste 60-Epochen-Lauf mit BC
+> überhaupt.
+>
+> **`--device cuda` gehört hinter das `--`, nicht davor.** Es ist ein
+> `train.py`-Flag; alles nach dem nackten `--` reicht `sweep.py` unverändert
+> durch. Und es gehört **hin**: `config.yaml` steht auf `device: ask`, und unter
+> `nohup` ist stdin kein Terminal, also fällt jeder Lauf auf `auto` zurück und
+> sagt das auch (`[device] --device ask, but this is not an interactive
+> terminal`). Das trifft heute zufällig `cuda`. Bei einem kaputten Treiber
+> träfe es **`cpu`, und neun Läufe rechneten tagelang still auf vier Kernen.**
+> Genau dagegen steht die Regel in **README_GPU_SERVER §6.1**: bewusst
+> `--device cuda` statt `auto`, damit ein falsch aufgesetzter Server mit einer
+> Fehlermeldung abbricht statt leise weiterzurechnen.
+>
+> **`-j 3`, nicht `-j 4`.** Die Wanduhr ist `ceil(Läufe / j)` Lauf-Dauern — bei
+> neun Läufen sind beide **drei Wellen**, `-j 4` ist also keine Minute schneller
+> und teilt nur schlechter auf (4 + 4 + 1 statt 3 + 3 + 3). Drei gleichzeitige
+> Läufe kosteten in Achse 0 gemessen **80 s Rollout je Epoche**, sechs dagegen
+> 115 s; bei `-j 4` zahlen die ersten beiden Wellen diesen Aufschlag umsonst.
+> `sweep.py` rechnet das selbst aus und weist mit `[HINT]` darauf hin.
+>
+> **Warum diese drei Punkte und nicht zwei.** Das Gitter beantwortet drei Fragen
+> auf einmal, weil `δ = 1.0` als Ankerarm mitläuft:
+>
+> | Vergleich | isoliert |
+> |---|---|
+> | δ = 0.2 gegen δ = 1.0, **innerhalb** des Sweeps | **δ allein.** Sauber, gleiche Seeds, gleiche Flags |
+> | δ = 1.0 (neu) gegen Achse-0-Physikarm (6.090 ± 0.882) | **Balancer-Reparatur + BC an.** Gleiches δ, alles andere neu |
+> | δ = 0.2 gegen die Nullmessung (**5.248 ± 0.518**) | **die eigentliche Frage:** schlägt die reparierte Physik den reinen Datenterm? |
+>
+> Die Nullmessung ist schon gemessen und muss **nicht** wiederholt werden.
+>
+> ### Wie Lauf 1 gelesen wird
+>
+> Die Latte ist die Seed-Streuung: **~1 C**. Alles darunter ist kein Ergebnis.
+>
+> | δ = 0.2 gegen 5.248 C | heißt | dann |
 > |---|---|---|
-> | val-MAE deutlich schlechter als 6.270 / 3.585 C (etwa 11 / 8 C wie in 5b) | **der Physik-Term trägt.** Bestätigt bei Konvergenz | weiter mit den Sweep-Achsen δ → `w_bc` → `w_phys` |
-> | val-MAE nahe 6.270 / 3.585 C | **er trägt nicht.** Die 5b-Differenz war Untertrainiertheit, wie schon beim `spread` | `w_phys` zurück auf 0 prüfen, Sweep-Achsen neu ordnen — O8 und O12 wären dann Nebensache |
+> | **deutlich besser** (unter ~4.3 C) | **Physik trägt, sobald das Residuum stimmt.** δ war der Grund | `w_phys`/`w_bc`-Gitter — jetzt sind es echte Achsen — dann O16 obendrauf |
+> | **gleich** (4.7 – 5.8 C) | δ war es nicht. Bleibt **O16** als der verbleibende bekannte Grund | O16 bauen, Lauf 1 mit Wand-BC wiederholen |
+> | **schlechter** | das Residuum stört auch korrigiert | O16 bauen. Ändert auch das nichts, ist die Formulierung für **diesen** Datensatz falsch — und das ist dann ein Ergebnis, kein Scheitern |
 >
-> ### Warum als Sweep und nicht als ein Lauf
+> Zusätzlich, unabhängig vom MAE-Ausgang, immer mitlesen:
 >
-> Der Plan sagte „ein Lauf, kein Sweep". **Das war richtig, solange es kein
-> `sweep.py` gab.** Jetzt widerspricht es dem eigenen Kernsatz dieser Datei: die
-> Entscheidungsregel oben sagt „*nahe* 6.270" gegen „*deutlich* schlechter" — und
-> „nahe" ist ohne Streuung nicht definiert. Genau daran ist §11.3 schon einmal
-> gescheitert.
+> * **Fällt `L_phys` jetzt?** In Achse 0 fiel es um Faktor 3–5, während `L_data`
+>   um 2 700 fiel. Fällt es mit δ = 0.2 deutlich steiler, ist das Residuum
+>   erfüllbar geworden — **auch wenn die MAE sich noch nicht rührt.** Das ist das
+>   empfindlichste Signal, das der Lauf hat.
+> * **`ratio_bc`** — die erste Zahl zu `w_bc` bei 60 Epochen überhaupt.
+> * **`late_bias_frac` und `peak_pred`** — verschiebt die Physik den Fixpunkt
+>   (O17)? Genau das wäre ihre Aufgabe.
+> * **`analyse_history.py` je Lauf**, nie die letzte Zeile.
 >
-> Zwei Dinge fallen dabei gleichzeitig ab:
+> ### Parallel, kostet keine GPU-Zeit: `evaluate.py`
 >
-> 1. **Achse 0** — trägt der Physik-Term.
-> 2. **Die Seed-Streuung, einmal gemessen.** Das ist der eigentliche Gewinn: ab
->    dann ist jede spätere Achse lesbar, statt geraten. Ohne sie ist „6.27 gegen
->    6.51" kein Ergebnis.
+> Läuft Lauf 1 über Nacht, ist der Tag frei für den Punkt, an dem der Fehler
+> nachweislich sitzt (**O17**). `evaluate.py` fehlt noch — Checkpoint laden,
+> Rollout rechnen, Metriken berichten. Die **sechs auskonvergierten `model.pt`
+> aus Achse 0 liegen schon da**, und `model_config` lädt getestet zurück
+> (§11.7). Damit dann die eine Messung: **Teacher Forcing gegen freien Rollout
+> auf OP06.**
 >
-> `sweep.py` sagt am Ende selbst `[NOT SEPARATED]`, wenn der Abstand zwischen
-> zwei Konfigurationen unter der Seed-Streuung liegt.
+> | teacher-forced | heißt |
+> |---|---|
+> | klein (~2–4 C) | Das Modell kann den Einzelschritt. Der Fehler ist **Akkumulation** über 7 000 Schritte |
+> | ebenso groß (11–18 C) | Das späte Regime wurde **nie gelernt** — Konditionierung |
 >
-> **`--w-bc 0` steht bewusst in beiden Armen.** Damit ist es der Vergleich, den
-> Achse 0 meint: Physik **und** BC gegen keins von beidem. Das 2×2-Gitter, das
-> `w_bc` mit isolieren würde (Achse 2), wären zwölf Läufe und ~16 h — und die
-> ursprüngliche Begründung für Achse 2 ist am 02.09. ohnehin weggefallen
-> (§11.6). Erst nach Achse 0 entscheiden, ob sie noch jemanden interessiert.
+> Minuten statt Stunden, und es hängt an keinem Sweep.
 >
-> Wie gut Schritt 6 wirklich war — in-sample gegen ausgehalten, und warum der
-> Volumenstrom die eigentliche Schwierigkeitsachse ist: **§11.5**.
+> ### Die ersten zehn Zeilen von `achse1.log` prüfen, bevor du weggehst
+>
+> ```
+> 9 runs (3 configuration(s) x 3 seed(s)), 3 at a time -> 3 run-duration(s) of wall time
+> artifacts: /home/student1/llmtraining/artifacts/achse1
+> passed to train.py: --epochs 60 --ema-decay 0.5 --device cuda
+>   [MPS] control daemon detected -- kernels from the runs can share the SMs.
+> ```
+>
+> Fehlt die `[MPS]`-Zeile, läuft der Daemon nicht — abbrechen, `-d` nachholen,
+> neu starten. Steht dort `--device` nicht in der Durchreich-Zeile, ist es vor
+> dem `--` gelandet und `sweep.py` hat es verschluckt.
+>
+> **4 — Ergebnis in die Stand-Tabelle**, mit Datum und Streuung. Ein Haken ohne
+> Zahl ist wertlos.
+>
+> ### Wenn doch noch ein Sweep laufen soll
+>
+> Das Werkzeug steht und ist vermessen. Runbook:
+>
+> ```bash
+> nvidia-cuda-mps-control -d          # nach JEDEM Neustart der Instanz
+> nohup python PINNmodulusTwo/sweep.py --seeds 0 1 2 \
+>     --vary <flag> <v1> <v2> -j 4 \
+>     --out artifacts/<name> --csv artifacts/<name>.csv \
+>     -- --epochs 60 > <name>.log 2>&1 &
+> ```
+>
+> „An instance of this daemon is already running" heißt: läuft schon, alles gut.
+> Die Meldung über `/var/log/nvidia-mps` ist folgenlos. **Der Daemon überlebt
+> keinen Reboot**, und ihn zu vergessen kostet Faktor 2.5, ohne dass ein Log es
+> sagt; `sweep.py` warnt seit dem 10.09. von sich aus. Was MPS ist:
+> **README_GPU_SERVER §6.4**.
+>
+> **`-j 4`, nicht `-j 6`.** Am 10.09. gemessen: bei vier Workern 92 %
+> Effizienz, bei sechs nur noch ~67 % (§11.8). Der Knick liegt dazwischen.
+>
+> Auswerten, und dabei **nie die letzte Zeile eines Laufs ablesen** — Median und
+> Streuung über die letzten Epochen. Genau daraus entstand O12:
+>
+> ```bash
+> tail -30 <name>.log
+> python PINNmodulusTwo/tools/analyse_history.py artifacts/<name>/<punkt>/history.csv
+> ```
+>
+> Wie gut Schritt 6 wirklich war, und warum der Volumenstrom die eigentliche
+> Schwierigkeitsachse ist: **§11.5**.
 ---
 
 **Diese Datei ist der Einstieg.** Alles andere ist Nachschlagewerk. Wenn du nur
@@ -158,25 +409,43 @@ Schritt 6 hat dafür gerade das Lehrstück geliefert: nach drei Epochen stand
 `spread` bei 0.201 und sah aus wie ein Artefakt; nach sechzig steht er bei 0.968.
 **Drei Epochen sind kein Trend, und ein Seed ist keine Streuung.**
 
-## Die Achsen danach, in dieser Reihenfolge
+## Die Achsen — **Stand 14.09.: Reparieren, dann messen**
 
-| # | Achse | warum in dieser Reihenfolge |
+Achse 0 hat zweimal umgeworfen. Am 10.09. sah es so aus, als wäre der
+Physik-Term erledigt. Bei genauem Hinsehen sagt derselbe Lauf etwas Genaueres:
+**der Term war richtig gewichtet und trotzdem wirkungslos, weil das Residuum
+nicht erfüllbar ist** (§11.8). Das ist kein Grund, ihn wegzuwerfen — es ist eine
+Liste mit zwei Einträgen.
+
+**Beschluss 14.09.: Physik und BC bleiben, sie werden repariert.** Damit ändert
+sich, was die Achsen *sind*: aus Gewichtsachsen werden Reparaturen, und erst
+danach gibt es wieder Gewichte zu messen.
+
+| # | Achse | Zustand |
 |---|---|---|
-| **0** | **`--w-phys 0 --w-bc 0` über 60 Epochen** — ein Lauf, kein Sweep | **Die Überschrift dieser Sitzung steht auf drei Epochen.** „Der Physik-Term trägt" kommt aus 5b, und derselbe 5b-Lauf sagte auch „der `spread` kollabiert" — das war falsch (§11.3). Bis das A/B bei 60 Epochen wiederholt ist, ist die Kernaussage ungeprüft. Zwei Stunden, und sie entscheidet, ob die Achsen 1–3 überhaupt die richtigen sind |
-| 1 | **δ (`--delta-phys`)**, O8 | sauber isoliert (speist im Hybrid-Modus nur `L_phys`), und der `[CFL WARN]` steht bei jedem Lauf: 1.0 s gegen Δt_max 0.24 s. **Drei Punkte: 1.0 (Default), 0.4, 0.2.** 0.2 ist das Datengitter und zugleich der Boden — darunter interpoliert `history_at` nur noch linear zwischen zwei Gitterzeilen, die Ableitung wird davon nicht genauer. **Der einzige bekannt falsche Parameter** |
-| 2 | **`w_bc`**, ehemals O12 | **02.09.: die ursprüngliche Begründung ist weggefallen** — `ratio_bc` zeigt über 30 Epochen keinen Abfall (Median 0.0581, die 0.0178 waren eine Epoche), und `--batch-bc 121` rechnet dieselbe Zeile wie 128. Die Achse bleibt als bewusste Gegenprobe stehen, nicht mehr als Verdacht. Kann gestrichen werden, wenn Rechenzeit knapp wird. §11.6 |
-| 3 | **`w_phys`**, O6 | erst wenn 1 und 2 stehen — sonst misst man δ mit dem Gewicht. **Und erst nach O15:** solange die Divisoren eingefroren sind, misst ein `w_phys`-Sweep den Anker des ersten Optimiererschritts mit |
+| **0** | `--w-phys 0` gegen `0.1`, 60 Epochen, 3 Seeds | ✅ **gelaufen 10.09.** Nullmessung steht: **5.248 ± 0.518 C** ohne Physik und BC. Wird nicht wiederholt — sie ist ab jetzt die Vergleichslinie |
+| **1** | **δ (`--delta-phys`) 1.0 / 0.4 / 0.2, mit Physik UND BC an**, O8 + O15 | **das Nächste.** 9 Läufe, ~6–7 h. δ = 0.2 unterschreitet Δt_max (0.241 s), die `[CFL WARN]` verschwindet dort. `--ema-decay 0.5` repariert gleichzeitig O15, und der `δ = 1.0`-Arm dient als Anker, um beides auseinanderzuhalten |
+| **2** | **O16 — die Randbedingung an der Gehäusewand** | **danach, und es ist Code.** Robin-Term bei `x = 0.0219` mit `U(V̇)` auf `A = 0.0206 m²`, beaufsichtigt gegen den **gemessenen** Wärmestrom aus dem Rohexport. Kein geratener Term. Tor: erst nach der GridCNN-Bilanzprobe |
+| **3** | `w_phys` und `w_bc` als echtes Gitter, O6 | **erst nach 1 und 2.** Vorher misst man den Anker des ersten Optimiererschritts (O15) oder ein falsches Residuum (O8/O16). Danach sind es zum ersten Mal echte Achsen |
+| **4** | **O17 — der Fixpunkt des Rollouts** | **läuft parallel, ohne GPU-Zeit.** `evaluate.py` plus Teacher Forcing gegen freien Rollout auf den sechs vorhandenen Checkpoints. Unabhängig von 1–3 und der Ort, an dem der Fehler nachweislich sitzt |
 
-> **Achse 0 braucht `sweep.py` nicht** und kann sofort laufen:
->
-> ```bash
-> python3 PINNmodulusTwo/train.py --epochs 60 --w-phys 0 --w-bc 0 2>&1 | tee 06b_ohne_physik.txt
-> ```
->
-> Kommt dort eine val-MAE nahe 6.270 / 3.585 C heraus, war der Physik-Term nie
-> der Grund — und O8, O12 und der halbe Sweep zielen daneben. Kommt sie bei
-> ~11.6 / 8.5 C heraus wie in 5b, ist die Aussage bestätigt und der Rest steht
-> auf festem Grund.
+> **Warum nicht sofort O16, wo es doch der plausiblere Verdacht ist?** Weil δ ein
+> Flag ist und O16 ein Code-Änderung mit einem Tor davor. Die billigere
+> Reparatur zuerst zu messen kostet eine Nacht und macht die teurere danach
+> lesbar — bei O16 wüsste man sonst nicht, ob die Wand geholfen hat oder das
+> Stencil.
+
+> **Die Latte für jede dieser Achsen: ~1 C.** Die Seed-Streuung ist am 10.09.
+> zum ersten Mal gemessen — 0.518 C (Physik aus) bzw. 0.882 C (an) auf dem
+> Mittel der val-OPs. Eine Achse, die weniger bewegt, ist mit drei Seeds nicht
+> lesbar. **Das ist der eigentliche Gewinn aus Achse 0** und der Grund, warum ab
+> jetzt jede Zahl in dieser Datei mit einer Streuung danebensteht oder gar nicht.
+
+> **Ein zweites Signal, das nicht die MAE ist.** `L_phys` fiel in Achse 0 über 60
+> Epochen um Faktor 3–5, `L_data` um 2 700. Fällt `L_phys` mit δ = 0.2 deutlich
+> steiler, ist das Residuum **erfüllbar geworden** — auch wenn die MAE sich noch
+> nicht rührt. Das ist empfindlicher als jede MAE-Differenz und sollte in Achse 1
+> zuerst angeschaut werden.
 
 ## Was am 02.09. dazugekommen ist
 
@@ -328,86 +597,112 @@ genau dieser Fehlschluss steckt hinter O9.
 
 ---
 
-### Was der Sweep dadurch spart — **1.46×, gemessen auf der T4**
+### Was der Sweep dadurch spart — **3.69× mit MPS**
 
 **Am 10.09. auf der Instanz gemessen**, 4 Läufe (`--ops OP01 OP02 --epochs 6
 --device cuda`, Auswertung auf die Trainings-OPs beschränkt):
 
-| | `sweep_wall_s` | je Lauf | Summe `wall_s` |
+| | `sweep_wall_s` | je Lauf | Faktor |
 |---|---|---|---|
-| `-j 1` (seriell) | **596.2 s** (9.9 min) | 2.5 min | 596.2 s |
-| `-j 4` (parallel) | **407.4 s** (6.8 min) | **6.8 min** | 1625.9 s |
+| `-j 1` (seriell) | 596.2 s (9.9 min) | 2.5 min | — |
+| `-j 4` **ohne** MPS | 407.4 s (6.8 min) | **6.8 min** | 1.46× |
+| `-j 4` **mit** MPS | **161.7 s (2.7 min)** | **2.7 min** | **3.69×** |
 
-**Der Faktor ist 596.2 / 407.4 = 1.46×**, also 37 % Effizienz auf vier Workern.
-Gespart werden 3.1 von 9.9 Minuten.
+**92 % Effizienz auf vier Workern.** Die Konkurrenz je Lauf fällt von 2.72× auf
+**1.08×** — vier gleichzeitige Läufe kosten fast genauso viel wie einer.
+**MPS allein bringt den Faktor 2.52.**
 
-> **Vorher stand hier 3.9×. Das war falsch, und der Fehler ist lehrreich.**
-> Die 3.9× kamen aus `Summe der Laufzeiten / Wanduhr` — und genau das ist keine
-> Messung, sondern eine **Obergrenze**: unter Konkurrenz wird jeder Lauf selbst
-> langsamer, also wächst der Zähler mit. Hier auf 2.73× (596 → 1626 s), womit
-> der Quotient 3.99 anzeigt, wo 1.46 stimmt. Nur eine echte `-j 1`-Baseline
-> beantwortet die Frage. `sweep.py` schreibt die Warnung inzwischen selbst in
-> die Ausgabe.
+> ### `nvidia-cuda-mps-control -d` ist Pflicht, nicht Kür
+>
+> Einmal je Boot, vor jedem Sweep. Ohne den Daemon verschenkt man Faktor 2.5,
+> und zwar lautlos — nichts im Log sagt, dass er fehlt.
 
-**Die eigentliche Zahl ist die dritte Spalte: 2.5 → 6.8 min je Lauf.** Und die
-Epochenzeile sagt, *welcher* Teil das ist:
+**Warum das so wirkt, stand vorher schon in der Epochenzeile.** Ohne MPS:
 
-| | seriell | `-j 4` | |
+| | seriell | `-j 4` ohne MPS | |
 |---|---|---|---|
-| Rollout | 14.8 s | **49.6 s** | **3.35× langsamer** |
+| Rollout | 14.8 s | 49.6 s | **3.35× langsamer** |
 | Inner (×100) | 6.3 s | 7.9 s | 1.25× langsamer |
 
-**Der Rollout serialisiert fast vollständig, der Innenteil kaum** — und das ist
-die Diagnose, nicht mehr ein Verdacht. Der Rollout sind ~50 *winzige* Kernel je
-Schritt (363×128), und winzige Kernel aus vier CUDA-Kontexten arbeitet der
-Treiber zeitscheibenweise ab. Der Innenteil rechnet in größeren Batches (2048
-bzw. 256 mit doppeltem Autograd), dort fällt ein Kontextwechsel kaum ins Gewicht.
+Der Rollout serialisierte fast vollständig, der Innenteil kaum. Das war die
+Diagnose: der Rollout sind ~50 **winzige** Kernel je Schritt (363×128), und
+winzige Kernel aus vier verschiedenen CUDA-Kontexten arbeitet der Treiber
+zeitscheibenweise ab. Der Innenteil rechnet in größeren Batches (2048 bzw. 256
+mit doppeltem Autograd), dort fällt ein Kontextwechsel kaum ins Gewicht.
 
-**Damit ist MPS der passende Hebel**, nicht einer von zwei Verdächtigen: er lässt
-Kernel verschiedener Prozesse nebeneinander auf den SMs laufen. Genau der Fall,
-für den er gebaut wurde. Der Test (~7 min, noch nicht gelaufen):
+**MPS behebt genau das** — er lässt Kernel verschiedener Prozesse nebeneinander
+auf den SMs laufen, statt sie abzuwechseln. Die Vorhersage aus der Epochenzeile
+und das Ergebnis stimmen überein, und damit ist auch klar, warum mehr Prozesse
+vorher nicht geholfen hätten: es war nie die Zahl der Prozesse, sondern der
+Kontextwechsel zwischen ihnen.
 
-```bash
-nvidia-cuda-mps-control -d          # einmal je Boot
-# denselben -j-4-Lauf wiederholen und sweep_wall_s vergleichen
-```
+> **Vorher standen hier 3.9× und danach 1.46×, beide falsch.** Die 3.9× kamen aus
+> `Summe der Laufzeiten / Wanduhr` — eine **Obergrenze**, keine Messung, denn
+> unter Konkurrenz wird jeder Lauf selbst langsamer und der Zähler wächst mit.
+> Die 1.46× waren echt gemessen, aber ohne MPS. Erst `-j 1` gegen `-j N` **mit**
+> MPS ergibt die 3.69×. `sweep.py` schreibt die Obergrenzen-Warnung inzwischen
+> selbst in die Ausgabe.
 
-Hilft MPS deutlich, war die Kontext-Umschaltung das Problem — und dann liegt
-deutlich mehr als 1.46× drin, weil der Rollout 70 % der Epoche ausmacht. Hilft es
-nicht, sind es doch die vier Kerne, und der Sweep gehört auf `--device cpu`, wo
-es keine Kontext-Konkurrenz gibt.
+**Die Wanduhr bleibt `ceil(Läufe / j)` Lauf-Dauern** — eine letzte Welle mit
+weniger Läufen als Arbeitern kostet eine ganze Dauer. `-j` auf einen Teiler der
+Laufzahl setzen; `sweep.py` warnt bei krummem `-j`.
 
-**Mehr als 4 gleichzeitig lohnt nicht.** Bei vier ist die Effizienz schon auf
-37 %; ein fünfter Prozess teilt dieselbe Karte und dieselben vier Kerne noch
-feiner auf. Der Hebel ist MPS oder ein anderes Gerät, nicht mehr Prozesse.
-
-**Was bleibt: 1.46× ist geschenkt und kostet nichts** — ein Sweep über eine
-Achse (9 Läufe) fällt damit auf ~70 % seiner seriellen Zeit. Es ist nur nicht
-die Größenordnung, mit der der Abschnitt darüber geplant hatte.
-
-Die Wanduhr bleibt `ceil(Läufe / j)` Lauf-Dauern — eine letzte Welle mit weniger
-Läufen als Arbeitern kostet eine ganze Dauer. **`-j` auf einen Teiler der
-Laufzahl setzen**, 9 Läufe → `-j 3`. `sweep.py` rechnet die Wellen beim Start aus
-und warnt bei krummem `-j`.
+**Wie weit `-j` jetzt gehen darf, ist offen.** Bei vier Workern sind 92 %
+Effizienz erreicht, die vier physischen Kerne sind also noch nicht ausgereizt.
+Mit MPS ist nicht mehr die Karte die Grenze, sondern die CPU — jeder Lauf ist
+eine Python-Schleife und will einen Kern. `-j 6` auf 8 vCPU ist der nächste
+sinnvolle Versuch, gemessen ist er nicht.
 
 ### Was kostet ein Benchmark? Ein Rechenbeispiel
 
 Für die Frage „lohnt die Instanz" ist ein Beispiel greifbarer als ein Faktor.
 **Ein Gitter aus 10 × 10 Punkten** (`w_phys` × `w_bc`), 60 Epochen, elf OPs:
 
-| | seriell | mit `-j 4` |
+| | seriell | `-j 4` + MPS |
 |---|---|---|
-| **100 Punkte, 1 Seed** | 193 h = **8.1 Tage** | 132 h = **5.5 Tage** |
-| 100 Punkte, 3 Seeds | 580 h = 24 Tage | 397 h = 17 Tage |
+| **100 Punkte, 1 Seed** | 193 h = **8.1 Tage** | 52 h = **2.2 Tage** |
+| 100 Punkte, 3 Seeds | 580 h = 24 Tage | 157 h = 6.5 Tage |
 
-Grundlage sind die gemessenen 116 s/Epoche bei elf OPs, also **1.93 h je Lauf**.
-Die Parallelität spart davon rund ein Drittel.
+Grundlage sind die gemessenen 116 s/Epoche bei elf OPs (**1.93 h je Lauf**) und
+der gemessene Parallelitätsfaktor **3.69× mit MPS**. Ohne MPS wären es 5.5 statt
+2.2 Tage — derselbe Benchmark, ein vergessenes Kommando.
 
 **Die eigentliche Lehre steht in der Zeile darüber, nicht in der Tabelle:** mit
 der veralteten README-Zahl hätte derselbe Benchmark auf **45 Tage** geplant
 werden müssen. Der Unterschied kommt nicht von der Karte und nicht von `-j`,
 sondern vom `rollout_plan`-Fastpath, der längst im Code stand und nie gemessen
 wurde. Wer hier plant, plant mit `S` aus einem **heutigen** Lauf.
+
+#### Woher die Faktoren kommen — und wie viel jeder beiträgt
+
+Der Sprung von „45 Tage" auf „2.2 Tage" ist **nicht** hauptsächlich die
+Parallelität. Die Kette, Zahl für Zahl, für das 100-Punkte-Gitter:
+
+| | 100 Punkte | Faktor |
+|---|---|---|
+| 1. wie es im README geplant stand (`118.7 s/epoch`) | **45.3 Tage** | — |
+| 2. mit der **gemessenen** Epochenzeit (`21.1 s/epoch`) | 8.1 Tage | **5.63×** |
+| 3. + vier Läufe parallel, **ohne** MPS | 5.5 Tage | 1.46× |
+| 4. + **MPS** obendrauf | **2.2 Tage** | 2.53× |
+| | | **gesamt 20.8×** |
+
+**Zeile 2 ist der größte Einzelposten — und dafür wurde nichts gebaut.** Der
+`rollout_plan`-Fastpath lag längst im Code; nur die Zahl im README stammte aus
+der Zeit davor. Wer mit ihr geplant hätte, hätte 45 Tage veranschlagt für etwas,
+das schon damals 8 gedauert hätte.
+
+**Zeile 3 und 4 gehören zusammen.** „Vier parallel" bringt für sich genommen nur
+1.46× — die winzigen Rollout-Kernel serialisieren am Kontextwechsel. Erst MPS
+macht aus vier Prozessen fast Faktor vier (3.69× bei 92 % Effizienz). **Ohne den
+Daemon ist die halbe Parallelität weggeworfen.**
+
+**Was davon die Karte ist, steht nicht in dieser Tabelle.** Zeile 2 ist reiner
+Code und würde auf einer CPU genauso gelten. Zeile 3/4 ist paralleles Ausführen —
+MPS gibt es nur auf der GPU, aber ob vier CPU-Läufe auf vier Kernen ähnlich gut
+skalieren, ist **ungemessen**. Die ehrliche Aussage über die Instanz bleibt: sie
+trägt vier gleichzeitige Läufe fast zum Preis von einem (2.5 min allein, 2.7 min
+zu viert). Ob eine CPU das auch könnte, sagt erst `--device cpu` gegen
+`--device cuda`.
 
 > **Und ein 10×10-Gitter ist ohnehin die falsche Form.** Bei 100 Punkten ohne
 > Seeds misst man vor allem die Seed-Streuung und nennt sie Ergebnis — genau der
@@ -437,6 +732,58 @@ Solange die fehlt, ist die ehrliche Aussage über die Instanz: **sie macht die
 Studie planbar, aber welcher Anteil davon die Karte ist und welcher der Code,
 ist offen.**
 
+### Bilanz der Sitzung 09./10.09. — was gebaut, was gemessen, was falsch war
+
+**Anlass:** „ein Lauf belegt 0.4 GB von 15 GB VRAM." Die Antwort darauf ist
+nicht, den Speicher zu füllen — es gibt in diesem Modell keinen Tensor, der das
+könnte, und die Batchgrößen sind Experiment-Regler. Die Antwort ist **mehr
+unabhängige Arbeit gleichzeitig**, und genau daraus besteht ein Sweep.
+
+**Gebaut:**
+
+| | |
+|---|---|
+| `sweep.py` | das Werkzeug aus Teil I. `--vary` × `--seeds`, `-j N` parallel, ein Prozess je Punkt, `[NOT SEPARATED]`, Preflight gegen das System-Python, MPS-Warnung |
+| Syncs raus | `_LossBalancer` auf dem Gerät, Finitheitsprüfung nach `backward()`. Von ~10 auf 1 Sync je Optimiererschritt |
+| `bc_index` | die konstante BC-Maske wird nicht mehr je Schritt durch `torch.where` geschickt |
+| `--artifacts-dir` / `PINN_ART_DIR` | ein Ordner je Lauf — ohne das kein paralleler Sweep |
+| `op_metrics.csv` | die Zahlen aus `metrics.txt`, maschinenlesbar |
+
+Der Umbau ist **numerisch neutral, nachgewiesen**: `history.csv` und
+`metrics.txt` byte-identisch, alle Vorhersage-Arrays und alle 25
+Gewichtstensoren bitweise gleich, vor gegen nach.
+
+**Gemessen (alles neu, alles vorher unbekannt):**
+
+| | |
+|---|---|
+| `s/epoch` | **21.1 s** bei 2 OPs = 14.8 rollout + 6.3 inner → **1.93 h je 60-Epochen-Lauf** über elf OPs |
+| peak VRAM | **0.11 GB von 15.6** |
+| Parallelität | **3.69× mit MPS**, 1.46× ohne, 92 % Effizienz |
+| MPS allein | **2.52×** |
+
+**Vier Zahlen im Repo waren falsch und stehen jetzt richtig:**
+
+1. **`118.7 s/epoch` im README** — gemessen sind 21.1 s. Der `inner`-Teil ist in
+   beiden Zeilen identisch 6.3 s, also dieselbe Konfiguration; der Rollout fiel
+   von 112.4 auf 14.8 s (**7.6×**, der `rollout_plan`-Fastpath, der längst im
+   Code stand). **Alle Budgets in Kapitel 7/8 waren Faktor 5.6 zu pessimistisch.**
+2. **3.9× Parallelität** — war `Summe / Wanduhr`, also eine Obergrenze statt
+   einer Messung.
+3. **1.46×** — echt gemessen, aber ohne MPS.
+4. **„bit-identisch mit einem Einzellauf"** — gilt nur bei gleicher Thread-Zahl;
+   mehrfädige CPU-Reduktionen legen ihre Summationsreihenfolge nicht fest.
+
+**Die Lehre, die über diese Sitzung hinausgeht:** der größte Zeitgewinn lag
+nicht in neuem Code, sondern in einer **veralteten Zahl**. Mit ihr wäre der
+100-Punkte-Benchmark auf 45 Tage geplant worden; gemessen sind es 2.2. Wer hier
+ein Budget rechnet, rechnet mit `S` aus einem heutigen Lauf — nie aus dem
+README.
+
+**Offen geblieben:** wie weit `-j` gehen darf (bei vier Workern 92 %, die vier
+Kerne sind nicht ausgereizt), und was die Karte gegenüber reiner CPU bringt —
+dafür fehlt `--device cpu` gegen `--device cuda` auf derselben Box, 10 Minuten.
+
 ## Die Auswahlregeln stehen fest
 
 Siehe §10 in Teil II. Kurz: Mittel über `--val-ops`, nie ein einzelner OP · nach
@@ -444,6 +791,12 @@ Tier getrennt berichten · Kriterium ist MAE, nie `L_data` · **`spread` als
 Nebenbedingung in [0.7, 1.3]** · Spanne zwischen Konfigurationen < Spanne zwischen
 Seeds → keine Rangfolge · **kein Befund aus der letzten Epoche** (neu 02.09.,
 §11.6): Median über die letzten k Epochen, nie die letzte Zeile.
+
+> **Die Streuung ist seit 10.09. eine Zahl und keine Ermahnung mehr:** 0.518 C
+> (Physik aus) bzw. 0.882 C (an) auf dem Mittel der val-OPs, auf OP06 allein bis
+> 1.63 C — drei Seeds, 60 Epochen, §11.8. **Eine Achse, die weniger als ~1 C
+> bewegt, ist mit drei Seeds nicht messbar.** Das ist keine Formalie: es
+> disqualifiziert genau die Achsen, die bis zum 09.09. geplant waren.
 
 ## Offene Punkte — nach Zuständigkeit
 
@@ -453,7 +806,7 @@ Seeds → keine Rangfolge · **kein Befund aus der letzten Epoche** (neu 02.09.,
 > einer Nachricht nach Wochen noch stimmt. Offene stehen hier, geschlossene in
 > Teil III unter „Geschlossene Punkte".
 
-### Index: alle Punkte, O1 bis O16
+### Index: alle Punkte, O1 bis O17
 
 | # | worum es geht | Zustand |
 |---|---|---|
@@ -462,25 +815,27 @@ Seeds → keine Rangfolge · **kein Befund aus der letzten Epoche** (neu 02.09.,
 | O3 | OP15: `cell_current` fehlt im Bündel | ✅ nie exportiert |
 | O4 | OP12: Profil endet bei 1440 s, Trajektorie bis 1605 s | ✅ Solver hielt den Wert |
 | **O5** | **tote Eingangskanäle** (`soc_start`, Rate-Kanäle) | **offen — Envelope-Grenze**, kein MAE-Hebel (02.09. geklärt) |
-| **O6** | **kein Gewicht auf Basis von Messungen gesetzt** | **offen — erstmals messbar**, aber blockiert durch O15 |
+| **O6** | **kein Gewicht auf Basis von Messungen gesetzt** | **offen — 14.09. wieder aufgenommen.** Am 10.09. als hinfällig geführt; das war zu schnell. Der Term trägt heute nicht, **weil sein Residuum falsch ist** — nach O8 und O16 ist das Gewicht zum ersten Mal eine sinnvolle Frage. **Achse 3** |
 | O7 | Energiebilanz ging um ~147x nicht auf | ✅ der 121er, behoben |
-| **O8** | **BDF-Stencil δ = 1.0 s gegen Δt_max 0.24 s** | **offen — entschieden: messen**, δ = 1.0 / 0.4 / 0.2 |
-| O9 | dämpft der Physik-Term nur, statt Dynamik zu lernen? | ✅ **widerlegt** — `spread` → 0.968 |
+| **O8** | **BDF-Stencil δ = 1.0 s gegen Δt_max 0.24 s** | **offen — 14.09. auf die Hauptlinie.** Reparatur, keine Achse: `--delta-phys 0.2`. **Achse 1, das Nächste** |
+| O9 | dämpft der Physik-Term nur, statt Dynamik zu lernen? | ✅ **widerlegt** — `spread` → 0.968. **10.09. Nachtrag:** er dämpft früh sehr wohl (Ep3: 1.73 gegen 7.96), nur holt der Datenterm das bis Ep60 allein ein. §11.8 |
 | **O10** | **OP14s 0 °C sind geplant — nicht „reparieren"** | **stehende Warnung** |
 | **O11** | **OP19 wird schlechter, je besser das Modell wird** | **dauerhafte Envelope-Grenze** (Datensatz ist fix) |
 | O12 | BC-Term trägt fast nichts (`ratio` 0.0178) | ✅ **widerlegt** — 0.0178 war eine Epoche, Median 0.0581 |
-| **O13** | **Fehler wächst zum Trajektorienende** | **offen** — und **kein** Verallgemeinerungsproblem |
+| O13 | Fehler wächst zum Trajektorienende | ✅ **beantwortet 10.09.** — reiner Versatz (`frac` = 1.000), Ursache ist O17, nicht der Level-Integrator |
 | **O14** | **Volumenstrom ist die Schwierigkeitsachse** | **dauerhafte Envelope-Grenze** (Datensatz ist fix) |
-| **O15** | **das Loss-Balancing greift nach 60 Epochen nicht** | **offen** — blockiert O6 |
-| **O16** | **NEU: die Gehäusewand hat gar keine Randbedingung** | **offen** — Ziel ist gemessen, Umsetzung geplant |
+| **O15** | **das Loss-Balancing greift nach 60 Epochen nicht** | **offen — 10.09. gemessen statt vermutet.** Blockiert nichts mehr (O6 ist hinfällig), bleibt aber falsch: die EMA-Zeitkonstante ist 0.9 **je Epoche**. **Abhilfe ohne Code-Änderung: `--ema-decay 0.5`** (§11.8) |
+| **O16** | **die Gehäusewand hat gar keine Randbedingung** | **offen — 14.09. auf die Hauptlinie.** Ein Residuum ohne Senke ist nicht erfüllbar; zusammen mit O8 erklärt das, warum `L_phys` nicht fällt. **Achse 2** (Code, nach der GridCNN-Bilanzprobe). §11.8 |
+| **O17** | **NEU 10.09.: der freilaufende Rollout hat einen OP-unabhängigen Fixpunkt** | **offen — Achse 4, läuft parallel.** `peak_pred` bei 45–50 C, egal welcher Betriebspunkt. Braucht `evaluate.py` und keine GPU-Stunden. §11.8 |
 
 Die offenen im Detail, nach Dringlichkeit:
 
 | # | offen | wer / wann |
 |---|---|---|
-| **O15** | **NEU 02.09. Das Loss-Balancing hat nach 60 Epochen noch nicht eingesetzt.** Alle drei Divisoren fallen mit exakt 0.9000/Epoche — reiner geometrischer Zerfall, der aktuelle Loss trägt 0.009 % bei. `div_data/div_phys` ist damit über den ganzen Lauf **konstant**, das Balancing wirkt wie `fixed` mit Divisoren, die der erste Optimiererschritt gesetzt hat. Gemessen: `ratio_phys` = 0.586, wo `w_phys = 0.1` nominell 0.1 verspricht. Seit 02.09. als `xfail`-Test festgehalten und von `analyse_history.py` bei jedem Lauf gemeldet. §11.6 | **blockiert O6** |
-| **O8** | Der BDF-Stencil nutzt δ = 1.0 s gegen Δt_max ≈ 0.24 s (`[CFL WARN]` bei jedem Lauf). **02.09. entschieden: wird gemessen, drei Punkte 1.0 / 0.4 / 0.2.** Nicht einfach richtiggestellt, weil es ein Zielkonflikt ist und kein Einheitenfehler — der Zähler `3T − 4T₋₁ + T₋₂` schrumpft mit δ, der Eigenfehler des Rollouts nicht. δ = 0.2 ist zugleich der Boden: darunter liest `history_at` nur noch die Gerade zwischen zwei Gitterpunkten. §11.2 | **Sweep-Achse 1** |
-| **O13** | **Der Fehler sitzt am Ende der Trajektorie.** OP06: MAE 6.270 C, aber `late(held out)` = **13.248 C** — doppelt. Gleiches Muster auf OP03 (3.341 / 7.371) und OP16 (3.476 / 6.959). **02.09.: OP03 ist ein Trainings-OP und `--holdout-tail` ist aus — das Modell hat diese späten Zeitschritte mit Beschriftung gesehen und verdoppelt dort trotzdem seinen Fehler. O13 ist also kein Verallgemeinerungsproblem, sondern mechanisch.** §11.7 | **Messung gebaut 02.09.**, läuft beim nächsten Lauf mit |
+| **O15** | **NEU 02.09. Das Loss-Balancing hat nach 60 Epochen noch nicht eingesetzt.** Alle drei Divisoren fallen mit exakt 0.9000/Epoche — reiner geometrischer Zerfall, der aktuelle Loss trägt 0.009 % bei. `div_data/div_phys` ist damit über den ganzen Lauf **konstant**, das Balancing wirkt wie `fixed` mit Divisoren, die der erste Optimiererschritt gesetzt hat. Gemessen: `ratio_phys` = 0.586, wo `w_phys = 0.1` nominell 0.1 verspricht. Seit 02.09. als `xfail`-Test festgehalten und von `analyse_history.py` bei jedem Lauf gemeldet. **10.09. gemessen statt vermutet:** über drei Seeds ist das effektive `phys/data` auf zwei Stellen gleich (0.536 / 0.537 / 0.499) — genau das Muster, das ein eingefrorener Quotient erzeugt. **Die Ursache steht damit fest:** `ema_decay` ist 0.9 **je Epoche**, `L_data` fällt aber in vier Epochen um drei Größenordnungen; die EMA holt das nie ein. **Blockiert seit 10.09. nichts mehr** (O6 ist hinfällig), bleibt aber ein Fehler, solange irgendein Gewicht bedeuten soll, was es sagt. §11.6, §11.8 | **wenn wieder ein Gewicht gemessen wird** |
+| **O17** | **NEU 10.09. Der freilaufende Rollout hat einen OP-unabhängigen Fixpunkt.** `peak_pred` landet über alle sechzehn OPs in einem Band bei **45–50 C**, egal welcher Betriebspunkt gefahren wird: OP06 (wahr 59.55 C) wird zu 44.9…49.5, OP07 (50.44 C) zu 39.1…43.7, OP12 (41.55 C) zu 47.4…76.9. Über alle 102 (OP, Lauf)-Paare ist `peak_pred − peak_true` im Median +0.04 C und in der Hälfte der Fälle negativ — im Mittel richtig, im Einzelfall beliebig. In `timeseries.png` in dreizehn von sechzehn OPs zu sehen: die Vorhersage wird flach, die Wahrheit läuft ihr davon. **Das Modell hat die gepoolte Endtemperatur des Trainingssatzes gelernt, nicht die des OPs.** Erklärt O13, O14 und O11 auf einmal. **Es ist ein Konditionierungsproblem, kein Gewichtungsproblem** — kein Gewicht, kein δ und kein `w_bc` verschiebt einen Fixpunkt. §11.8 | **das Nächste: Teacher Forcing gegen freien Rollout** |
+| **O8** | Der BDF-Stencil nutzt δ = 1.0 s gegen Δt_max ≈ 0.24 s (`[CFL WARN]` bei jedem Lauf). **02.09. entschieden: wird gemessen, drei Punkte 1.0 / 0.4 / 0.2. 10.09.: der Charakter hat sich geändert.** Achse 0 zeigt, dass `L_phys` in 60 Epochen nur um Faktor 3–5 fällt, während `L_data` um 2 700 fällt, und dass die *Trainings*-MAE mit Physik schlechter wird (3.823 gegen 2.864 C). Das Residuum ist nicht zu schwach gewichtet, es ist **nicht erfüllbar** — δ = 1.0 s ist einer von zwei bekannten Gründen dafür, der andere ist O16. O8 ist damit **keine Genauigkeitsachse, sondern eine Reparatur**: die Vorbedingung dafür, dass der Physik-Term überhaupt testbar ist. §11.8. Nicht einfach richtiggestellt, weil es ein Zielkonflikt ist und kein Einheitenfehler — der Zähler `3T − 4T₋₁ + T₋₂` schrumpft mit δ, der Eigenfehler des Rollouts nicht. δ = 0.2 ist zugleich der Boden: darunter liest `history_at` nur noch die Gerade zwischen zwei Gitterpunkten. §11.2 | **Sweep-Achse 1** |
+| O13 | **Der Fehler sitzt am Ende der Trajektorie.** ✅ **Beantwortet 10.09.** Die am 02.09. dafür gebaute Messung hat geliefert: `late_bias_frac` = **1.000** auf OP06 in allen sechs Achse-0-Läufen, Median 0.980 über alle 102 (OP, Lauf)-Paare. Der späte Fehler ist **reiner einseitiger Versatz, zu kalt**, die Drittel wachsen monoton (`+2.9 → −2.6 → −9.3` C). **Nicht** Mechanismus 1 aus §11.7 — `residual_output` steht auf `false`, der Level-Integrator ist gar nicht im Spiel. Die Ursache ist O17. §11.8 | ✅ geht in O17 über |
 | **O16** | **NEU 02.09. Die Gehäusewand hat keine Randbedingung.** `grep -rin "convect\|robin\|htc\|h_conv\|wall.*flux"` über `physics.py`, `model.py` und `train.py` findet **nichts**. `heat_residual` ist reine Leitung plus Quelle, **ohne Senke**, und der einzige BC-Term sitzt per `bc_mask = |x| < 1e-6` an der Symmetrieebene (`train.py:603`, „BC points (x=0): 121/363"). Der Wärmeaustritt an der Gehäusewand ist damit physikalisch **unbeschränkt** — das Netz lernt ihn allein aus dem Datenterm, obwohl dort laut Energiebilanz bis zur Hälfte der Quellenergie hinausgeht. **Neu behebbar**, weil der Wärmestrom `Q̇(t)` gemessen im Rohexport liegt (`*_Heat Transfer.csv`, Spalte `Heat Transfer: solid to fluid Monitor (W)`) — ein Robin-Term an `x = 0.0219` mit `U(V̇)` auf `A = 0.0206 m²` wäre also nicht geraten, sondern **gegen eine Messung beaufsichtigt**. ⚠ **Erklärt die val-Fehler NICHT:** §11.5 sagt, V̇ = 0 ist der *schwierigere* Fall (5.374 gegen 2.928 C), also bliebe es dafür bei O14. Herleitung und Einbauregel in [`GridCNN/README.md`](../GridCNN/README.md) §6 | **erst nach GridCNN-Stufe 1** (Bilanzprobe), sonst baut man eine falsche BC in ein laufendes Modell |
 | **O6** | Kein Gewicht auf Basis von Messungen gesetzt. **02.09.: der Grund hat sich geändert.** Die fünf Gründe aus §10a (CFL-Verletzung, degenerierter Anker, saturierter Rollout, nie arbeitende Loss-Balance, 121er-Quelle) sind alle behoben — O6 ist nicht mehr „bewusst offen", sondern **erstmals messbar**. Nur nicht jetzt: solange O15 gilt, misst ein `w_phys`-Sweep den eingefrorenen Divisor mit | **nach O15** |
 | **O5** | **Tote Eingangskanäle — 02.09. umgewidmet.** `soc_start` ist über alle OPs konstant 10 % (`DEAD -> forced to 0`), die Rate-Kanäle von `c_rate` und `fluid_mass_flow` sind im Training tot, auf OP15/OP16/OP19 aber lebendig. **Das ist kein MAE-Hebel:** eine Spalte ohne Varianz kann nichts erklären, und die SOC-Wirkung steckt über `q_dot` ohnehin schon im Modell. Der Punkt ist eine **Envelope-Grenze** und damit Vorbedingung für O11, nicht eine Code-Änderung. Kein Kanal wird gestrichen. §10a | dokumentiert, nichts zu tun |
@@ -488,9 +843,11 @@ Die offenen im Detail, nach Dringlichkeit:
 | **O11** | **OP19 wird schlechter, je besser das Modell wird.** 10.334 C sind 88 % schlechter als die 5.507 C nach drei Epochen, während jeder Simulations-OP sich verbessert hat. 16.7 σ unter dem trainierten `c_rate` (OP19 ist ein Fahrzyklus, OP01–OP16 sind ausnahmslos Ladungen), `soc_start` 77 % gegen 10 % über einen toten Kanal (O5). **02.09.: da der Datensatz fix ist und OP17/OP18 nie simuliert wurden, ist der Envelope nicht erweiterbar.** Jede Code-Änderung, die OP19 besser aussehen ließe, wäre eine Anpassung an die eine vorhandene Messung — wovor `op_registry.py:185` ausdrücklich warnt. §11.4 | dauerhaft, nie Auswahlkriterium |
 | **O10** | **Warnung, kein Punkt.** OP14 startet über alle Punkte bei 0 °C. Das sieht nach Füllwert aus, ist aber die geplante Anfangsbedingung (`op_registry.py:123`: T0 = 0 °C, „coldest start in the set"). **Nicht maskieren, nicht ersetzen, OP14 nicht entfernen** — es ist einer von nur zwei OPs mit V̇ = 0, und die binden die Energiebilanz | nichts tun |
 
-**Geschlossen am 01.09.:** O1, O2, O3, O4, O7, O9. **Am 02.09.:** O12. Siehe Teil III.
+**Geschlossen am 01.09.:** O1, O2, O3, O4, O7, O9. **Am 02.09.:** O12. **Am 10.09.:** O13 (beantwortet, geht in O17 über) und O6 (hinfällig). Siehe Teil III.
 
 **Neu am 02.09.:** O16 — beim Entwurf von `GridCNN/` aufgefallen, siehe dort §6.
+
+**Neu am 10.09.:** O17 — aus Achse 0 gefallen, §11.8.
 
 ---
 
@@ -1021,6 +1378,7 @@ Wird beim Abhaken ausgefüllt. Leer = noch nicht gemessen.
 | 5b-1 | **val OP06** | **MAE 10.540 C — beats** (persistence 16.679, train-mean 10.801) | **01.09.** |
 | 5b-1 | **val OP09** | **MAE 7.494 C — beats** (persistence 18.549, train-mean 7.762) | **01.09.** |
 | 5b-2 | val OP06 / OP09 (ohne Physik) | **11.591 / 8.504 C — LOSES TO** auf beiden | **01.09.** |
+| 5b-2 | dieselbe Frage bei 60 Epochen | **überholt 10.09.**: ohne Physik **5.970 / 4.525 C**, mit Physik 7.137 / 5.044 C — der 5b-Vorsprung war Untertrainiertheit, §11.8 | **10.09.** |
 | 5b-1 | test OP13 / OP15 / OP16 | 8.686 / 7.239 / 4.204 C — alle drei **beats** | **01.09.** |
 | 5b-1 | OP19 (Messvergleich) | 5.507 C — **LOSES TO** (persistence 1.376), wie §9.4 vorhergesagt | **01.09.** |
 | 6 | `[ABORT]` | **kam nicht** | 01.09. |
@@ -1034,12 +1392,22 @@ Wird beim Abhaken ausgefüllt. Leer = noch nicht gemessen.
 | 6 | `L_data` | 100.5 → **0.0515** | 01.09. |
 | 6.3 | **läuft auf der Karte** | **Exit 0** auf `cuda:0 Tesla T4`, torch 2.6.0+cu124. 2 OPs, 3 Epochen, 600 Optimizer-Steps, ~2.7 min für den ganzen Aufruf (inkl. Auswertung und Plots) | **10.09.** |
 | 6.3 | **peak VRAM** | **0.11 GB von 15.6 GB** — bei 2 OPs und den Default-Batches | **10.09.** |
-| 6.3 | **Parallelität `-j 1` vs `-j 4`** | **1.46×** — `sweep_wall_s` 596.2 s seriell gegen 407.4 s parallel, 4 Läufe, `--epochs 6 --ops OP01 OP02 --device cuda`. Effizienz 37 %. Je Lauf 2.5 → 6.8 min, also **2.7× langsamer unter Konkurrenz** | **10.09.** |
-| 6.3 | MPS-Gegentest | **offen** — `nvidia-cuda-mps-control -d`, dann `-j 4` wiederholen. Trennt „die eine Karte bremst" von „die vier Kerne bremsen" | — |
+| 6.3 | **Parallelität `-j 1` vs `-j 4`** | ohne MPS **1.46×** (596.2 → 407.4 s, je Lauf 2.5 → 6.8 min). **Mit MPS 3.69×** (596.2 → **161.7 s**, je Lauf 2.5 → **2.7 min**), 92 % Effizienz | **10.09.** |
+| 6.3 | **MPS** | **entscheidend, Faktor 2.52 für sich allein.** Bestätigt die Diagnose aus der Epochenzeile: die winzigen Rollout-Kernel serialisierten am Kontextwechsel. `nvidia-cuda-mps-control -d` gehört vor jeden Sweep | **10.09.** |
 | 6.3 | **`s/epoch`** | **21.1 s = 14.8 rollout + 6.3 inner** (2 OPs, 100 inner_steps, seriell). Unter `-j 4`: 57.5 = 49.6 + 7.9 — **der Rollout wird 3.35× langsamer, der Innenteil nur 1.25×** | **10.09.** |
 | 6.3 | **Planungszahl** | 10.55 s je OP und Epoche → ~116 s/Epoche bei elf OPs → **~1.9 h je 60-Epochen-Lauf** | **10.09.** |
 | 6.3 | README-Beispiel `118.7s/epoch` | **veraltet, Faktor 5.6.** `inner` ist in beiden Zeilen identisch 6.3 s, also dieselbe Konfiguration; der Rollout fiel von 112.4 auf 14.8 s (**7.6×**, der `rollout_plan`-Fastpath). Budgettabellen in Kapitel 7/8 entsprechend zu pessimistisch | **10.09.** |
 | 6 | Loss-Balance | arbeitet jetzt: `ratio phys/bc` 2.17/0.782 → **0.605/0.0178**, betas [0.91 …] → [0.98 2.64 3.9 3.99] | 01.09. |
+| **A0** | **Achse 0: `w_phys` 0.1 gegen 0** | **`[NOT SEPARATED]`** — 5.248 (Std 0.518) gegen 6.090 (Std 0.882), Abstand 0.843 C. Gegen die Entscheidungsregel: **der Physik-Term trägt nicht** (5.97/4.53 C liegt bei Schritt 6, nicht bei 5b) | **10.09.** |
+| **A0** | **Anteil des Physik-Terms am Loss** | **34.9 / 34.9 / 33.3 %** (Median Ep31–60, drei Seeds). Effektives `phys/data` = 0.536 / 0.537 / 0.499 — über Seeds identisch, weil der Divisor-Quotient eingefroren ist. **O15 gemessen statt vermutet** | **10.09.** |
+| **A0** | **Seed-Streuung, erstmals** | **0.518 C** (Physik aus) / **0.882 C** (an) auf dem val-Mittel; auf OP06 allein bis **1.63 C**. Die Latte für jede künftige Achse | **10.09.** |
+| **A0** | **`late_bias_frac`** | **1.000 auf OP06 in allen sechs Läufen**, Median 0.980 über alle 102 (OP, Lauf)-Paare, 70 % über 0.9. Drittel `+2.9 → −2.6 → −9.3` C. **Der späte Fehler ist reiner Versatz, zu kalt** | **10.09.** |
+| **A0** | **`peak_pred` gegen `peak_true`** | Vorhersage landet in einem Band bei **45–50 C, unabhängig vom OP**: OP06 59.55 → 44.9…49.5, OP07 50.44 → 39.1…43.7, OP12 41.55 → 47.4…76.9. **Der Rollout hat einen Fixpunkt. O17** | **10.09.** |
+| **A0** | **`spread s/t`, beide Arme** | Ep3: **1.73/0.85 mit** gegen **7.96/3.97 ohne** Physik — der 5b-Effekt, echt. Median Ep31–60: **1.210/0.976 gegen 1.212/0.953** — auf drei Stellen gleich. **Der Physik-Term ist ein Stützrad** | **10.09.** |
+| **A0** | **train / val / test** | 2.864 / 5.248 / 4.155 C (Physik aus). **Unteranpassung**, und `L_data` steht Ep31–60 flach — 60 Epochen sind auskonvergiert | **10.09.** |
+| **V** | **Vorlauf Achse 1** | **alle drei grün 14.09.**: `cuda:0 Tesla T4`; `[CFL WARN]`-Physikzeile weg bei δ = 0.2; `--ema-decay 0.5` greift, gemessene Rate **0.500/Epoche** | **14.09.** |
+| **V** | **Bug gefunden** | `delta=1.0s` stand **hartkodiert** im Startbanner (`train.py:721`) — jedes `train.log` dieses Projekts behauptete δ = 1.0 s, unabhängig von `--delta-phys`. Hätte Achse 1 unlesbar gemacht. Behoben mit Test | **14.09.** |
+| **A0** | **Wanduhr `-j 6` mit MPS** | **9 016.8 s = 2 h 30 min** für sechs 60-Epochen-Läufe auf elf OPs, 6/6 `[ok]`. Summe/Wanduhr 5.46× ist die **Obergrenze**; geschätzt echt **~4.0×**, also ~67 % Effizienz gegen 92 % bei `-j 4`. **Künftig `-j 4`** | **10.09.** |
 
 Alles läuft aus dem Repo-Wurzelverzeichnis:
 
@@ -1224,10 +1592,19 @@ verschwendete Zeit. → `05_latte.txt` schicken, ich sage dir den Wert für
 > 1. **`[SATURATED]` verschwindet.** Ep1 OP05 99.9 %, Ep2 OP04 88 %, Ep3 keine
 >    Zeile. Der weglaufende Rollout aus §9.3 war dt, genau wie vermutet. Nach der
 >    Entscheidungstabelle unten heißt das: **Schritt 6 starten.**
-> 2. **Der Physik-Term trägt.** Ohne ihn verlieren beide val-OPs gegen die
+> 2. ~~**Der Physik-Term trägt.**~~ Ohne ihn verlieren beide val-OPs gegen die
 >    trivialen Vorhersager, mit ihm schlagen sie beide. Das ist das erste Mal
 >    überhaupt, und es ist erst seit dem 121er-Fix messbar — vorher waren beide
 >    Läufe praktisch quellenfrei (§11.1).
+>
+>    > **10.09. überholt — bei 60 Epochen nicht reproduzierbar.** Achse 0 (3
+>    > Seeds, 60 Epochen) findet ohne Physik **5.97 / 4.53 C** gegen 7.14 / 5.04
+>    > mit. Der Effekt hier ist echt, aber er ist **Untertrainiertheit**: in
+>    > Epoche 3 steht der `spread` ohne Physik bei 7.96 / 3.97 und mit bei
+>    > 1.73 / 0.85 — nach 60 Epochen sind **beide** bei 1.21 / 0.95. Der
+>    > Physik-Term tut früh, was der Datenterm von selbst tut, wenn man ihn
+>    > lässt. **§11.8.** Damit ist auch die zweite Aussage dieses Laufs gefallen;
+>    > die erste (`spread` kollabiert) hat Schritt 6 widerlegt (§11.3).
 >
 > **Was diese Zahlen NICHT hergeben** (§10, unverändert gültig): ein Seed. Die
 > MAE-Differenz 10.54 gegen 11.59 ist ohne Seed-Streuung daneben nicht lesbar,
@@ -1835,8 +2212,10 @@ ersten Tag gemeldet statt nach sechzig Epochen. Er gehört zum ersten Schritt,
 der O15 anfasst.
 
 `--w-phys 0 --w-bc 0` ist davon nicht betroffen: bei `zero_weight_terms: skip`
-werden beide Terme gar nicht berechnet (`train.py:708`). **Achse 0 bleibt
-gültig und bleibt der erste Schritt.**
+werden beide Terme gar nicht berechnet (`train.py:708`). **Achse 0 war damit
+gültig — sie ist am 10.09. gelaufen, §11.8.** Und sie hat O15 nebenbei von einer
+Vermutung in eine Messung verwandelt: das effektive `phys/data` ist über drei
+Seeds auf zwei Stellen identisch, was genau ein eingefrorener Quotient tut.
 
 #### Was die Datei bestätigt
 
@@ -1908,6 +2287,16 @@ und Rauschen sahen identisch aus.
 
 Es braucht dafür **keinen eigenen Lauf** — die Zahlen fallen bei Achse 0 mit ab.
 
+> **Gemessen am 10.09., und die Tabelle war unvollständig.** `late_bias_frac` kam
+> als **1.000** zurück, auf OP06 in allen sechs Läufen. Nach der Zeile oben wäre
+> das „Mechanismus 1, der Level-Integrator". **Das kann nicht sein:**
+> `residual_output` steht auf `false` (`config.yaml:181`), `field()` gibt die
+> absolute Temperatur zurück, und der Integrator mit Verstärkung 1 ist damit gar
+> nicht im Spiel. Es fehlte ein vierter Fall — **der Rollout hat einen Fixpunkt**,
+> und zwar einen, der nicht vom Betriebspunkt abhängt. Der Befund steht als O17
+> in §11.8; die Mechanismen 1–3 oben bleiben als das stehen, was am 02.09.
+> denkbar war.
+
 > **Was dafür fehlt, ist weniger als es aussieht.** `save_checkpoint` schreibt
 > `model.pt` samt `model_config` (`train.py:1140`), und
 > `test_checkpoint_round_trips_without_config_yaml` lädt es bereits zurück:
@@ -1916,6 +2305,377 @@ Es braucht dafür **keinen eigenen Lauf** — die Zahlen fallen bei Achse 0 mit 
 > `--resume`, kein Auswertungs-Kommando. Ein `evaluate.py` (Checkpoint laden,
 > Rollout rechnen, Metriken berichten) ist damit wenige Zeilen und macht aus zwei
 > Stunden Minuten. Zu beachten: **jeder Lauf überschreibt `artifacts/model.pt`.**
+
+---
+
+### 11.8 Achse 0 — der Physik-Term trägt nicht, und der Rollout hat einen Fixpunkt (10.09.)
+
+**Sechs Läufe, 2 Arme × 3 Seeds, 60 Epochen, `--w-bc 0` in beiden Armen, elf
+Trainings-OPs, `-j 6` mit MPS auf der T4. Wanduhr 2 h 30 min, 6/6 `[ok]`.**
+
+#### Was genau gelaufen ist — der Reproduktionsteil
+
+```bash
+cd /home/student1/llmtraining          # Branch claude/pinn-gpu-memory-pqcc37
+source modulus_env/bin/activate        # python, NICHT python3
+nvidia-cuda-mps-control -d
+nohup python PINNmodulusTwo/sweep.py --seeds 0 1 2 \
+    --vary w-phys 0.1 0 -j 6 \
+    --out artifacts/achse0 --csv artifacts/achse0.csv \
+    -- --epochs 60 --w-bc 0 > achse0.log 2>&1 &
+```
+
+Alles andere ist Default aus `config.yaml`: elf Trainings-OPs, `w_data = 1.0`,
+`inner_steps = 100` (**1 100 Optimiererschritte je Epoche**), `lr = 2e-3`,
+`delta_phys = 1.0`, `delta_grid = 0.2`, `loss_balance = ema`, `ema_decay = 0.9`,
+`residual_output = false`, `subsample = 2`, `train_frac = 0.8`.
+
+| | |
+|---|---|
+| Start / Ende | 10.09., 09:35 → 12:05 UTC |
+| Wanduhr | 9 016.8 s = 2 h 30 min |
+| Ergebnis | 6/6 `[ok]`, kein `[FAIL]`, kein `[ABORT]` |
+| GPU | Tesla T4, MPS an, torch 2.6.0+cu124 |
+
+**Drei Dinge, die im Log stehen und beim nächsten Mal nicht überraschen
+sollen:**
+
+* **Der Sweep wurde versehentlich zweimal gestartet** (PID 51118 und 51246, eine
+  Minute auseinander, beide auf dieselben Ordner). 51246 wurde samt seiner sechs
+  `train.py`-Kinder gestoppt; **51118 ist der ausgewertete Lauf.** Die Gefahr
+  daran ist nicht die verlorene Minute, sondern dass zwei Prozesse dieselbe
+  `history.csv` schreiben und das Ergebnis danach wie ein normaler Lauf aussieht.
+  `pgrep -af sweep.py` vor dem Weggehen.
+* **`[SATURATED]` kam in allen sechs Läufen mindestens einmal** (Rollout-Guard
+  `|Tn| ≤ 50`). Kein Abbruch, alle sechs `exit 0` — sauber ist es trotzdem nicht.
+* **Die drei `w_phys = 0`-Läufe waren nach 123.7 min fertig und warteten 25 min
+  auf den Physik-Arm.** Bei ungleich teuren Armen ist `-j` = Zahl der Läufe nicht
+  automatisch das Beste.
+
+Die Artefakte je Lauf liegen in `artifacts/achse0/w-phys=<v>__seed=<n>/`:
+`history.csv` (60 Zeilen Diagnostik), `op_metrics.csv` (17 OPs × 18 Spalten),
+`metrics.txt`, `train.log`, `model.pt`, `training_curves.png`, `timeseries.png`,
+`pred_OP*.npz`. **Die sechs `model.pt` sind der Rohstoff für den nächsten
+Schritt** — sie sind auskonvergiert, und Teacher Forcing braucht kein neues
+Training.
+
+#### Das Ergebnis
+
+Alle „±" sind die Streuung über die drei Seeds, in derselben Konvention, die
+`sweep.py` in seiner Schlusszeile druckt (Streuung der Stichprobe, nicht
+Standardfehler des Mittels).
+
+| Arm | val-MAE (Mittel) | OP06 | OP09 | Wanduhr je Lauf |
+|---|---|---|---|---|
+| `w_phys = 0.1` | 6.090 ± 0.882 | 7.137 ± 1.634 | 5.044 ± 0.838 | 149.7 min |
+| `w_phys = 0` | **5.248 ± 0.518** | **5.970 ± 0.756** | **4.525 ± 0.383** | 123.7 min |
+| Schritt 6, **ein** Seed, `w_bc = 0.1` | 4.928 | 6.270 | 3.585 | — |
+
+`sweep.py`: `[NOT SEPARATED]` — 0.843 C Abstand gegen 0.882 C Seed-Streuung.
+Die beiden Arme sind **nicht** getrennt; „ohne Physik ist besser" ist also
+**nicht** die Aussage.
+
+**Die Aussage ist die Entscheidungsregel**, und die fragte etwas anderes: liegt
+der Arm ohne Physik bei ~11.6 / 8.5 C wie in Schritt 5b, oder bei ~6.27 /
+3.59 C wie Schritt 6? Er liegt bei **5.97 / 4.53 C**. Damit ist entschieden:
+
+> **Der Physik-Term trägt nicht.** Die 10-%-Differenz aus 5b war
+> Untertrainiertheit — derselbe Fehlschluss, der in demselben Lauf schon beim
+> `spread` passiert ist (§11.3).
+
+#### Er war nicht versehentlich aus
+
+Die naheliegende Ausrede wäre O15: die Divisoren sind eingefroren, also hat
+`w_phys = 0.1` nie 0.1 bedeutet. Das stimmt — nur zeigt die Rechnung in die
+andere Richtung. Über die Epochen 31–60, aus `history.csv`:
+
+| Seed | Anteil des Physik-Terms am Loss (Median) | effektives `phys/data` |
+|---|---|---|
+| 0 | **34.9 %** | 0.536 |
+| 1 | **34.9 %** | 0.537 |
+| 2 | **33.3 %** | 0.499 |
+
+**Ein Drittel des Gradienten**, dazu 21 % mehr Rechenzeit (der Innenteil steigt
+von 8.5 auf ~30 s je Epoche). Der Term war nicht zu leise — er war laut und hat
+nichts bewirkt.
+
+Nebenbei bestätigt das den Mechanismus von O15 direkt: das effektive Verhältnis
+ist über drei Seeds auf zwei Stellen gleich (0.536 / 0.537 / 0.499), weil der
+Divisor-Quotient im ersten Optimiererschritt festgelegt wird und danach
+eingefroren bleibt. **O15 ist damit vom Verdacht zur Messung geworden.**
+
+#### „Waren die Gewichte vielleicht einfach unglücklich?"
+
+Der naheliegende Einwand, und er lässt sich aus denselben sechs Läufen
+beantworten: **nein.** Drei Zahlen sagen es unabhängig voneinander.
+
+**1 — Der Balancer hatte den Term schon auf Augenhöhe.** `ratio_phys` ist
+`L_phys_bal / L_data_bal`, also genau das Verhältnis, das `w_phys` einstellen
+soll. Median je Zehnerblock:
+
+| Seed | Ep 1–10 | 11–20 | 21–30 | 31–40 | 41–50 | 51–60 |
+|---|---|---|---|---|---|---|
+| 0 | 0.630 | 0.857 | 0.997 | 0.818 | 0.918 | 0.822 |
+| 1 | 0.472 | 0.672 | 0.840 | 0.854 | 0.768 | 0.816 |
+| 2 | 0.727 | 0.702 | 0.842 | 0.696 | 0.825 | 0.788 |
+
+Der Physik-Term war über den ganzen Lauf **0.8 bis 0.9 mal so groß wie der
+Datenterm**. Das ist nicht „zu leise". Das ist die Größenordnung, die man
+einstellen wollte.
+
+**2 — Und trotzdem fällt `L_phys` fast nicht.** Median je Zehnerblock, roher
+Residuenverlust:
+
+| Seed | Ep 1–10 | 11–20 | 21–30 | 31–40 | 41–50 | 51–60 | Faktor |
+|---|---|---|---|---|---|---|---|
+| 0 | 2.17e5 | 1.45e5 | 9.41e4 | 6.92e4 | 5.73e4 | 4.76e4 | **4.6×** |
+| 1 | 1.89e5 | 1.93e5 | 1.01e5 | 8.77e4 | 5.88e4 | 5.81e4 | **3.2×** |
+| 2 | 3.22e5 | 1.35e5 | 1.34e5 | 5.66e4 | 6.25e4 | 6.74e4 | **4.8×** |
+
+Zum Vergleich: **`L_data` fällt im selben Lauf um Faktor 2 700** (111 → 0.041).
+Das Netz kann den Datenverlust um drei Größenordnungen drücken und bewegt das
+Residuum um Faktor vier.
+
+**3 — Die Trainings-MAE wird mit Physik schlechter, nicht nur die val-MAE**
+(3.823 gegen 2.864 C). Der Term zieht das Modell also *von den Daten weg*, auf
+OPs, die es auswendig lernen dürfte.
+
+Zusammen ergibt das ein eindeutiges Bild: **das Residuum ist nicht zu schwach
+gewichtet, es ist nicht erfüllbar.** Und ein Term, den das Modell nicht erfüllen
+kann, wird mit mehr Gewicht nicht besser — er verdrängt nur den, der
+funktioniert. Genau davor warnt §6 („`w_phys` auf 1.0 / 10.0 erhöhen").
+
+**Warum nicht erfüllbar — dafür stehen zwei Punkte schon in dieser Datei**, und
+beide melden sich in jedem einzelnen Lauf:
+
+* **O8, der `[CFL WARN]`.** δ = 1.0 s gegen Δt_max ≈ 0.241 s, Faktor **4.1**.
+  Die BDF-Zeitableitung wird über eine Verzögerung genommen, die länger ist als
+  die schnellste Zeitskala des Feldes — systematisch falsch genau dort, wo Fo
+  groß ist, im Gehäuse. **Die Trainingsdaten selbst erfüllen dieses Stencil
+  nicht.** Ein Residuum, das die Wahrheit verletzt, kann das Modell nur
+  verschlechtern.
+* **O16, die fehlende Randbedingung an der Gehäusewand.** `heat_residual` ist
+  Leitung plus Quelle, **ohne Senke**, während die Energiebilanz sagt, dass dort
+  bis zur Hälfte der Quellenergie austritt. Ein Residuum ohne Senke lässt sich
+  von einem Feld, das abkühlt, nicht erfüllen.
+
+> **Was das für den Plan heißt.** O8 ist damit **keine Genauigkeitsachse**,
+> sondern eine **Reparatur**: die Vorbedingung dafür, dass „trägt der
+> Physik-Term" überhaupt eine beantwortbare Frage ist. Dasselbe für O16. Erst
+> danach hätte ein `w_phys`-Sweep einen Sinn — und dann gegen die
+> Nullmessung, die jetzt existiert.
+
+#### Warum 5b das Gegenteil gesehen hat — und beide Messungen stimmen
+
+Die berechtigte Rückfrage: **es gab doch einen Test, der zeigte, dass Physik
+trägt?** Ja, genau einen — Schritt 5b, 01.09.:
+
+| | 5b-1 (mit Physik) | 5b-2 (`--w-phys 0 --w-bc 0`) |
+|---|---|---|
+| val OP06 | **10.540 C — beats** | 11.591 C — LOSES TO |
+| val OP09 | **7.494 C — beats** | 8.504 C — LOSES TO |
+| `spread s/t` in Ep3 | 0.339 / 0.201 | 2.15 / 1.03 |
+
+**Drei Epochen, ein Seed.** Der Kasten dort nannte seine eigenen Grenzen schon
+(„ein Seed … für eine Rangfolge reicht das nicht"), aber die Überschrift blieb
+stehen.
+
+**Achse 0 widerlegt 5b nicht — sie misst einen anderen Zeitpunkt.** Die
+`spread`-Spalte sagt genau, was passiert ist. Aus den sechs Läufen, derselbe
+Wert, einmal früh und einmal spät:
+
+| | `spread_space / spread_time` mit Physik | ohne Physik |
+|---|---|---|
+| **Epoche 3** | 1.73 / 0.85 | **7.96 / 3.97** |
+| **Median Ep 31–60** | 1.210 / 0.976 | **1.212 / 0.953** |
+
+Früh ist der Unterschied gewaltig: ohne Physik läuft der Rollout mit der
+achtfachen Streuung der Labels davon, mit Physik ist er schon fast beisammen.
+**Das ist der Effekt, den 5b gemessen hat, und er ist echt.**
+
+Nach sechzig Epochen sind beide Arme bei **1.21 / 0.95** — auf drei Stellen
+gleich. Der Datenterm allein kommt dort an, er braucht nur länger.
+
+> **Der Physik-Term ist ein Stützrad.** Er tut in Epoche 3, was der Datenterm
+> bis Epoche 60 von selbst tut. 5b hat das Stützrad gemessen, Achse 0 das
+> Fahrrad. Beide Messungen sind richtig; nur die Verallgemeinerung von 5b auf
+> „der Term trägt" war es nicht.
+
+Und das ist exakt dieselbe Falle wie bei O9: derselbe 5b-Lauf sagte auch, der
+`spread` kollabiere — Schritt 6 hat gezeigt, dass er über 60 Epochen auf 0.968
+läuft (§11.3). **Zwei Aussagen aus einem Drei-Epochen-Lauf, beide aus
+Untertrainiertheit, beide inzwischen gefallen.** Die Regel dahinter steht in §10
+und hat sich zum zweiten Mal bewährt: *drei Epochen sind kein Trend, ein Seed
+ist keine Streuung.*
+
+#### Ist die Arbeit am Physik-Term damit verloren?
+
+Nein, und das ist keine Höflichkeit:
+
+* **Der 121er-Einheitenfehler (O7) ist über den Physik-Pfad gefunden worden.**
+  `Qsrc` war um Faktor 121 zu klein; die Energiebilanz ging um ~147× nicht auf.
+  Das war ein echter Datenfehler, und er betraf alles, nicht nur `L_phys`.
+* **O16 — die fehlende Wand-Randbedingung — ist beim Physik-Review aufgefallen**
+  und ist eine Aussage über das Modell, nicht über den Loss-Term.
+* **5b hat Schritt 6 freigegeben.** Ohne diese Messung wäre der 60-Epochen-Lauf
+  nie gestartet worden.
+* **Widerlegt ist eine Formulierung, nicht das Prinzip.** δ ist um Faktor 4.1
+  zu groß (O8) und es gibt keine Senke (O16). Ein Residuum, das die
+  Trainingsdaten selbst verletzen, kann nicht helfen. Ob ein *korrektes*
+  Residuum hilft, ist damit nicht beantwortet — nur nicht mehr die nächste
+  Frage, weil der Fehler nachweislich woanders sitzt (O17).
+
+#### Was Achse 0 **nicht** sagt
+
+Drei Einschränkungen, damit später niemand mehr hineinliest als drinsteht:
+
+1. **Über `w_bc` sagt der Lauf gar nichts.** `--w-bc 0` stand in **beiden**
+   Armen. Der BC-Term ist bei 60 Epochen weiterhin ungetestet. (Sein
+   ursprünglicher Verdacht war am 02.09. schon weggefallen, §11.6, und er sitzt
+   an der Symmetrieebene `x = 0` — nicht dort, wo der Fehler ist. Ungetestet
+   bleibt er trotzdem.)
+2. **Getestet ist ein Punkt, nicht die Achse.** `w_phys = 0.1` bedeutete
+   effektiv 0.54 (O15). Was bei 0.05 oder 2.0 passiert wäre, steht hier nicht —
+   nur, dass bei ~34 % Anteil am Loss nichts herauskam.
+3. **Drei Seeds.** Es reicht für „trägt nicht". Es reicht **nicht** für
+   „schadet", auch wenn alle sechs Maße in dieselbe Richtung zeigen.
+
+#### O15 hat einen Einzeiler als Abhilfe — `--ema-decay`
+
+Nachgerechnet, und die Rechnung trifft den echten Lauf auf drei Stellen. Der
+erste Optimiererschritt setzt die EMA, und dort steht `L_data ≈ 3.28e4` — das
+ist **295× über dem Mittel der ersten Epoche** (111.2). Mit `ema_decay = 0.9`
+**je Epoche** braucht die EMA ~130 Epochen, um diesen Anker zu vergessen. Der
+Lauf hat 60.
+
+| `--ema-decay` | `div_data` am Ende | gegen `L_data` = 0.041 |
+|---|---|---|
+| **0.9** (Default) | 58.97 | **1 439×** |
+| 0.5 | 0.0447 | **1.1×** |
+| 0.1 | 0.0417 | 1.0× |
+| 0.01 | 0.0411 | 1.0× |
+
+> Gemessen im echten Lauf: `div_data = 58.94`, Faktor 1 438. Die Simulation
+> liefert 58.97 — **der Mechanismus ist damit nicht vermutet, sondern
+> reproduziert.**
+
+**`--ema-decay 0.5` genügt und ist ein vorhandenes Flag.** Keine
+Code-Änderung, kein neuer Default — aber auch nichts, was man nebenbei
+umstellt: es ändert das Experiment, gehört also in den nächsten *gemessenen*
+Vergleich und nicht in einen laufenden.
+
+`--loss-balance fixed --balance-warmup N` ist **nicht** die Abhilfe: es friert
+den Divisor bei Epoche N ein, und bis dahin ist er immer noch der zerfallende
+Anfangswert (bei Ep 12: 9 256 gegen `L_data` 0.15).
+
+#### Was die Läufe stattdessen zeigen — die Messung aus §11.7
+
+`late_bias_frac` ist genau dafür am 02.09. gebaut worden, und die Antwort ist
+die deutlichste in dieser Datei:
+
+```
+OP06, late_bias_frac:   1.000  1.000  1.000  1.000  1.000  1.000   (alle sechs Läufe)
+über alle 102 (OP, Lauf)-Paare:   Median 0.980,  70 % über 0.9
+```
+
+Der späte Fehler ist **zu 100 % ein einseitiger Versatz**, kein Rauschen, und
+zwar zu kalt. Die drei Drittel wachsen monoton: auf OP06 typisch
+`+2.9 → −2.6 → −9.3` C, und `late_mae = −late_bias` auf die dritte Stelle.
+
+**§11.7 hätte das „Mechanismus 1, der Level-Integrator" gelesen. Das ist
+falsch** — `residual_output` steht auf `false` (`config.yaml:181`), `field()`
+gibt die absolute Temperatur zurück, der Integrator mit Verstärkung 1 ist gar
+nicht im Spiel. Die Lesetabelle in §11.7 hätte einen dritten Fall gebraucht und
+hatte ihn nicht.
+
+#### Der dritte Fall: der Rollout hat einen Fixpunkt
+
+`peak_pred` gegen `peak_true`, über alle sechs Läufe:
+
+| OP | `peak_true` | `peak_pred` (sechs Läufe) |
+|---|---|---|
+| OP06 (val) | **59.55 C** | 44.88 … 49.49 |
+| OP07 | **50.44 C** | 39.12 … 43.70 |
+| OP14 | 45.56 C | 37.26 … 45.14 |
+| OP12 | **41.55 C** | 47.40 … 76.89 |
+| OP19 (Messung) | 28.98 C | 97.16 … 290.74 |
+
+Über alle 102 Paare ist `peak_pred − peak_true` im Median **+0.04 C** und in
+50 % der Fälle negativ — die Vorhersage ist also **im Mittel richtig und im
+Einzelfall beliebig**. Sie landet fast überall in einem Band bei **45–50 C**,
+unabhängig davon, welcher Betriebspunkt gefahren wird.
+
+In `timeseries.png` ist es in dreizehn von sechzehn OPs zu sehen: die
+Vorhersage steigt, wird flach, und die Wahrheit läuft ihr davon. **Der
+freilaufende Rollout konvergiert gegen einen Fixpunkt, und dieser Fixpunkt ist
+die gepoolte Endtemperatur des Trainingssatzes statt der des jeweiligen OPs.**
+
+Das erklärt drei bisher getrennt geführte Befunde auf einmal:
+
+* **O13** (der Fehler sitzt am Ende): der Fixpunkt wird gegen Ende erreicht.
+* **O14** (V̇ ist die Schwierigkeitsachse): OP06 und OP07 sind genau die beiden
+  OPs, deren wahres Maximum am weitesten von diesem Band liegt — und die beiden
+  schlechtesten.
+* **O11** (OP19 wird schlechter): weit außerhalb des Envelopes gibt es keinen
+  gelernten Fixpunkt mehr, der Rollout läuft ins Leere (97–291 C).
+
+**Es ist ein Konditionierungsproblem, kein Gewichtungsproblem.** Kein Gewicht,
+kein δ und kein `w_bc` verschiebt einen Fixpunkt. Damit sind die Achsen 1–3 vom
+Tisch, und O17 steht.
+
+#### Über- oder Unteranpassung?
+
+| Arm | train | val | test |
+|---|---|---|---|
+| `w_phys = 0.1` | 3.823 | 6.090 | 4.399 |
+| `w_phys = 0` | **2.864** | 5.248 | 4.155 |
+
+Trainings-MAE 2.9 C bei einem Modell, das seine eigenen OPs auswendig lernen
+dürfte. **Das Modell ist unter-, nicht überangepasst** — Regularisierung ist
+nicht der Hebel, und mehr Epochen sind es auch nicht: `L_data` steht über die
+Epochen 31–60 flach (Median 0.0472, relative Streuung 20 %, kein Trend). 60
+Epochen sind auskonvergiert.
+
+#### Was sonst noch abgefallen ist
+
+* **Die Seed-Streuung, zum ersten Mal gemessen.** 0.518 C (Physik aus) bzw.
+  0.882 C (Physik an) auf dem Mittel der val-OPs, auf OP06 allein bis 1.63 C.
+  **Das ist die Latte für jede künftige Achse.** Und es relativiert jede
+  Einzellauf-Zahl in dieser Datei: die 6.270 / 3.585 C aus Schritt 6 sind
+  **ein** Seed, und unser Physik-Arm streut auf OP06 zwischen 5.69 und 9.42 —
+  6.270 liegt am guten Rand einer Verteilung, nicht auf ihrem Mittel.
+* **`[SATURATED]` kam in allen sechs Läufen mindestens einmal.** Kein Abbruch,
+  alle sechs `exit 0`.
+* **O15 fährt in jedem Lauf mit.** `analyse_history.py` meldet für alle sechs:
+  `div_data` 5 752× bis 36 461× über `L_data`, Zerfall exakt 0.9000/Epoche. Die
+  EMA-Zeitkonstante (0.9 **je Epoche**) ist für einen Verlust, der in vier
+  Epochen um drei Größenordnungen fällt, schlicht zu träge; sie holt ihn über
+  60 Epochen nie ein.
+
+#### Was der Sweep an Zeit gebracht hat
+
+`-j 6` mit MPS, sechs 60-Epochen-Läufe auf elf OPs:
+
+| | |
+|---|---|
+| Wanduhr des Sweeps | **9 016.8 s = 2 h 30 min** |
+| Summe der sechs Lauf-Uhren | 49 214.6 s = 13 h 40 min |
+| Summe / Wanduhr | 5.46× — **Obergrenze, keine Messung** |
+| geschätzter echter Faktor | **~4.0×** |
+
+Die Schätzung, damit sie nachgerechnet werden kann: der Rollout kostet unter
+sechs gleichzeitigen Läufen ~115 s/Epoche, unter dreien (nachdem der
+`w_phys = 0`-Arm fertig war) nur noch **80 s** — und 80 s ist zugleich das, was
+die serielle Messung vom 10.09. für elf OPs vorhersagt (7.4 s je OP). Daraus:
+seriell 3 × 89.5 min + 3 × 111 min ≈ **10 h** gegen 2 h 30 min gemessen.
+
+**Praktische Folge: `-j 4`, nicht `-j 6`.** Bei vier Workern waren es 92 %
+Effizienz, bei sechs sind es ~67 %. Der Knick liegt dazwischen; sechs Läufe
+gleichzeitig zahlen 1.4× Konkurrenz je Lauf.
+
+Und eine Beobachtung fürs Planen: der Sweep wartet auf seinen **langsamsten**
+Arm. Die drei `w_phys = 0`-Läufe standen 25 Minuten fertig herum. Bei Armen
+unterschiedlicher Kosten ist `-j` = Zahl der Läufe nicht automatisch das Beste.
 
 ---
 
@@ -2276,23 +3036,28 @@ drei wären Umbauten gegen ein Problem gewesen, das es nicht gibt.
 
 **Geschlossen am 01.09.:** O1, O2, O3, O4, O7, **O9**. Schritte 4, 5, 5b, 6.
 
-## Die offene Kernfrage, im Klartext
+## Die offene Kernfrage — **beantwortet am 10.09.**
 
-**Trägt der Physik-Term, senkt er also die MAE — oder nicht?**
+**Trägt der Physik-Term, senkt er also die MAE?** — **Nein.**
 
-Gemessen ist bisher nur dies:
-
-| | mit Physik | ohne (`--w-phys 0 --w-bc 0`) |
+| | mit Physik | ohne (`--w-phys 0`) |
 |---|---|---|
-| **3 Epochen** (5b) | 10.540 / 7.494 C | 11.591 / 8.504 C |
-| **60 Epochen** (Schritt 6) | **6.270 / 3.585 C** | **nie gelaufen** |
+| **3 Epochen** (5b, ein Seed) | 10.540 / 7.494 C | 11.591 / 8.504 C |
+| **60 Epochen** (Schritt 6, ein Seed) | 6.270 / 3.585 C | nie gelaufen |
+| **60 Epochen, 3 Seeds** (Achse 0, 10.09.) | 7.137 / 5.044 C | **5.970 / 4.525 C** |
 
-Bei drei Epochen war die Physik ~10 % besser. Aber derselbe Lauf sagte auch, der
-`spread` kollabiere — und Schritt 6 hat das widerlegt (§11.3). Eine Aussage aus
-diesem Lauf ist gefallen; die andere ist ungeprüft.
+Bei drei Epochen war die Physik ~10 % besser. Bei sechzig ist sie es nicht — und
+die beiden Arme sind mit drei Seeds nicht einmal getrennt (`[NOT SEPARATED]`,
+0.843 C Abstand gegen 0.882 C Streuung). Damit ist es dieselbe Geschichte wie
+beim `spread`: **eine Aussage aus dem 5b-Lauf ist gefallen, jetzt auch die
+zweite.** Beide waren Untertrainiertheit.
 
-**Die Antwort braucht genau einen Lauf**, und er steht ganz oben in dieser Datei.
-Bis er gelaufen ist, gilt: *bei drei Epochen ja, bei Konvergenz unbekannt.*
+Der Term war dabei nicht leise: ~34 % des Losses in den Epochen 31–60, in allen
+drei Seeds. Ein Drittel des Gradienten und 21 % Rechenzeit für nichts. §11.8.
+
+**Die neue offene Kernfrage steht in O17:** der freilaufende Rollout konvergiert
+gegen einen Fixpunkt bei 45–50 C, unabhängig vom Betriebspunkt. Das ist der Ort,
+an dem der Fehler tatsächlich sitzt.
 
 ## Was der Code an diesem Tag gelernt hat
 

@@ -716,9 +716,16 @@ def fit(args):
         )
     opt = torch.optim.Adam(groups)
     n_params = sum(p.numel() for p in model.parameters())
+    # ``delta`` used to be the literal string "1.0s" here, so every train.log in
+    # this project claimed delta=1.0s no matter what --delta-phys said -- and the
+    # one axis that varies it (O8: 1.0 / 0.4 / 0.2) would have recorded nine runs
+    # as identical. The normalised value beside it was always correct, which is
+    # what makes the bug survivable and hard to see: 0.0001384 against
+    # T_span_ref=1444.8s IS 0.2s, it just did not match the label.
     print(
         f"model params={n_params} k_max={model.k_max} (fixed) "
-        f"delta=1.0s = {float(model.delta):.4g} normalised (fixed) "
+        f"delta={delta_phys_s:g}s = {float(model.delta):.4g} normalised "
+        f"(--delta-phys) "
         f"delta_grid={delta_grid_s:g}s gates=all-on "
         f"history_mode={model.history_mode} rate_lags_s={rate_lags_s} "
         f"width={args.width} depth={args.depth}",

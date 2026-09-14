@@ -498,60 +498,179 @@ belegt eine Handvoll Thread-Blocks, egal wie viele Prozesse gleichzeitig eins
 schicken. Der Gewinn kommt daher, dass sich die CPU-Arbeit der einen Läufe mit
 der GPU-Arbeit der anderen überlappt — Durchsatz, nicht Rechenleistung.
 
-#### Wie viel das spart — **1.46×, auf dieser Karte gemessen**
+#### Was MPS überhaupt ist
+
+**Multi-Process Service, von NVIDIA, Teil des CUDA-Treibers.** Es hat nichts mit
+AWS, mit dieser Instanz oder mit diesem Projekt zu tun — auf einer Workstation im
+Keller ist es dasselbe. Seit CUDA 9 dabei, auf der T4 voll unterstützt.
+
+**Das Problem:** jeder Prozess bekommt normalerweise seinen eigenen
+CUDA-Kontext, und die Karte kann immer nur **einen** Kontext gleichzeitig
+bedienen. Der Treiber schaltet also im Zeitscheibenverfahren um — A, dann B,
+dann C, dann D. Vier Prozesse teilen sich die Karte **nacheinander**, nicht
+nebeneinander.
+
+Bei großen Kerneln fällt das kaum auf: ein Kernel, der 10 ms rechnet, überdeckt
+den Umschaltvorgang. **Bei winzigen Kerneln ist es fatal** — und genau das ist
+der Rollout hier: ~50 Kernel je Schritt auf einer 363×128-Matrix. Da wird
+überwiegend umgeschaltet und kaum gerechnet. Deshalb wurde unter `-j 4` der
+Rollout 3.35× langsamer und der Innenteil mit seinen größeren Batches nur 1.25×.
+
+**Was MPS macht:** ein Server-Prozess hält **einen** Kontext, alle Clients
+schicken ihre Kernel durch ihn hindurch. Die Karte sieht keine vier
+konkurrierenden Kontexte mehr, sondern einen — und Kernel aus verschiedenen
+Prozessen laufen **gleichzeitig auf verschiedenen SMs**.
+
+Drei Dinge, die man dazu wissen sollte:
+
+* Es ist ein **Hintergrunddienst**, kein Teil des Programms. Der Code merkt
+  nichts davon, CUDA-Anwendungen verbinden sich automatisch.
+* Er **stirbt beim Reboot.** Nach jedem Neustart der Instanz einmal starten.
+* **Kein Speicherschutz zwischen den Clients.** Stürzt ein Prozess hart ab, kann
+  er die anderen mitreißen. Für einen Sweep, in dem jeder Punkt ohnehin einzeln
+  protokolliert wird und ein `[FAIL]` den Rest nicht aufhält, ist das ein
+  akzeptabler Tausch.
+
+#### Der Arbeitsablauf für einen Sweep, komplett
+
+```bash
+# 1. Stand und Umgebung
+cd /home/student1/llmtraining
+git checkout main && git pull
+source modulus_env/bin/activate        # python, NICHT python3
+
+# 2. MPS -- nach jedem Neustart der Instanz einmal
+nvidia-cuda-mps-control -d
+#    "An instance of this daemon is already running" = laeuft schon, alles gut.
+#    Die Meldung ueber /var/log/nvidia-mps ist folgenlos (nur Logs).
+
+# 3. Sweep starten, abgekoppelt von der SSH-Sitzung
+nohup python PINNmodulusTwo/sweep.py --seeds 0 1 2 \
+    --vary <flag> <wert> <wert> -j <teiler der laufzahl> \
+    --out artifacts/<name> --csv artifacts/<name>.csv \
+    -- --epochs 60 > <name>.log 2>&1 &
+
+# 4. Auswerten
+tail -30 <name>.log                    # Mittel und Std je Konfiguration
+cat artifacts/<name>.csv               # eine Zeile je (Konfiguration, Seed)
+python PINNmodulusTwo/tools/analyse_history.py \
+    artifacts/<name>/<punkt>/history.csv
+```
+
+Vier Dinge, die dabei schiefgehen können, und was davor schützt:
+
+| | |
+|---|---|
+| `python3` statt `python` | `sweep.py` prüft den Interpreter vorab und bricht mit **einer** Zeile ab, statt jeden Punkt an `import torch` sterben zu lassen |
+| MPS vergessen | `sweep.py` warnt bei jedem parallelen CUDA-Sweep und nennt die gemessenen Zahlen. **Kein Abbruch** — ein fehlender Daemon ist kein Fehler |
+| krummes `-j` | die Wanduhr ist `ceil(Läufe / j)` Lauf-**Dauern**; bei 9 Läufen ist `-j 4` exakt so schnell wie `-j 3`. `sweep.py` rechnet es aus und weist darauf hin |
+| Artefakte überschreiben sich | jeder Punkt bekommt `--artifacts-dir` **und** `PINN_ART_DIR`. Ohne das schrieben alle Läufe dieselbe `model.pt` |
+
+Und die Regel, die nichts mit der GPU zu tun hat: **nie die letzte Zeile eines
+Laufs ablesen.** `analyse_history.py` gibt Median und Streuung über die letzten
+Epochen — genau aus dem Ablesen der letzten Zeile entstand O12.
+
+#### Wie viel das spart — **3.69×, und MPS ist die halbe Miete**
 
 Am 10.09. auf der Instanz, 4 Läufe (`--ops OP01 OP02 --epochs 6 --device cuda`):
 
-| | `sweep_wall_s` | je Lauf |
-|---|---|---|
-| `-j 1` (seriell) | **596.2 s** (9.9 min) | 2.5 min |
-| `-j 4` (parallel) | **407.4 s** (6.8 min) | **6.8 min** |
-
-**596.2 / 407.4 = 1.46×**, 37 % Effizienz auf vier Workern, 3.1 von 9.9 Minuten
-gespart.
-
-> **Nicht die `ratio`-Zeile der Ausgabe nehmen.** Die zeigte hier 3.99× — sie
-> rechnet `Summe der Laufzeiten / Wanduhr`, und unter Konkurrenz wird jeder Lauf
-> selbst langsamer, der Zähler wächst also mit (hier auf das 2.73-fache). Das ist
-> eine **Obergrenze**, keine Messung. Nur `-j 1` gegen `-j N` beantwortet es.
-
-**Die aussagekräftige Spalte ist die rechte: 2.5 → 6.8 min je Lauf.** Vier
-gleichzeitige Läufe machen jeden einzelnen 2.7× langsamer — und die Epochenzeile
-sagt genau, *welcher* Teil das ist:
-
-| | seriell | `-j 4` | |
+| | `sweep_wall_s` | je Lauf | Faktor |
 |---|---|---|---|
-| Rollout | 14.8 s | **49.6 s** | **3.35× langsamer** |
-| Inner (×100) | 6.3 s | 7.9 s | 1.25× langsamer |
+| `-j 1` (seriell) | 596.2 s (9.9 min) | 2.5 min | — |
+| `-j 4` **ohne** MPS | 407.4 s (6.8 min) | **6.8 min** | 1.46× |
+| `-j 4` **mit** MPS | **161.7 s (2.7 min)** | **2.7 min** | **3.69×** |
 
-**Der Rollout serialisiert fast vollständig, der Innenteil kaum.** Das ist keine
-Überraschung, sondern die Diagnose: der Rollout ist ~50 *winzige* Kernel je
-Schritt (363×128), und winzige Kernel aus vier verschiedenen CUDA-Kontexten sind
-genau das, was der Treiber zeitscheibenweise abarbeitet. Der Innenteil rechnet in
-größeren Batches (2048 bzw. 256 mit doppeltem Autograd) — dort fällt ein
-Kontextwechsel kaum ins Gewicht.
+**92 % Effizienz.** Die Konkurrenz je Lauf fällt von 2.72× auf **1.08×** — vier
+gleichzeitige Läufe kosten fast so viel wie einer. **MPS allein bringt 2.52×.**
 
-**Damit ist MPS nicht ein Verdacht unter zweien, sondern der passende Hebel:** er
-lässt Kernel verschiedener Prozesse nebeneinander auf den SMs laufen, statt sie
-abzuwechseln. Genau der Fall, für den er gebaut wurde.
+> **`nvidia-cuda-mps-control -d` ist Pflicht, nicht Kür.** Einmal je Boot, vor
+> jedem Sweep. Ohne den Daemon verschenkt man Faktor 2.5 — lautlos, nichts im Log
+> sagt, dass er fehlt.
+
+**Warum, stand vorher schon in der Epochenzeile.** Ohne MPS wurde der Rollout
+3.35× langsamer (14.8 → 49.6 s), der Innenteil nur 1.25× (6.3 → 7.9 s). Der
+Rollout sind ~50 *winzige* Kernel je Schritt (363×128), und winzige Kernel aus
+vier CUDA-Kontexten arbeitet der Treiber zeitscheibenweise ab; der Innenteil
+rechnet in größeren Batches, dort fällt ein Kontextwechsel kaum ins Gewicht.
+**MPS behebt genau das** — Kernel verschiedener Prozesse laufen nebeneinander auf
+den SMs statt abzuwechseln.
+
+**Nicht die `ratio`-Zeile der Ausgabe als Faktor nehmen.** Sie rechnet `Summe der
+Laufzeiten / Wanduhr`, und unter Konkurrenz wird jeder Lauf selbst langsamer —
+das ist eine Obergrenze. Nur `-j 1` gegen `-j N` beantwortet es.
+
+**Wie weit `-j` gehen darf — am 10.09. beantwortet: bis etwa vier.**
+
+| `-j` | Effizienz | Konkurrenz je Lauf |
+|---|---|---|
+| 4 | **92 %** | 1.08× |
+| 6 | **~67 %** | ~1.4× |
+
+Die Sechser-Zahl kommt aus dem echten Achse-0-Sweep: sechs 60-Epochen-Läufe auf
+elf OPs, **2 h 30 min Wanduhr**. Die Epochenzeile zeigt die Konkurrenz direkt —
+der Rollout kostete unter sechs gleichzeitigen Läufen ~115 s/Epoche, unter dreien
+(nachdem der erste Arm fertig war) nur noch **80 s**, und 80 s ist genau das, was
+die serielle Messung für elf OPs vorhersagt. Seriell wären es ~10 h gewesen,
+also **~4.0×** statt der 5.46×, die `Summe / Wanduhr` behauptet.
+
+#### MPS dauerhaft machen — einmal, statt jeden Morgen
+
+Der Daemon ist ein Prozess, kein Schalter: **er ueberlebt keinen Neustart der
+Instanz.** Ihn zu vergessen kostet Faktor 2.5, lautlos. Also einmal als Dienst
+einrichten (braucht root):
 
 ```bash
-nvidia-cuda-mps-control -d          # einmal je Boot, dann -j 4 wiederholen
+sudo cp PINNmodulusTwo/deploy/nvidia-mps.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now nvidia-mps
+systemctl status nvidia-mps          # "active (running)"
 ```
 
-* **Hilft MPS deutlich** → es war die Karte. Ohne den Daemon teilt der Treiber die
-  T4 zeitscheibenweise zwischen den CUDA-Kontexten der vier Prozesse.
-* **Hilft es nicht** → es sind die Kerne. Ein Kernel-Start kostet CPU im Treiber,
-  und bei ~50 Starts je Rollout-Schritt ist das bei vier Prozessen echte Last auf
-  vier physischen Kernen. Dann ist `-j 2` die bessere Aufteilung, oder der Sweep
-  gehört auf `--device cpu`, wo es keine Kontext-Konkurrenz gibt.
+Danach ist MPS nach jedem Boot da. Pruefen laesst es sich jederzeit mit
 
-**Mehr als vier gleichzeitig lohnt nicht.** Bei vier ist die Effizienz schon auf
-37 %; ein fünfter Prozess teilt dieselbe Karte und dieselben vier Kerne noch
-feiner. Der Hebel ist MPS oder ein anderes Gerät, nicht mehr Prozesse.
+```bash
+ls /tmp/nvidia-mps/control && pgrep -x nvidia-cuda-mps-control
+```
 
-Die Verhältnisse oben sind exakt; absolut hängen sie an der Lauf-Dauer, und die
-ist auf der T4 nicht gemessen (Kapitel 6.3).
+und `sweep.py` sagt es in Zeile 4 seiner Ausgabe ohnehin von selbst.
+
+**MPS schadet kleinen Laeufen nicht.** Es gibt keinen Grund, ihn fuer einen
+einzelnen `train.py`-Aufruf abzuschalten — er kostet dort nichts und ist bei der
+naechsten parallelen Messung schon da. „Immer an" ist die richtige Einstellung.
+
+**Parallelitaet ist etwas anderes und NICHT immer an.** Sie entsteht
+ausschliesslich durch `-j` an `sweep.py`. Ein einzelner `train.py`-Lauf ist ein
+Prozess und laesst sich nicht parallelisieren — die ~7000 Rollout-Schritte je
+Epoche haengen voneinander ab. Genau deshalb ist der Sweep die Stelle, an der
+die Karte gefuellt wird, und nicht der einzelne Lauf.
+
+**Und `--device` gehoert hinter das `--`.** `config.yaml` steht auf
+`device: ask`; unter `nohup` ist stdin kein Terminal, also faellt jeder Lauf auf
+`auto` zurueck — das ist eine *Vermutung*, keine Ansage. Auf einer gesunden Box
+trifft sie `cuda` und nichts passiert; bei einem kaputten Treiber trifft sie
+`cpu`, und der ganze Sweep rechnet tagelang still auf vier Kernen und schreibt
+Zahlen, die wie GPU-Zahlen aussehen. Das ist dieselbe Regel wie in §6.1, nur
+eine Ebene hoeher:
+
+```bash
+python PINNmodulusTwo/sweep.py ... -- --epochs 60 --device cuda
+#                                  ^^ alles danach geht an train.py
+```
+
+`sweep.py` warnt seit dem 14.09. von sich aus, wenn `--device` fehlt.
+
+**Nimm `-j 4`.** Mit MPS ist nicht mehr die Karte die Grenze, sondern die CPU:
+jeder Lauf ist eine Python-Schleife und will einen Kern, und die Box hat vier
+physische. Der Knick liegt zwischen vier und sechs.
+
+Zwei Dinge, die beim Planen mehr ausmachen als das letzte Prozent:
+
+* **Der Sweep wartet auf seinen langsamsten Arm.** In Achse 0 standen die drei
+  billigen Läufe 25 Minuten fertig herum, weil der Physik-Arm 21 % länger
+  brauchte. Bei ungleich teuren Armen ist `-j` = Zahl der Läufe nicht automatisch
+  das Beste.
+* **Die Wanduhr ist `ceil(Läufe / j)` Lauf-Dauern.** Bei 9 Läufen ist `-j 4`
+  exakt so schnell wie `-j 3`; `sweep.py` weist darauf hin.
 
 ---
 

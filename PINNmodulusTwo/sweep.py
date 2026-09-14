@@ -57,9 +57,16 @@ same cores, and each gets its own ``--artifacts-dir`` -- without that they would
 all write ``artifacts/model.pt``, which is exactly the collision the Fahrplan
 warns about.
 
-Worth doing on the instance, once, outside this script: start the CUDA MPS daemon
-(``nvidia-cuda-mps-control -d``). Without it the driver time-slices between
-processes rather than letting their kernels share the SMs.
+Two things to say out loud at the start of every sweep, because both are cheap
+to forget and expensive to miss, and neither shows up in any log afterwards:
+
+* Start the CUDA MPS daemon on the instance, once per boot
+  (``nvidia-cuda-mps-control -d``). Without it the driver time-slices between
+  processes rather than letting their kernels share the SMs -- a factor of 2.5,
+  measured. :func:`warn_if_no_mps`.
+* Pass ``--device`` through to train.py. ``config.yaml`` says ``device: ask``,
+  and under ``nohup`` that resolves to ``auto``, which is a guess.
+  :func:`warn_if_device_implicit`.
 
 **``-j 4`` is four processes on ONE card, not a four-GPU sweep.** There is a
 single T4 in this machine. Parallel can therefore come out SLOWER than serial,
@@ -162,6 +169,98 @@ def preflight() -> None:
         f"  source modulus_env/bin/activate\n"
         f"or call the venv's python directly:\n"
         f"  <venv>/bin/python {Path(__file__).name} ..."
+    )
+
+
+def mps_is_running() -> bool:
+    """Is an MPS control daemon up? Best-effort, never raises."""
+    pipe = Path(os.environ.get("CUDA_MPS_PIPE_DIRECTORY", "/tmp/nvidia-mps"))
+    if (pipe / "control").exists():
+        return True
+    # ``-x`` (exact process NAME), never ``-f`` (full command line): with -f the
+    # shell that runs the check matches its own pattern and every machine looks
+    # like it has MPS. A false "all good" here is worse than no check at all --
+    # it is precisely the silent factor 2.5 this function exists to catch.
+    for name in ("nvidia-cuda-mps-control", "nvidia-cuda-mps-server"):
+        try:
+            if subprocess.run(["pgrep", "-x", name],
+                              capture_output=True).returncode == 0:
+                return True
+        except OSError:
+            return False
+    return False
+
+
+def warn_if_no_mps(jobs: int, passthrough: list[str]) -> None:
+    """Say it out loud when a parallel CUDA sweep is about to run without MPS.
+
+    Measured on the g4dn.2xlarge (4 runs, --ops OP01 OP02 --epochs 6):
+
+        -j 1  seriell        596.2 s
+        -j 4  ohne MPS       407.4 s   1.46x
+        -j 4  mit  MPS       161.7 s   3.69x
+
+    So the daemon is worth a factor of 2.5 on its own, and forgetting it costs
+    that **silently** -- the runs finish, the numbers are right, nothing in any
+    log says the card spent its time switching contexts instead of computing.
+    A missing daemon is not an error and must not abort the sweep; it is exactly
+    the kind of thing that has to be printed where somebody sees it.
+
+    Why it matters here and not for a single run: the rollout is ~50 TINY kernels
+    per step, and tiny kernels from several CUDA contexts get time-sliced by the
+    driver rather than sharing the SMs. Without MPS the rollout slowed 3.35x
+    under -j 4 while the (larger-batch) inner loop slowed only 1.25x.
+    """
+    if jobs < 2 or "cpu" in [a.lower() for a in passthrough]:
+        return
+    if mps_is_running():
+        print("  [MPS] control daemon detected -- kernels from the runs can "
+              "share the SMs.", flush=True)
+        return
+    print(
+        "  [WARN] no CUDA MPS daemon found, and this is a parallel CUDA sweep.\n"
+        "         Without it the driver time-slices between the runs' contexts\n"
+        "         instead of letting their kernels share the SMs. Measured cost\n"
+        "         on this workload: 3.69x -> 1.46x, i.e. a factor of 2.5, and it\n"
+        "         is invisible in every log. Start it once per boot:\n"
+        "             nvidia-cuda-mps-control -d\n"
+        "         Continuing anyway.",
+        flush=True,
+    )
+
+
+def warn_if_device_implicit(passthrough: list[str]) -> None:
+    """Say it out loud when no ``--device`` was passed through to train.py.
+
+    ``config.yaml`` ships ``device: ask``, and under ``nohup`` stdin is not a
+    terminal, so every run falls back to ``auto`` -- which is ``cuda`` when a
+    card answers and ``cpu`` when the driver is broken, the container lost
+    ``/dev/nvidia*``, or torch was installed without CUDA. On a healthy box that
+    guess is right and nothing happens. On a sick one a nine-point sweep spends
+    days on four cores, finishes, and writes numbers that look exactly like GPU
+    numbers.
+
+    README_GPU_SERVER 6.1 already states the rule -- "bewusst ``--device cuda``
+    statt ``auto``, so a wrongly set-up server aborts with a clear error instead
+    of quietly computing on the CPU" -- and ``device_utils`` prints "Pass
+    --device explicitly to be sure" on the fallback path. Both are easy to miss
+    in a command someone pastes at 23:00. This says it where the sweep starts.
+
+    Not an error: a deliberate ``auto`` is a legitimate choice, and a sweep must
+    never refuse to start over a default.
+    """
+    if any(a.lower() == "--device" or a.lower().startswith("--device=")
+           for a in passthrough):
+        return
+    print(
+        "  [WARN] no --device passed through to train.py, so each run resolves\n"
+        "         config.yaml's `device: ask`. Under nohup stdin is not a tty,\n"
+        "         so that falls back to `auto` -- cuda if a card answers, CPU if\n"
+        "         anything is wrong with the driver, and the sweep would finish\n"
+        "         either way. Say which one you mean, AFTER the bare `--`:\n"
+        "             ... -- --epochs 60 --device cuda\n"
+        "         See README_GPU_SERVER 6.1. Continuing anyway.",
+        flush=True,
     )
 
 
@@ -415,6 +514,9 @@ def main() -> None:
     print(f"artifacts: {out_root}")
     if args.passthrough:
         print(f"passed to train.py: {' '.join(args.passthrough)}")
+    if not args.dry_run:
+        warn_if_device_implicit(args.passthrough)
+        warn_if_no_mps(jobs, args.passthrough)
     if args.dry_run:
         for pt in points:
             print(f"  {slug(pt['config'], pt['seed'])}")

@@ -867,3 +867,71 @@ def test_every_op_gets_the_signed_metrics(synthetic_cache):
         assert key in m, key
     # and the formatter has to survive them
     assert "late_bias" in op_metrics_mod.format_op_metrics(op.op_id, "T0-in-time", m)
+
+
+# --------------------------------------------------------------------------
+# sweep.py -- the two things that are expensive to forget and invisible after
+# --------------------------------------------------------------------------
+
+def test_sweep_warns_when_no_device_was_passed_through(capsys):
+    """A missing --device is a silent CPU fallback across every point.
+
+    ``config.yaml`` ships ``device: ask``; under ``nohup`` stdin is not a tty,
+    so each run resolves that to ``auto``. On a healthy box the guess is right.
+    On one whose driver broke it is ``cpu``, and a nine-point sweep spends days
+    on four cores and writes numbers that look exactly like GPU numbers. The
+    rule is README_GPU_SERVER 6.1; this asserts the sweep says it out loud.
+    """
+    import sweep as sweep_mod
+
+    sweep_mod.warn_if_device_implicit(["--epochs", "60", "--ema-decay", "0.5"])
+    out = capsys.readouterr().out
+    assert "--device" in out and "README_GPU_SERVER" in out
+    # and it must not abort: a deliberate `auto` is a legitimate choice
+    assert "Continuing anyway" in out
+
+    for explicit in (["--device", "cuda"], ["--device=cpu"], ["--DEVICE", "cuda"]):
+        sweep_mod.warn_if_device_implicit(["--epochs", "60", *explicit])
+        assert capsys.readouterr().out == "", explicit
+
+
+def test_sweep_mps_warning_stays_quiet_where_it_would_be_noise(capsys):
+    """No MPS warning for a serial sweep or a CPU one -- there is nothing to fix.
+
+    The warning is worth a factor of 2.5 when it applies. Printing it when it
+    cannot apply is how a warning stops being read.
+    """
+    import sweep as sweep_mod
+
+    sweep_mod.warn_if_no_mps(1, ["--device", "cuda"])
+    assert capsys.readouterr().out == ""
+
+    sweep_mod.warn_if_no_mps(4, ["--device", "cpu"])
+    assert capsys.readouterr().out == ""
+
+
+def test_delta_is_logged_from_the_flag_and_not_hardcoded():
+    """`delta=1.0s` was a literal in the startup banner (train.py, until 14.09.).
+
+    Every train.log this project ever wrote therefore claimed `delta=1.0s`, no
+    matter what `--delta-phys` said. The normalised value printed next to it was
+    always correct, which is exactly what made it survivable and invisible:
+    `0.0001384` against `T_span_ref=1444.8s` IS 0.2s -- it just did not match its
+    own label.
+
+    O8 is an axis over 1.0 / 0.4 / 0.2. Without this fix that sweep would have
+    written nine logs that all say the same delta, and the one artifact a later
+    reader trusts most -- the run's own banner -- would have been wrong about the
+    only thing the run varied.
+    """
+    src = (PKG_DIR / "train.py").read_text(encoding="utf-8")
+    banner = [ln for ln in src.splitlines() if "normalised" in ln and "delta=" in ln]
+    assert banner, "the startup banner no longer prints delta -- update this test"
+    for line in banner:
+        assert "delta=1.0s" not in line, (
+            "delta is hardcoded in the banner again: " + line.strip()
+        )
+        assert "{delta_phys_s" in line, (
+            "the banner must print the value --delta-phys actually set: "
+            + line.strip()
+        )
