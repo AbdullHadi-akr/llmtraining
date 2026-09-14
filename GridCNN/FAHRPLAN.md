@@ -350,3 +350,107 @@ Was fertig ist, damit Teil oben nur Offenes enthält.
 | 02.09. | `tools/balance_check.py` gebaut und getestet |
 | 02.09. | `L_phys` bleibt — ein Seed ist keine Streuung (README §12.1) |
 | 02.09. | F4–F8 entschieden (README §12.3), O16 im PINN-Fahrplan eingetragen |
+
+---
+
+# Der Code — Stand 14.09.
+
+> Dieser Abschnitt beschreibt, **was im Repo liegt**. Der Plan oben sagt, was
+> gemessen werden soll; hier steht, womit. Das fortlaufende Protokoll der
+> Läufe steht in [`BENCHMARK.md`](BENCHMARK.md), zusammen mit den offenen
+> Routen R1–R6.
+
+## Was steht
+
+| Datei | was sie tut | geprüft durch |
+|---|---|---|
+| [`grid.py`](grid.py) | Reshape 363 → (3,11,11), **aus den Koordinaten abgeleitet**, plus die drei Paddings | `tests/test_grid.py`, 12 Tests |
+| [`physics.py`](physics.py) | nicht-äquidistanter x-Stern, Kreuzterm `λ_xy`, Quelle, Wandterm, `U(V̇)` | `tests/test_physics.py`, 19 Tests |
+| [`solve.py`](solve.py) | explizites Euler, entdimensioniert wie `data.py` | `tests/test_solve.py`, 14 Tests |
+| [`benchmark.py`](benchmark.py) | Stufenläufer, schreibt ins lebende Dokument | CI, Stufe 0 und 2 |
+| [`BENCHMARK.md`](BENCHMARK.md) | das Protokoll und die offenen Routen | von Hand |
+
+45 Tests, Sekunden, **ohne Modulus und ohne `data_cache`**. Die CI fährt sie in
+einer eigenen Invokation — beide Projekte haben ein Modul namens `physics`, und
+in einem gemeinsamen Lauf gewänne das erste.
+
+### Die drei Zusagen, die jetzt bewiesen sind statt behauptet
+
+1. Der Reshape wird **abgeleitet**, nicht geraten, und trifft die dokumentierte
+   Geometrie: Spannweite 0.198089 × 0.104441 m, `dx = 10.786 / 11.114 mm`.
+2. `dT/dx` an der Symmetrieebene ist **exakt `0.0`** — geprüft ohne Toleranz und
+   über Feldskalen von 1e-8 bis 1e8. Im Zähler steht `T₁ − T₁`.
+3. Die zentrale Differenz am y/z-Rand ist **exakt `0.0`**. `reflect`, nicht
+   `replicate`.
+
+### Ein Befund, der beim Bauen abgefallen ist
+
+**Der Stern ist nicht bilanztreu** (Route R6). Rollt man adiabat aus, driftet
+das Mittel um **3.6 % der Feldstreuung** und **sättigt** dann; das Feld läuft
+sauber gegen eine Konstante (`std` → 4e-5). Ursache sind zwei bewusste
+Entscheidungen: die nicht-konservative Form `Fo : ∇²T` und knotenzentriertes
+`reflect` ohne Halbzellgewichte.
+
+Dass die Drift sättigt, ist der Beleg, dass kein Rand *echte* Energie leckt. Sie
+gehört aber **neben** die Physik-Latte geschrieben, nicht darunter versteckt.
+
+## Was fehlt
+
+| | was | blockiert durch |
+|---|---|---|
+| **`model.py`** | der Conv-Stapel in Δ-Form: 44 → 16 → 16 → 16 → 3 Kanäle, 3×3-Kerne, ~11 400 Parameter | nichts — kann gebaut werden |
+| **`train.py`** | Trainingsschleife, Ein-Schritt zuerst (parallel zu `PINNmodulusTwo`) | `model.py` |
+| **Wandterm benutzbar** | `U(V̇)` kalibrieren | **Stufe 2**: `q_solid_to_fluid`, `mdot`, `cp_fluid`, `fluid_out_temp` fehlen im Bündel |
+| **Physik-Latte** | Stufe 3 mit echter Wand | Wandterm |
+| **`C_fluid`** | Wärmekapazität des Kühlmittels im Kanal, für den Kapazitätsmodus | liegt nicht vor — **nicht raten**, siehe R3 |
+
+⚠ **Der Löser läuft heute adiabat.** Der Wandterm ist gebaut und getestet, aber
+ohne die vier Cache-Größen nicht kalibrierbar. `solve.rollout` trägt das als
+Notiz mit und `SolveResult.summary()` schreibt „Wandterm AUS (adiabat)“ — das
+ist eine **Ablation, keine Latte**, und darf auch nicht als eine zitiert werden.
+
+## Die Architektur, wie sie gebaut wird
+
+```
+T_{t+1}  =  T_t  +  Δt · f( T_t , T_{t-Δ₁} , T_{t-Δ₂} , u_t , S )
+
+f  =  L(T_t)  +  Q_t  +  g_θ(X_t)
+      ^feste Physik    ^gelernte Korrektur, ~11 400 Parameter
+```
+
+| | |
+|---|---|
+| Eingang `X_t` | **44 Kanäle** à 11 × 11: 9 Zustand/Historie + 17 statische Karten + 18 gebroadcastete Treiber |
+| Ausgang | 3 × 11 × 11 — eine Änderungsrate je x-Ebene |
+| Gefaltet wird | über (y, z). x ist eine kurze echte Achse mit Geisterschichten |
+| Verlust | `L = w_data·L_data + w_phys·L_phys + w_wall·L_wall` — **kein `L_bc`** |
+
+**Die Größe ist eine Konsequenz der Messung.** Der Entwurf sah 64 Kanäle × 4
+Blöcke vor (~100 k Parameter). Bei vier gemessenen Moden und elf Trajektorien
+sind **16 × 3 ≈ 11 400** vorgesehen, mit 24 × 3 als Gegenprobe (Route R5).
+
+### Die Ablation steht als Erstes an
+
+Drei Konfigurationen, die sich in genau einer Sache unterscheiden:
+
+| | die Rate `f` | `w_phys` | misst |
+|---|---|---|---|
+| **A** | `g_θ(X_t)` | 0 | reine Blackbox — die Latte |
+| **B** | `L(T)+Q+g_θ(X_t)` | 0 | was die Physik **in der Architektur** bringt |
+| **C** | `L(T)+Q+g_θ(X_t)` | > 0 | was der Strafterm **obendrauf** bringt |
+
+A → B ändert die Architektur bei gleichem Verlust, B → C den Verlust bei
+gleicher Architektur. Jede Differenz ist damit einem einzigen Eingriff
+zuzuordnen.
+
+⚠ Die Seed-Streuung liegt bei 0.518 / 0.882 °C. Ein Unterschied unter ~1 °C ist
+mit drei Seeds **nicht lesbar** — jede Konfiguration braucht eine Seed-Schleife.
+
+## Die nächsten drei Schritte
+
+1. **`balance_check.py` ein zweites Mal** — Minuten, nur numpy. Klärt `Q_ht/tot`
+   und `U(V̇)` über drei Flusslevel.
+2. **Stufe 2, der Cache-Umbau** — danach ist der Wandterm kalibrierbar und die
+   Physik-Latte messbar.
+3. **`model.py` und `train.py`** — mit Konfiguration A als erstem Lauf, weil sie
+   die Latte für B und C ist.
