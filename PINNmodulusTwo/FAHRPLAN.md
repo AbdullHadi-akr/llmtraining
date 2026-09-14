@@ -631,7 +631,7 @@ Seeds → keine Rangfolge · **kein Befund aus der letzten Epoche** (neu 02.09.,
 | O6 | kein Gewicht auf Basis von Messungen gesetzt | ✅ **hinfällig 10.09.** — der Term, dessen Gewicht gesucht war, trägt nicht (§11.8) |
 | O7 | Energiebilanz ging um ~147x nicht auf | ✅ der 121er, behoben |
 | **O8** | **BDF-Stencil δ = 1.0 s gegen Δt_max 0.24 s** | **offen, aber zurückgestellt 10.09.** — δ speist nur `L_phys`, und `L_phys` bewegt die MAE nicht (§11.8) |
-| O9 | dämpft der Physik-Term nur, statt Dynamik zu lernen? | ✅ **widerlegt** — `spread` → 0.968 |
+| O9 | dämpft der Physik-Term nur, statt Dynamik zu lernen? | ✅ **widerlegt** — `spread` → 0.968. **10.09. Nachtrag:** er dämpft früh sehr wohl (Ep3: 1.73 gegen 7.96), nur holt der Datenterm das bis Ep60 allein ein. §11.8 |
 | **O10** | **OP14s 0 °C sind geplant — nicht „reparieren"** | **stehende Warnung** |
 | **O11** | **OP19 wird schlechter, je besser das Modell wird** | **dauerhafte Envelope-Grenze** (Datensatz ist fix) |
 | O12 | BC-Term trägt fast nichts (`ratio` 0.0178) | ✅ **widerlegt** — 0.0178 war eine Epoche, Median 0.0581 |
@@ -1191,6 +1191,7 @@ Wird beim Abhaken ausgefüllt. Leer = noch nicht gemessen.
 | 5b-1 | **val OP06** | **MAE 10.540 C — beats** (persistence 16.679, train-mean 10.801) | **01.09.** |
 | 5b-1 | **val OP09** | **MAE 7.494 C — beats** (persistence 18.549, train-mean 7.762) | **01.09.** |
 | 5b-2 | val OP06 / OP09 (ohne Physik) | **11.591 / 8.504 C — LOSES TO** auf beiden | **01.09.** |
+| 5b-2 | dieselbe Frage bei 60 Epochen | **überholt 10.09.**: ohne Physik **5.970 / 4.525 C**, mit Physik 7.137 / 5.044 C — der 5b-Vorsprung war Untertrainiertheit, §11.8 | **10.09.** |
 | 5b-1 | test OP13 / OP15 / OP16 | 8.686 / 7.239 / 4.204 C — alle drei **beats** | **01.09.** |
 | 5b-1 | OP19 (Messvergleich) | 5.507 C — **LOSES TO** (persistence 1.376), wie §9.4 vorhergesagt | **01.09.** |
 | 6 | `[ABORT]` | **kam nicht** | 01.09. |
@@ -1215,6 +1216,7 @@ Wird beim Abhaken ausgefüllt. Leer = noch nicht gemessen.
 | **A0** | **Seed-Streuung, erstmals** | **0.518 C** (Physik aus) / **0.882 C** (an) auf dem val-Mittel; auf OP06 allein bis **1.63 C**. Die Latte für jede künftige Achse | **10.09.** |
 | **A0** | **`late_bias_frac`** | **1.000 auf OP06 in allen sechs Läufen**, Median 0.980 über alle 102 (OP, Lauf)-Paare, 70 % über 0.9. Drittel `+2.9 → −2.6 → −9.3` C. **Der späte Fehler ist reiner Versatz, zu kalt** | **10.09.** |
 | **A0** | **`peak_pred` gegen `peak_true`** | Vorhersage landet in einem Band bei **45–50 C, unabhängig vom OP**: OP06 59.55 → 44.9…49.5, OP07 50.44 → 39.1…43.7, OP12 41.55 → 47.4…76.9. **Der Rollout hat einen Fixpunkt. O17** | **10.09.** |
+| **A0** | **`spread s/t`, beide Arme** | Ep3: **1.73/0.85 mit** gegen **7.96/3.97 ohne** Physik — der 5b-Effekt, echt. Median Ep31–60: **1.210/0.976 gegen 1.212/0.953** — auf drei Stellen gleich. **Der Physik-Term ist ein Stützrad** | **10.09.** |
 | **A0** | **train / val / test** | 2.864 / 5.248 / 4.155 C (Physik aus). **Unteranpassung**, und `L_data` steht Ep31–60 flach — 60 Epochen sind auskonvergiert | **10.09.** |
 | **A0** | **Wanduhr `-j 6` mit MPS** | **9 016.8 s = 2 h 30 min** für sechs 60-Epochen-Läufe auf elf OPs, 6/6 `[ok]`. Summe/Wanduhr 5.46× ist die **Obergrenze**; geschätzt echt **~4.0×**, also ~67 % Effizienz gegen 92 % bei `-j 4`. **Künftig `-j 4`** | **10.09.** |
 
@@ -1401,10 +1403,19 @@ verschwendete Zeit. → `05_latte.txt` schicken, ich sage dir den Wert für
 > 1. **`[SATURATED]` verschwindet.** Ep1 OP05 99.9 %, Ep2 OP04 88 %, Ep3 keine
 >    Zeile. Der weglaufende Rollout aus §9.3 war dt, genau wie vermutet. Nach der
 >    Entscheidungstabelle unten heißt das: **Schritt 6 starten.**
-> 2. **Der Physik-Term trägt.** Ohne ihn verlieren beide val-OPs gegen die
+> 2. ~~**Der Physik-Term trägt.**~~ Ohne ihn verlieren beide val-OPs gegen die
 >    trivialen Vorhersager, mit ihm schlagen sie beide. Das ist das erste Mal
 >    überhaupt, und es ist erst seit dem 121er-Fix messbar — vorher waren beide
 >    Läufe praktisch quellenfrei (§11.1).
+>
+>    > **10.09. überholt — bei 60 Epochen nicht reproduzierbar.** Achse 0 (3
+>    > Seeds, 60 Epochen) findet ohne Physik **5.97 / 4.53 C** gegen 7.14 / 5.04
+>    > mit. Der Effekt hier ist echt, aber er ist **Untertrainiertheit**: in
+>    > Epoche 3 steht der `spread` ohne Physik bei 7.96 / 3.97 und mit bei
+>    > 1.73 / 0.85 — nach 60 Epochen sind **beide** bei 1.21 / 0.95. Der
+>    > Physik-Term tut früh, was der Datenterm von selbst tut, wenn man ihn
+>    > lässt. **§11.8.** Damit ist auch die zweite Aussage dieses Laufs gefallen;
+>    > die erste (`spread` kollabiert) hat Schritt 6 widerlegt (§11.3).
 >
 > **Was diese Zahlen NICHT hergeben** (§10, unverändert gültig): ein Seed. Die
 > MAE-Differenz 10.54 gegen 11.59 ist ohne Seed-Streuung daneben nicht lesbar,
@@ -2264,6 +2275,66 @@ beide melden sich in jedem einzelnen Lauf:
 > Physik-Term" überhaupt eine beantwortbare Frage ist. Dasselbe für O16. Erst
 > danach hätte ein `w_phys`-Sweep einen Sinn — und dann gegen die
 > Nullmessung, die jetzt existiert.
+
+#### Warum 5b das Gegenteil gesehen hat — und beide Messungen stimmen
+
+Die berechtigte Rückfrage: **es gab doch einen Test, der zeigte, dass Physik
+trägt?** Ja, genau einen — Schritt 5b, 01.09.:
+
+| | 5b-1 (mit Physik) | 5b-2 (`--w-phys 0 --w-bc 0`) |
+|---|---|---|
+| val OP06 | **10.540 C — beats** | 11.591 C — LOSES TO |
+| val OP09 | **7.494 C — beats** | 8.504 C — LOSES TO |
+| `spread s/t` in Ep3 | 0.339 / 0.201 | 2.15 / 1.03 |
+
+**Drei Epochen, ein Seed.** Der Kasten dort nannte seine eigenen Grenzen schon
+(„ein Seed … für eine Rangfolge reicht das nicht"), aber die Überschrift blieb
+stehen.
+
+**Achse 0 widerlegt 5b nicht — sie misst einen anderen Zeitpunkt.** Die
+`spread`-Spalte sagt genau, was passiert ist. Aus den sechs Läufen, derselbe
+Wert, einmal früh und einmal spät:
+
+| | `spread_space / spread_time` mit Physik | ohne Physik |
+|---|---|---|
+| **Epoche 3** | 1.73 / 0.85 | **7.96 / 3.97** |
+| **Median Ep 31–60** | 1.210 / 0.976 | **1.212 / 0.953** |
+
+Früh ist der Unterschied gewaltig: ohne Physik läuft der Rollout mit der
+achtfachen Streuung der Labels davon, mit Physik ist er schon fast beisammen.
+**Das ist der Effekt, den 5b gemessen hat, und er ist echt.**
+
+Nach sechzig Epochen sind beide Arme bei **1.21 / 0.95** — auf drei Stellen
+gleich. Der Datenterm allein kommt dort an, er braucht nur länger.
+
+> **Der Physik-Term ist ein Stützrad.** Er tut in Epoche 3, was der Datenterm
+> bis Epoche 60 von selbst tut. 5b hat das Stützrad gemessen, Achse 0 das
+> Fahrrad. Beide Messungen sind richtig; nur die Verallgemeinerung von 5b auf
+> „der Term trägt" war es nicht.
+
+Und das ist exakt dieselbe Falle wie bei O9: derselbe 5b-Lauf sagte auch, der
+`spread` kollabiere — Schritt 6 hat gezeigt, dass er über 60 Epochen auf 0.968
+läuft (§11.3). **Zwei Aussagen aus einem Drei-Epochen-Lauf, beide aus
+Untertrainiertheit, beide inzwischen gefallen.** Die Regel dahinter steht in §10
+und hat sich zum zweiten Mal bewährt: *drei Epochen sind kein Trend, ein Seed
+ist keine Streuung.*
+
+#### Ist die Arbeit am Physik-Term damit verloren?
+
+Nein, und das ist keine Höflichkeit:
+
+* **Der 121er-Einheitenfehler (O7) ist über den Physik-Pfad gefunden worden.**
+  `Qsrc` war um Faktor 121 zu klein; die Energiebilanz ging um ~147× nicht auf.
+  Das war ein echter Datenfehler, und er betraf alles, nicht nur `L_phys`.
+* **O16 — die fehlende Wand-Randbedingung — ist beim Physik-Review aufgefallen**
+  und ist eine Aussage über das Modell, nicht über den Loss-Term.
+* **5b hat Schritt 6 freigegeben.** Ohne diese Messung wäre der 60-Epochen-Lauf
+  nie gestartet worden.
+* **Widerlegt ist eine Formulierung, nicht das Prinzip.** δ ist um Faktor 4.1
+  zu groß (O8) und es gibt keine Senke (O16). Ein Residuum, das die
+  Trainingsdaten selbst verletzen, kann nicht helfen. Ob ein *korrektes*
+  Residuum hilft, ist damit nicht beantwortet — nur nicht mehr die nächste
+  Frage, weil der Fehler nachweislich woanders sitzt (O17).
 
 #### Was Achse 0 **nicht** sagt
 
