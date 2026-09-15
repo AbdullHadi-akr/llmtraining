@@ -76,6 +76,13 @@ python3 GridCNN/tools/balance_check.py 2>&1 | tee 10_bilanz.txt
 | **5** | truncated BPTT | Tage | fällt der Spätfehler (O13)? |
 | **6** | Vergleich gegen PINNmodulusTwo | 1 Lauf | derselbe Split, dieselben Metriken |
 
+> **Der Unterbau für Stufe 3 liegt schon im Repo.** `grid.py`, `physics.py` und
+> `solve.py` sind gebaut und geprüft (45 Tests, CI grün) — sie entstanden für
+> den CNN, tragen das Galerkin-System aber genauso, weil `Φᵀ L Φ` aus genau
+> diesem `L` gebaut wird. Was im Repo steht und was fehlt, steht unten unter
+> „Der Code — Stand 14.09."; das Protokoll der Läufe in
+> [`BENCHMARK.md`](BENCHMARK.md).
+
 ---
 
 # Stufe 1 — Geht die Bilanz auf? 🟡
@@ -348,12 +355,16 @@ klein, dass die CPU reicht.
 | 02.09. | Gitter verifiziert: 3 × 11 × 11, äquidistant, über alle OPs identisch, Randring **auf** der Flächenkante |
 | 02.09. | Randbedingungen geklärt; Quellenseite als Halbmodell bestätigt (`V_JR1 = 4.394793e-04 m³`) |
 | 02.09. | `A = 0.0206 m²`, Koeffizient als `U` (Gesamtdurchgang) etikettiert |
-| 02.09. | `L_phys` bleibt — ein Seed ist keine Streuung |
+| 02.09. | `tools/spatial_rank.py` und `tools/balance_check.py` gebaut und getestet |
+| 02.09. | `L_phys` bleibt — ein Seed ist keine Streuung (README §12.1) |
+| 02.09. | F4–F8 entschieden (README §12.3) |
 | 02.09. | Kritik am Versuchsplan: [`README_OPS.md`](README_OPS.md). Schwerster Befund: `T0 = T_fluid` in 11 von 11 |
 | 02.09. | O16 im PINN-Fahrplan eingetragen; PR #31 gemergt |
 | **09.09.** | **Stufe 0 gelaufen — ROT.** 4 Moden bei 99.9 %. Der CNN ist abgesagt, das ROM ist der Plan |
 | **09.09.** | **Stufe 1, erster Lauf.** `jr2/jr1 = 1`, `U`-Verhältnis 1130 : 50 plausibel. Mein ṁ = 0-Torkriterium war falsch und ist gestrichen |
 | **09.09.** | Werkzeug korrigiert: drei Flusslevel statt einem, `T_in`-Rückfallkette, `Q_ht/tot` |
+| **14.09.** | **Der Gitter-Unterbau steht.** `grid.py`, `physics.py`, `solve.py`, `benchmark.py`, 45 Tests, CI grün |
+| **14.09.** | Stencil-Ordnungen gemessen, beide Randzusagen **exakt** null, Route R6 beziffert |
 
 ## Stand
 
@@ -370,9 +381,195 @@ klein, dass die CPU reicht.
 | 1 | `U` mit Fluss / ohne | **~1130 / ~50 W/m²K**, Faktor ~23 — vorläufig, Faktor 2 aus 1a offen | 09.09. |
 | 1 | `U(V̇)` auf einer Kurve? | *offen* — erster Lauf hatte nur zwei Level | |
 | 2 | Reports unverändert | | |
+| — | Reshape aus Koordinaten ableitbar und umkehrbar | **ja**, 0.198089 × 0.104441 m | 14.09. |
+| — | `dT/dx` an der Symmetrieebene | **exakt `0.0`**, ohne Toleranz | 14.09. |
+| — | zentrale Differenz am y/z-Rand | **exakt `0.0`** | 14.09. |
+| — | Stencil-Ordnung d²/dy², d²/dz² | **1.98 / 1.98** | 14.09. |
+| — | Stencil-Ordnung d²/dx² (gestreckt) | **1.28** — richtig für den nicht-äquidistanten Dreipunktstern | 14.09. |
+| — | Bilanztreue des Sterns | **3.6 % Drift, sättigt** (R6) | 14.09. |
 | 3 | Galerkin-Löser stabil | | |
 | 3 | Physik-Latte, val OP06 / OP09 | | |
 | 3b | **Projektionsrest je ausgehaltenem OP** | | |
 | 4 | ROM schlägt Physik-Latte | | |
 | 5 | `late_mae` gefallen | | |
 | 6 | val / test gegen PINNmodulusTwo | | |
+
+---
+
+# Der Code — Stand 14.09.
+
+> Dieser Abschnitt beschreibt, **was im Repo liegt**. Der Plan oben sagt, was
+> gemessen werden soll; hier steht, womit. Das fortlaufende Protokoll der
+> Läufe steht in [`BENCHMARK.md`](BENCHMARK.md), zusammen mit den offenen
+> Routen R1–R6.
+
+> ### ⚠ Gebaut wurde er als Unterbau für den CNN — er trägt das ROM genauso
+>
+> Der Code stammt aus PR #37 und ist **vor** der Einarbeitung von Tor 0
+> entstanden. Die Frage liegt also nahe, ob er mit der Absage des
+> Faltungsstapels hinfällig ist. **Er ist es nicht, und zwar aus einem
+> konkreten Grund:** das Galerkin-System aus Stufe 3 ist
+>
+> ```
+> ȧ = (Φᵀ L Φ) · a  +  Φᵀ (Quelle + Wandfluss)
+> ```
+>
+> und `L` **ist** `physics.anisotropic_laplacian`. Der Stern, das Padding, der
+> Kreuzterm und der Wandterm werden nicht ersetzt — sie werden **projiziert**.
+> Was der CNN als Faltung über (y, z) gebraucht hätte, braucht das ROM als
+> Matrix, die einmal aus demselben Operator entsteht.
+>
+> **Hinfällig ist genau eine Datei, und die gibt es noch nicht:** `model.py`
+> als Faltungsstapel. Was daran im Fahrplan stand, ist unten korrigiert.
+
+## Was steht
+
+| Datei | was sie tut | geprüft durch |
+|---|---|---|
+| [`grid.py`](grid.py) | Reshape 363 → (3,11,11), **aus den Koordinaten abgeleitet**, plus die drei Paddings | `tests/test_grid.py`, 12 Tests |
+| [`physics.py`](physics.py) | nicht-äquidistanter x-Stern, Kreuzterm `λ_xy`, Quelle, Wandterm, `U(V̇)` | `tests/test_physics.py`, 19 Tests |
+| [`solve.py`](solve.py) | explizites Euler, entdimensioniert wie `data.py` | `tests/test_solve.py`, 14 Tests |
+| [`benchmark.py`](benchmark.py) | Stufenläufer, schreibt ins lebende Dokument | CI, Stufe 0 und 2 |
+| [`BENCHMARK.md`](BENCHMARK.md) | das Protokoll und die offenen Routen | von Hand |
+
+45 Tests, Sekunden, **ohne Modulus und ohne `data_cache`**. Die CI fährt sie in
+einer eigenen Invokation — beide Projekte haben ein Modul namens `physics`, und
+in einem gemeinsamen Lauf gewänne das erste.
+
+### Die drei Zusagen, die jetzt bewiesen sind statt behauptet
+
+1. Der Reshape wird **abgeleitet**, nicht geraten, und trifft die dokumentierte
+   Geometrie: Spannweite 0.198089 × 0.104441 m, `dx = 10.786 / 11.114 mm`.
+2. `dT/dx` an der Symmetrieebene ist **exakt `0.0`** — geprüft ohne Toleranz und
+   über Feldskalen von 1e-8 bis 1e8. Im Zähler steht `T₁ − T₁`.
+3. Die zentrale Differenz am y/z-Rand ist **exakt `0.0`**. `reflect`, nicht
+   `replicate`.
+
+> Zusage 2 wird im ROM **anders erreicht, nicht aufgegeben**: die POD-Basis
+> erfüllt die Symmetrie exakt, weil `dT/dx = 0` homogen linear ist und jeder
+> Schnappschuss sie erfüllt (Stufe 3). Das Padding bleibt trotzdem geprüft —
+> der Löser aus Stufe 3 baut `Φᵀ L Φ` damit auf.
+
+### Ein Befund, der beim Bauen abgefallen ist
+
+**Der Stern ist nicht bilanztreu** (Route R6). Rollt man adiabat aus, driftet
+das Mittel um **3.6 % der Feldstreuung** und **sättigt** dann; das Feld läuft
+sauber gegen eine Konstante (`std` → 4e-5). Ursache sind zwei bewusste
+Entscheidungen: die nicht-konservative Form `Fo : ∇²T` und knotenzentriertes
+`reflect` ohne Halbzellgewichte.
+
+Dass die Drift sättigt, ist der Beleg, dass kein Rand *echte* Energie leckt. Sie
+gehört aber **neben** die Physik-Latte geschrieben, nicht darunter versteckt.
+
+⚠ **Und sie überlebt die Projektion.** `Φᵀ L Φ` erbt die Eigenschaften von `L`,
+also trägt das Galerkin-System denselben Bias. R6 wird durch den Umbau auf das
+ROM also **nicht** erledigt — er wird nur billiger zu messen.
+
+## Was fehlt
+
+| | was | blockiert durch |
+|---|---|---|
+| **`rom.py`** | POD-Basis `Φ` aus den Trainings-OPs, `Φᵀ L Φ` einmal aufgebaut, Projektion und Rekonstruktion | nichts — kann gebaut werden |
+| **Stufe 3b** | Projektionsrest je ausgehaltenem OP — die harte Obergrenze **vor** dem Training | `rom.py` |
+| **`model.py`** | `g` auf den Modalkoeffizienten: MLP, 2–3 Schichten × 32–64, **~5 k Parameter** | `rom.py` |
+| **`train.py`** | Trainingsschleife, Ein-Schritt zuerst (parallel zu `PINNmodulusTwo`) — **kein Teacher Forcing**, siehe Kasten | `model.py` |
+| **Wandterm benutzbar** | `U(V̇)` kalibrieren | **Stufe 2**: `q_solid_to_fluid`, `mdot`, `cp_fluid`, `fluid_out_temp` fehlen im Bündel |
+| **Physik-Latte** | Stufe 3 mit echter Wand | Wandterm |
+| **`C_fluid`** | Wärmekapazität des Kühlmittels im Kanal, für den Kapazitätsmodus | liegt nicht vor — **nicht raten**, siehe R3 |
+
+⚠ **Kein Teacher Forcing — und das wird oft falsch erzählt.**
+`train.py:911` rollt **einmal je Epoche je OP** die *eigene* Trajektorie unter
+`torch.no_grad()` aus, gesät nur von der gemessenen Anfangsbedingung, und friert
+sie ein. Erst darauf laufen `inner_steps` Ein-Schritt-Updates gegen die Labels.
+Der Kommentar dort sagt es wörtlich: *„No teacher forcing: this is the
+free-running rollout"*, und `evaluate()` wiederholt es.
+
+Der Unterschied zwischen Training und Auswertung ist also **nicht** der
+Eingangszustand — beide rollen frei. Er ist:
+
+| | Training | Auswertung |
+|---|---|---|
+| Trajektorie | eingefroren, je Epoche erneuert | live |
+| Labels | ja, als Ziel | nein |
+| Gradient | nur **ein** Schritt (Historie detached) | keiner |
+
+**Daraus folgt der ganze Hebel von Stufe 5.** Weil der Gradient die Historie nie
+überquert, kann er den Spätfehler (O13) strukturell nicht erreichen — egal wie
+lange man trainiert. Truncated BPTT ist die einzige Änderung, die daran etwas
+ändert. Wer `train.py` baut, darf diese Eigenschaft nicht versehentlich
+wegoptimieren. **Das gilt für das ROM unverändert** — es ist eine Eigenschaft
+der Trainingsschleife, nicht der Architektur.
+
+⚠ **Der Löser läuft heute adiabat.** Der Wandterm ist gebaut und getestet, aber
+ohne die vier Cache-Größen nicht kalibrierbar. `solve.rollout` trägt das als
+Notiz mit und `SolveResult.summary()` schreibt „Wandterm AUS (adiabat)" — das
+ist eine **Ablation, keine Latte**, und darf auch nicht als eine zitiert werden.
+
+## Die Architektur, wie sie gebaut wird
+
+**Korrigiert am 15.09.** Der Kasten unten stand in PR #37 noch als
+Faltungsstapel über 44 Kanäle. Tor 0 hat ihn abgesagt; hier steht, was an seine
+Stelle tritt.
+
+```
+Zustand:   [m(t), a(t)]                    r+1 = 5 … 7 Zahlen statt 363
+Schritt:   [m,a]_{t+1} = [m,a]_t + Δt · f( m, a, Historie, Treiber, q_wall )
+
+f  =  (Φᵀ L Φ)·a + Φᵀ(Q + q_wall)  +  g_θ(m, a, u_t)
+      ^feste Physik, eine r×r-Matrix    ^gelernte Korrektur, ~5 k Parameter
+```
+
+| | |
+|---|---|
+| Eingang | `m`, `a` (5–7 Zahlen), die Historie derselben, **18 Treiber** — keine Karten, keine Kanäle |
+| Ausgang | `r+1` Änderungsraten |
+| Rekonstruktion | `T = m·1 + Φ·a`, eine Matrixmultiplikation |
+| Verlust | `L = w_data·L_data + w_phys·L_phys + w_wall·L_wall` — **kein `L_bc`** |
+
+Die 17 statischen Karten fallen weg: sie waren dafür da, dem Faltungskern die
+Translationsäquivarianz zu brechen. Eine Basis, die aus genau diesen Daten
+gewonnen wurde, trägt die Ortsinformation schon in `Φ`.
+
+**Die Größe ist eine Konsequenz der Messung.** Der Entwurf sah 64 Kanäle × 4
+Blöcke vor (~100 k Parameter), PR #37 hatte auf 16 × 3 ≈ 11 400 verkleinert.
+Bei vier gemessenen Moden und elf Trajektorien sind **~5 k** vorgesehen — und
+das ist der Punkt, an dem das Verhältnis Parameter zu unabhängigen Beispielen
+erstmals vernünftig aussieht (README §11.4).
+
+> **Der Wandterm bleibt exakt.** `T₂` ist eine **lineare Funktion** von `[m, a]`
+> — die Zeilen von `Φ` auf der Gehäusewand-Ebene. `q_wall` ist damit im
+> Modalraum berechenbar, ohne das Feld zu rekonstruieren.
+
+### Die Ablation steht als Erstes an
+
+Drei Konfigurationen, die sich in genau einer Sache unterscheiden. **Sie gilt
+für das ROM unverändert** — sie trennt Architektur von Verlust, und das ist von
+der Wahl zwischen Faltung und Basis unabhängig:
+
+| | die Rate `f` | `w_phys` | misst |
+|---|---|---|---|
+| **A** | `g_θ` allein | 0 | reine Blackbox auf den Moden — die Latte |
+| **B** | Galerkin + `g_θ` | 0 | was die Physik **in der Architektur** bringt |
+| **C** | Galerkin + `g_θ` | > 0 | was der Strafterm **obendrauf** bringt |
+
+A → B ändert die Architektur bei gleichem Verlust, B → C den Verlust bei
+gleicher Architektur. Jede Differenz ist damit einem einzigen Eingriff
+zuzuordnen.
+
+⚠ Die Seed-Streuung liegt bei 0.518 / 0.882 °C. Ein Unterschied unter ~1 °C ist
+mit drei Seeds **nicht lesbar** — jede Konfiguration braucht eine Seed-Schleife.
+
+## Die nächsten drei Schritte
+
+1. **`balance_check.py` ein zweites Mal** — Minuten, nur numpy. Klärt `Q_ht/tot`
+   und `U(V̇)` über drei Flusslevel.
+2. **Stufe 2, der Cache-Umbau** — danach ist der Wandterm kalibrierbar und die
+   Physik-Latte messbar.
+3. **`rom.py` und Stufe 3b** — die Basis bauen und den Projektionsrest auf den
+   ausgehaltenen OPs messen. Das ist die billigste Messung im ganzen Plan und
+   die einzige, die eine Obergrenze **vor** dem Training nennt: liegt der Rest
+   auf OP06 bei 2 %, kommt kein `g` darunter.
+
+> Schritt 1 und 2 brauchen die Rechenmaschine mit `data_raw/` und `data_cache/`.
+> Schritt 3 braucht nur den Cache — aber nicht die vier neuen Größen, also kann
+> er **parallel** zu Schritt 2 laufen.

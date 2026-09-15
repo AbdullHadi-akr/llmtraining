@@ -12,10 +12,20 @@
 > §7, die Argumente für die Faltung und ihr Flussdiagramm. Sie bleiben als
 > Beleg stehen, wie die Entscheidung zustande kam.
 >
+> Und §11.1 hat genau das vorhergesagt: *die meisten Gewinne dieses Entwurfs
+> sind Gitter-Gewinne, nicht CNN-Gewinne.* Die Gitter-Gewinne sind eingetreten
+> und stecken heute in `grid.py` und `physics.py`; nur die zwei echten
+> Faltungs-Argumente sind mit dem Tor gefallen.
+>
 > Der neue Plan steht in [`FAHRPLAN.md`](FAHRPLAN.md). Der Ordner heißt weiter
 > `GridCNN`, damit die Verweise aus PR #31 halten.
 >
-> **Status: Entwurf, kein Modellcode. Zwei Werkzeuge gelaufen.**
+> **Status (15.09.): der Gitter-Unterbau steht, das Modell fehlt.**
+> `grid.py`, `physics.py`, `solve.py` und `benchmark.py` liegen im Repo — 45
+> Tests, CI grün. Sie sind für den CNN entstanden und tragen das ROM genauso:
+> das Galerkin-System `Φᵀ L Φ` wird aus genau diesem `L` gebaut, der Stern wird
+> also **projiziert, nicht ersetzt**. Was fehlt, ist `rom.py`, `model.py` und
+> `train.py`. Protokoll der Läufe: [`BENCHMARK.md`](BENCHMARK.md).
 >
 > **02.09. — alle Geometrie- und Wärmestromfragen sind beantwortet.** Damit
 > stehen die Randbedingungen, das x-Layout (§5), der Wandterm mit `A = 0.0206 m²`

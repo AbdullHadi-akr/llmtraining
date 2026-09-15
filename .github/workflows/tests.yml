@@ -37,6 +37,21 @@ jobs:
       - name: pytest
         run: python -m pytest PINNmodulusTwo/tests -q
 
+      - name: pytest (GridCNN)
+        # SEPARATE Invokation, nicht an den Pfad oben angehaengt: beide Projekte
+        # haben ein Modul namens `physics`, und beide conftest.py schieben ihr
+        # eigenes Verzeichnis auf sys.path. In einem Lauf gewinnt das erste, und
+        # die Tests des zweiten pruefen dann stillschweigend den falschen Code.
+        run: python -m pytest GridCNN/tests -q
+
+      - name: GridCNN Benchmark, Stufe 0 und 2
+        # Die beiden Stufen, die ohne data_cache laufen. Sie pruefen die
+        # strukturellen Zusagen (Symmetrie exakt null, Stencil-Ordnung) und
+        # kosten Sekunden. --dry-run, weil ein CI-Lauf nichts ins lebende
+        # Dokument schreiben soll -- dort gehoeren nur Laeufe hinein, hinter
+        # denen jemand steht.
+        run: python GridCNN/benchmark.py --stage 0 2 --dry-run
+
       - name: selftest (loss balancing and residual scaling)
         # Pure arithmetic on the scaling machinery; the properties it checks are
         # invisible in a training log and the next chance to notice would be a

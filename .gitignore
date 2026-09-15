@@ -29,6 +29,15 @@
 # Keep the CI workflow tracked (the allowlist above is .py/.md only)
 !.github/workflows/*.yml
 
+# Keep the living benchmark tracked. Same reasoning as FAHRPLAN.md above: it is
+# an entry point, deliberately NOT called README_*, so the allowlist does not
+# catch it. The .jsonl next to it is the machine-readable trend of every run --
+# it is small, append-only, and worthless outside the repo, so it goes in too.
+!BENCHMARK.md
+!**/BENCHMARK.md
+!benchmark_runs.jsonl
+!**/benchmark_runs.jsonl
+
 # Keep the PINNmodulusTwo server setup files tracked (config + deps)
 !PINNmodulusTwo/config.yaml
 !PINNmodulusTwo/requirements-gpu.txt
