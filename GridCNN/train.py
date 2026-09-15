@@ -57,6 +57,42 @@ Term addiert.
 lauffaehig: er braucht ``q_solid_to_fluid`` im Buendel, und das kommt erst mit
 Stufe 2. Bis dahin laeuft er als NaN mit, nicht als 0.0 -- damit eine
 Konvergenzkurve eine Luecke zeigt statt einer flachen Linie, die es nie gab.
+
+Die T4, und was auf ihr wirklich hilft
+---------------------------------------
+Gerechnet wird auf einer **Tesla T4** (g4dn, sm_75, 15.6 GiB). Der GPU-Server-
+README von ``PINNmodulusTwo`` hat den Engpass dort gemessen, und er trifft
+GridCNN staerker als das MLP::
+
+    ~7000 sequentielle Rollout-Schritte je OP und Epoche, jeder ein winziger
+    Kernel: ~5 us Startlatenz gegen ~1.5 us Rechenzeit. Die GPU wartet auf
+    Python.
+
+Ein Faltungsschritt auf 11 x 11 mit 16 Kanaelen ist fuer eine T4 **nichts**.
+Die Laufzeit ist reine Startlatenz mal Schrittzahl. Daraus folgt genau ein
+Hebel, und er steht in ``stack_ops`` / ``rollout``:
+
+> **Alle OPs werden in EINEM Rollout gerollt**, nicht elf nacheinander.
+> Dieselbe Zahl sequentieller Schritte, aber elffach Arbeit je Kernelstart --
+> also fast dieselbe Zeit fuer elfmal so viel. Das ist die eine Optimierung,
+> die hier etwas bringt.
+
+⚠ **Und sie ist gratis, weil sie unter ``no_grad`` passiert.** Die *innere*
+Schleife bleibt bewusst **je OP** getrennt: einen groesseren Batch dort zu
+nehmen macht den Gradienten leiser, und das waere eine Aenderung am Optimierer,
+nicht an der Geschwindigkeit. Der GPU-README von ``PINNmodulusTwo`` warnt
+genau davor. Geschwindigkeit ja, Experiment anfassen nein.
+
+**Was ausdruecklich NICHT hilft, damit es niemand versucht:**
+
+* **TF32.** Ist Ampere und neuer (sm_80+). Die T4 ist **Turing, sm_75** --
+  ``torch.backends.cuda.matmul.allow_tf32`` ist dort wirkungslos. Der Schalter
+  in ``device_utils.enable_tf32`` existiert fuer andere Karten.
+* **Ein breiteres Netz, um die Karte zu fuellen.** Der Speicher ist nicht die
+  Grenze: gemessen wurden 0.11 GB von 15.6 GB. Die Karte ist nicht voll, weil
+  das Problem klein ist, und ein groesseres Netz waere eine Architektur-
+  entscheidung mit einer Ausrede.
+* **``channels_last``.** Bei 11 x 11 ist die Speicheranordnung bedeutungslos.
 """
 
 from __future__ import annotations
@@ -147,17 +183,84 @@ def history_at(traj: torch.Tensor, idx: torch.Tensor, lag1: int, lag2: int
 
 
 # ---------------------------------------------------------------------------
+# Mehrere OPs als eine Batch-Achse -- der T4-Hebel
+# ---------------------------------------------------------------------------
+@dataclass
+class OPBatch:
+    """Alle Betriebspunkte gestapelt, damit **ein** Rollout sie alle rollt.
+
+    Der Grund steht im Modulkopf: der Rollout ist startlatenz-gebunden, nicht
+    rechengebunden. Elf OPs nacheinander zu rollen kostet elfmal die Latenz;
+    sie zusammen zu rollen kostet sie **einmal**, bei elffacher Arbeit je
+    Kernel -- und die ist auf einer T4 bei 11 x 11 nicht messbar.
+
+    Die OPs haben verschieden viele Zeitschritte. Gerollt wird bis ``n_max``,
+    und die Treiber der kuerzeren werden dafuer mit ihrer letzten Zeile
+    aufgefuellt. **Gelesen wird ueber das Ende hinaus nie**: jeder OP traegt
+    sein eigenes ``n_t`` und sein eigenes ``split_t``, und die innere Schleife
+    zieht ihre Zeitindizes daraus.
+    """
+
+    ops: list
+    tn_ic: torch.Tensor      # (B, nx, ny, nz)
+    config: torch.Tensor     # (B, n_max, 7)
+    forcing: torch.Tensor    # (B, n_max, 11)
+    qsrc: torch.Tensor       # (B, n_max, nx, ny, nz)
+    fo: torch.Tensor         # (nx, ny, nz, 3, 3) -- ueber alle OPs identisch
+    dtn: float
+    n_max: int
+
+    def __len__(self) -> int:
+        return len(self.ops)
+
+
+def _pad_to(a: torch.Tensor, n: int) -> torch.Tensor:
+    """Auf ``n`` Zeitschritte auffuellen, indem die letzte Zeile wiederholt wird.
+
+    Wiederholen und nicht mit Nullen fuellen: eine Null waere im z-Score eine
+    Temperatur von ``T_mu`` und ein Treiberwert, den es nie gab. Gelesen wird
+    der aufgefuellte Bereich ohnehin nicht -- aber falsch aufzufuellen ist die
+    Sorte Fehler, die erst auffaellt, wenn sie einmal doch gelesen wird.
+    """
+    if a.shape[0] >= n:
+        return a[:n]
+    letzte = a[-1:].expand(n - a.shape[0], *a.shape[1:])
+    return torch.cat([a, letzte], dim=0)
+
+
+def stack_ops(ops: list) -> OPBatch:
+    """Baut die Batch-Achse. Einmal je Lauf, nicht je Epoche."""
+    if not ops:
+        raise ValueError("leere OP-Liste")
+    n_max = max(o.n_t for o in ops)
+    dtn = {o.dtn for o in ops}
+    if len(dtn) != 1:
+        raise ValueError(
+            f"Die OPs haben verschiedene Zeitschritte {sorted(dtn)}. Ein "
+            f"gemeinsamer Rollout setzt dasselbe dt voraus -- sonst rollen sie "
+            f"verschieden weit und der Vergleich waere keiner.")
+    return OPBatch(
+        ops=list(ops),
+        tn_ic=torch.stack([o.tn_ic for o in ops]),
+        config=torch.stack([_pad_to(o.config, n_max) for o in ops]),
+        forcing=torch.stack([_pad_to(o.forcing, n_max) for o in ops]),
+        qsrc=torch.stack([_pad_to(o.qsrc, n_max) for o in ops]),
+        fo=ops[0].fo, dtn=ops[0].dtn, n_max=n_max)
+
+
+# ---------------------------------------------------------------------------
 # Der freie Rollout
 # ---------------------------------------------------------------------------
 @torch.no_grad()
-def rollout(net: M.GridCNN, op: OPTensors, statics: M.StaticMaps, *,
-            lag1: int, lag2: int, n_steps: int | None = None,
-            clamp: float = 0.0,
-            wall: phys.WallModel | None = None) -> tuple[torch.Tensor, int]:
-    """Frei laufend, gesaet nur von der gemessenen Anfangsbedingung.
+def rollout_batched(net: M.GridCNN, batch: OPBatch, statics: M.StaticMaps, *,
+                    lag1: int, lag2: int, clamp: float = 0.0,
+                    wall: phys.WallModel | None = None
+                    ) -> tuple[torch.Tensor, int]:
+    """Frei laufend, gesaet nur von den gemessenen Anfangsbedingungen.
 
     Zurueck kommt ``(traj, n_saturated)`` mit ``traj`` der Form
-    ``(n_steps+1, nx, ny, nz)``.
+    ``(n_max+1, B, nx, ny, nz)`` -- Zeit vorn, damit ``history_at`` unveraendert
+    darauf arbeitet.
 
     ``clamp`` haelt einen weglaufenden Rollout fest, damit der Verlust endlich
     bleibt. **Das Festhalten wird gezaehlt und gemeldet**: Stille saehe hier
@@ -165,30 +268,46 @@ def rollout(net: M.GridCNN, op: OPTensors, statics: M.StaticMaps, *,
     Schleife anbieten kann. Der ``[SATURATED]``-Zaehler aus ``PINNmodulusTwo``
     wird genau deshalb mitgenommen.
     """
-    n = op.n_t - 1 if n_steps is None else n_steps
-    traj = torch.empty((n + 1, *op.tn_ic.shape), dtype=op.tn_ic.dtype,
-                       device=op.tn_ic.device)
-    traj[0] = op.tn_ic
-    ny, nz = op.tn_ic.shape[1:]
+    n, b = batch.n_max - 1, len(batch)
+    traj = torch.empty((n + 1, b, *batch.tn_ic.shape[1:]),
+                       dtype=batch.tn_ic.dtype, device=batch.tn_ic.device)
+    traj[0] = batch.tn_ic
+    ny, nz = batch.tn_ic.shape[2:]
     saturated = 0
 
     for k in range(n):
-        idx = torch.tensor([k], device=traj.device)
-        t0, t1, t2 = history_at(traj[:k + 1], idx.clamp(max=k), lag1, lag2)
+        t0 = traj[k]
+        t1 = traj[max(k - lag1, 0)]
+        t2 = traj[max(k - lag2, 0)]
         x = M.assemble_input(
             M.state_channels(t0, t1, t2), statics,
-            M.driver_channels(op.config[k:k + 1], op.forcing[k:k + 1], ny, nz))
+            M.driver_channels(batch.config[:, k], batch.forcing[:, k], ny, nz))
         ghost = (M.adiabatic_ghost(t0) if wall is None
-                 else _wall_ghost(t0, wall, op, k))
-        nxt = net.step(t0, x, dt_n=op.dtn, fo_field=op.fo,
-                       qsrc=op.qsrc[k:k + 1], ghost_hi=ghost)[0]
+                 else _wall_ghost(t0, wall, batch, k))
+        nxt = net.step(t0, x, dt_n=batch.dtn, fo_field=batch.fo,
+                       qsrc=batch.qsrc[:, k], ghost_hi=ghost)
         if clamp > 0.0:
-            over = int((nxt.abs() >= clamp).sum())
-            if over:
-                saturated += 1
-                nxt = nxt.clamp(-clamp, clamp)
+            # Je OP gezaehlt, nicht je Schritt -- sonst haenge die Zahl an der
+            # Batchgroesse statt am Verhalten.
+            saturated += int((nxt.abs() >= clamp).flatten(1).any(dim=1).sum())
+            nxt = nxt.clamp(-clamp, clamp)
         traj[k + 1] = nxt
     return traj, saturated
+
+
+@torch.no_grad()
+def rollout(net: M.GridCNN, op: OPTensors, statics: M.StaticMaps, *,
+            lag1: int, lag2: int, clamp: float = 0.0,
+            wall: phys.WallModel | None = None) -> tuple[torch.Tensor, int]:
+    """Ein einzelner OP -- duenner Aufsatz auf ``rollout_batched``.
+
+    Bewusst keine zweite Implementierung: zwei Fassungen derselben Rekurrenz
+    driften auseinander, und diese hier traegt die Eigenschaft, an der Stufe 5
+    haengt. Zurueck kommt ``(n_t, nx, ny, nz)``, also ohne Batch-Achse.
+    """
+    traj, sat = rollout_batched(net, stack_ops([op]), statics, lag1=lag1,
+                                lag2=lag2, clamp=clamp, wall=wall)
+    return traj[:, 0], sat
 
 
 def _wall_ghost(t0: torch.Tensor, wall: phys.WallModel, op: OPTensors,
@@ -301,19 +420,32 @@ def spread_ratios(traj: torch.Tensor, labels: torch.Tensor) -> tuple[float, floa
 # ---------------------------------------------------------------------------
 # Eine Epoche
 # ---------------------------------------------------------------------------
-def train_epoch(net: M.GridCNN, ops: list, statics: M.StaticMaps,
+def train_epoch(net: M.GridCNN, batch: OPBatch, statics: M.StaticMaps,
                 opt: torch.optim.Optimizer, *, inner_steps: int,
                 batch_t: int, lag1: int, lag2: int, w_data: float,
                 w_phys: float, w_wall: float, clamp: float,
                 rng: np.random.Generator) -> EpochStats:
-    """Je OP einmal ausrollen, einfrieren, dann ``inner_steps`` Updates."""
+    """**Einmal** alle OPs ausrollen, einfrieren, dann je OP ``inner_steps`` Updates.
+
+    Die Zweiteilung ist Absicht und steht im Modulkopf:
+
+    * **Der Rollout ist gebatcht.** Er laeuft unter ``no_grad``, aendert also
+      nichts am Experiment -- nur an der Zeit, die er auf einer T4 kostet.
+    * **Die innere Schleife bleibt je OP.** Alle OPs in einen Optimiererschritt
+      zu ziehen machte den Gradienten leiser, und das waere eine Aenderung am
+      Optimierer. Geschwindigkeit ja, Experiment anfassen nein.
+    """
+    ops = batch.ops
     st = EpochStats()
     st.n_ops = len(ops)
     want_phys = w_phys > 0.0
 
-    for op in ops:
-        traj, sat = rollout(net, op, statics, lag1=lag1, lag2=lag2, clamp=clamp)
-        st.saturated += sat
+    alle, sat = rollout_batched(net, batch, statics, lag1=lag1, lag2=lag2,
+                                clamp=clamp)
+    st.saturated = sat
+
+    for i, op in enumerate(ops):
+        traj = alle[:op.n_t, i]          # nur der eigene, gueltige Teil
         s_o, s_t = spread_ratios(traj, op.tn_seq)
         st.spread_space += s_o / len(ops)
         st.spread_time += s_t / len(ops)
@@ -361,6 +493,13 @@ def build_argparser() -> argparse.ArgumentParser:
                     "eingefrorene, frei laufende Trajektorie.")
     p.add_argument("--cache", type=Path, default=Path("data_cache"),
                    help="Verzeichnis mit den OP-Buendeln")
+    p.add_argument("--device", default="ask",
+                   help="ask (fragt nach, Vorgabe) | auto | cpu | cuda | "
+                        "cuda:N. 'cuda' faellt NICHT still auf die CPU zurueck "
+                        "-- ein stiller Rueckfall auf einer GPU-Maschine ist in "
+                        "einem Log sehr leicht zu uebersehen und kostet den "
+                        "ganzen Lauf an Tempo. Geteilt mit PINNmodulusTwo "
+                        "ueber device_utils.py.")
     p.add_argument("--epochs", type=int, default=60)
     p.add_argument("--inner-steps", type=int, default=100,
                    help="Updates je OP und Epoche auf der eingefrorenen "
@@ -395,6 +534,27 @@ def build_argparser() -> argparse.ArgumentParser:
     return p
 
 
+def resolve_device(spec: str):
+    """Geraet waehlen -- **importiert** aus ``PINNmodulusTwo``, nicht kopiert.
+
+    Dieselbe Regel wie fuer ``data.py`` und ``op_metrics.py``: eine Kopie
+    driftet weg. Vier Modi, und der Unterschied ist, wer entscheidet -- die
+    Begruendung steht in ``device_utils.py`` und gilt hier unveraendert.
+
+    Faellt ``device_utils`` aus (keine Schwesterprojekt-Checkout), wird die CPU
+    genommen und das gesagt, statt zu scheitern: die Mechanik dieses Moduls
+    laeuft ohne CUDA vollstaendig.
+    """
+    try:
+        sys.path.insert(0, str(HERE.parent / "PINNmodulusTwo"))
+        import device_utils
+    except ImportError:
+        print(f"[device] PINNmodulusTwo/device_utils.py nicht gefunden, "
+              f"--device {spec} ignoriert -> cpu", file=sys.stderr)
+        return torch.device("cpu")
+    return device_utils.resolve_device(spec)
+
+
 def main(argv: list | None = None) -> int:
     args = build_argparser().parse_args(argv)
     if args.seeds < 3:
@@ -407,6 +567,17 @@ def main(argv: list | None = None) -> int:
               f"liegt er unter data_cache/; hier im Repo liegt er nicht.",
               file=sys.stderr)
         return 2
+
+    device = resolve_device(args.device)
+    if device.type == "cuda":
+        # Feste Eingangsformen ueber den ganzen Lauf -- cudnn darf einmal
+        # suchen und sich den besten Algorithmus merken. Bei wechselnden Formen
+        # waere es schaedlich; hier sind sie (B, 44, 11, 11) und bleiben es.
+        torch.backends.cudnn.benchmark = True
+        print("[t4] cudnn.benchmark an (feste Eingangsformen). TF32 NICHT "
+              "gesetzt: das ist Ampere und neuer, die T4 ist Turing (sm_75).",
+              flush=True)
+
     print("Der Ladepfad ueber PINNmodulusTwo/data.py ist noch nicht "
           "angeschlossen -- siehe FAHRPLAN, 'Was fehlt'. Die Mechanik "
           "(Rollout, Verluste, Epoche) steht und ist getestet.")

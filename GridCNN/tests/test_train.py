@@ -237,7 +237,7 @@ def test_eine_epoche_veraendert_die_gewichte(layout, op, statics):
     net = M.GridCNN(layout)
     vorher = [p.detach().clone() for p in net.parameters()]
     opt = torch.optim.Adam(net.parameters(), lr=1e-3)
-    st = T.train_epoch(net, [op], statics, opt, inner_steps=3, batch_t=4,
+    st = T.train_epoch(net, T.stack_ops([op]), statics, opt, inner_steps=3, batch_t=4,
                        lag1=5, lag2=20, w_data=1.0, w_phys=0.0, w_wall=0.0,
                        clamp=50.0, rng=np.random.default_rng(0))
     assert st.data > 0.0 and st.n_ops == 1
@@ -249,7 +249,7 @@ def test_der_physik_strafterm_laesst_sich_zuschalten(layout, op, statics):
     torch.manual_seed(0)
     net = M.GridCNN(layout)
     opt = torch.optim.Adam(net.parameters(), lr=1e-3)
-    st = T.train_epoch(net, [op], statics, opt, inner_steps=2, batch_t=4,
+    st = T.train_epoch(net, T.stack_ops([op]), statics, opt, inner_steps=2, batch_t=4,
                        lag1=5, lag2=20, w_data=1.0, w_phys=0.1, w_wall=0.0,
                        clamp=50.0, rng=np.random.default_rng(0))
     assert not np.isnan(st.phys)
@@ -260,7 +260,7 @@ def test_ein_abgeschalteter_term_ist_nan_und_nicht_null(layout, op, statics):
     torch.manual_seed(0)
     net = M.GridCNN(layout)
     opt = torch.optim.Adam(net.parameters(), lr=1e-3)
-    st = T.train_epoch(net, [op], statics, opt, inner_steps=2, batch_t=4,
+    st = T.train_epoch(net, T.stack_ops([op]), statics, opt, inner_steps=2, batch_t=4,
                        lag1=5, lag2=20, w_data=1.0, w_phys=0.0, w_wall=0.0,
                        clamp=50.0, rng=np.random.default_rng(0))
     assert np.isnan(st.phys) and np.isnan(st.wall)
@@ -271,7 +271,7 @@ def test_w_wall_ohne_stufe_2_wird_gemeldet(layout, op, statics):
     torch.manual_seed(0)
     net = M.GridCNN(layout)
     opt = torch.optim.Adam(net.parameters(), lr=1e-3)
-    st = T.train_epoch(net, [op], statics, opt, inner_steps=1, batch_t=2,
+    st = T.train_epoch(net, T.stack_ops([op]), statics, opt, inner_steps=1, batch_t=2,
                        lag1=5, lag2=20, w_data=1.0, w_phys=0.0, w_wall=1.0,
                        clamp=50.0, rng=np.random.default_rng(0))
     assert any("Stufe 2" in n for n in st.notes)
@@ -291,7 +291,7 @@ def test_labels_hinter_split_t_werden_nicht_gefittet(layout, op, statics):
 
     T.data_loss = spion
     try:
-        T.train_epoch(net, [op], statics, opt, inner_steps=40, batch_t=8,
+        T.train_epoch(net, T.stack_ops([op]), statics, opt, inner_steps=40, batch_t=8,
                       lag1=5, lag2=20, w_data=1.0, w_phys=0.0, w_wall=0.0,
                       clamp=50.0, rng=np.random.default_rng(0))
     finally:
@@ -316,3 +316,141 @@ def test_ein_seed_wird_angemeckert(tmp_path, capsys):
 def test_die_praesentationsgroesse_ist_ueber_die_cli_erreichbar():
     a = T.build_argparser().parse_args(["--width", "64", "--blocks", "4"])
     assert (a.width, a.blocks) == (64, 4)
+
+
+# ---------------------------------------------------------------------------
+# Der T4-Hebel: ein Rollout statt elf
+# ---------------------------------------------------------------------------
+def _op_wie(op, seed, n_t=None):
+    """Ein zweiter OP mit anderen Zahlen, optional anderer Laenge."""
+    torch.manual_seed(seed)
+    n_t = op.n_t if n_t is None else n_t
+    nx, ny, nz = op.tn_ic.shape
+    q = torch.zeros(n_t, nx, ny, nz)
+    q[:, 1] = 0.05
+    return T.OPTensors(
+        op_id=f"OP{seed}", tn_seq=torch.randn(n_t, nx, ny, nz),
+        tn_ic=torch.randn(nx, ny, nz), qsrc=q, fo=op.fo,
+        config=torch.randn(n_t, 7), forcing=torch.randn(n_t, 11),
+        dtn=op.dtn, split_t=min(30, n_t - 1), n_t=n_t)
+
+
+def test_gebatcht_rollt_in_float64_BIT_FUER_BIT_wie_einzeln(layout):
+    """**Die Zusage, auf der die T4-Optimierung steht.**
+
+    Elf OPs zusammen zu rollen ist nur dann eine Beschleunigung und keine
+    Aenderung, wenn dabei dasselbe herauskommt. Waere es nicht so, waere jede
+    spaetere Zahl mit der Batchgroesse verwechselbar -- und das faellt in einer
+    Trainingskurve nicht auf.
+
+    Geprueft wird in **float64 ohne Toleranz**. In float32 weichen die beiden
+    Wege um ~8e-6 ab, und zwar nicht wegen eines Fehlers: die
+    Faltungsbibliothek waehlt fuer Batch 1 einen anderen Algorithmus als fuer
+    Batch 3, und Gleitkommaaddition ist nicht assoziativ. In float64
+    verschwindet der Unterschied **exakt** -- was genau belegt, dass es
+    Rechenreihenfolge ist und keine Physik. Der Test daneben misst die
+    float32-Groessenordnung, damit sie nicht unbemerkt waechst.
+    """
+    d = torch.float64
+    torch.manual_seed(0)
+    net = M.GridCNN(layout).to(d)
+    with torch.no_grad():
+        net.correction.head.weight.normal_(0.0, 0.05)
+    statics = _statics_dtype(layout, d)
+    ops = [_op_dtype(layout, d, s) for s in (0, 1, 2)]
+    kw = dict(lag1=5, lag2=20)
+
+    einzeln = [T.rollout(net, o, statics, **kw)[0] for o in ops]
+    gebatcht, _ = T.rollout_batched(net, T.stack_ops(ops), statics, **kw)
+
+    for i, e in enumerate(einzeln):
+        assert torch.equal(gebatcht[:e.shape[0], i], e), f"OP {i}"
+
+
+def test_in_float32_bleibt_die_abweichung_im_rundungsrauschen(net, op, statics):
+    """Die Gegenprobe zum Test darueber: gross genug, um sie zu bemerken?"""
+    ops = [op, _op_wie(op, 1), _op_wie(op, 2)]
+    kw = dict(lag1=5, lag2=20)
+    einzeln = [T.rollout(net, o, statics, **kw)[0] for o in ops]
+    gebatcht, _ = T.rollout_batched(net, T.stack_ops(ops), statics, **kw)
+    abw = max(float((gebatcht[:e.shape[0], i] - e).abs().max())
+              for i, e in enumerate(einzeln))
+    # z-gescorte Temperaturen liegen bei O(1); 1e-4 waere schon sichtbar.
+    assert abw < 1e-4, f"float32-Abweichung {abw} ist zu gross fuer Rundung"
+
+
+def _statics_dtype(layout, dtype):
+    rng = np.random.default_rng(0)
+    n = layout.n_points
+    return M.build_static_maps(
+        layout, lam=rng.random((n, 3, 3)) + 1.0,
+        rho=np.where(np.arange(n) % 3 == 1, 2800.0, 2500.0),
+        cp=np.full(n, 900.0), dtype=dtype)
+
+
+def _op_dtype(layout, dtype, seed, n_t=40):
+    torch.manual_seed(seed)
+    nx, ny, nz = layout.shape
+    fo = torch.zeros(nx, ny, nz, 3, 3, dtype=dtype)
+    fo[..., 0, 0], fo[..., 1, 1], fo[..., 2, 2] = 3e-3, 2e-3, 2.5e-3
+    q = torch.zeros(n_t, nx, ny, nz, dtype=dtype)
+    q[:, 1] = 0.05
+    return T.OPTensors(
+        op_id=f"OP{seed}", tn_seq=torch.randn(n_t, nx, ny, nz, dtype=dtype),
+        tn_ic=torch.randn(nx, ny, nz, dtype=dtype), qsrc=q, fo=fo,
+        config=torch.randn(n_t, 7, dtype=dtype),
+        forcing=torch.randn(n_t, 11, dtype=dtype),
+        dtn=0.01, split_t=30, n_t=n_t)
+
+
+def test_verschieden_lange_ops_lassen_sich_stapeln(net, op, statics):
+    """Die kuerzeren werden aufgefuellt -- gelesen wird ueber ihr Ende nie."""
+    kurz = _op_wie(op, 3, n_t=25)
+    b = T.stack_ops([op, kurz])
+    assert b.n_max == op.n_t
+    assert b.config.shape == (2, op.n_t, 7)
+    # aufgefuellt wird durch Wiederholen der letzten Zeile, nicht mit Nullen
+    assert torch.equal(b.config[1, 25], kurz.config[24])
+    assert torch.equal(b.config[1, -1], kurz.config[24])
+
+
+def test_der_kurze_op_rollt_trotzdem_richtig(net, op, statics):
+    """Auffuellen darf den gueltigen Teil des kurzen OP nicht veraendern."""
+    kurz = _op_wie(op, 3, n_t=25)
+    kw = dict(lag1=5, lag2=20)
+    allein = T.rollout(net, kurz, statics, **kw)[0]
+    zusammen, _ = T.rollout_batched(net, T.stack_ops([op, kurz]), statics, **kw)
+    assert float((zusammen[:25, 1] - allein).abs().max()) < 1e-6
+
+
+def test_verschiedene_zeitschritte_fallen_laut_aus(op):
+    """Gemeinsam rollen setzt dasselbe dt voraus -- sonst rollen sie ungleich weit."""
+    anders = _op_wie(op, 4)
+    anders.dtn = 0.02
+    with pytest.raises(ValueError, match="verschiedene Zeitschritte"):
+        T.stack_ops([op, anders])
+
+
+def test_saettigung_wird_je_op_gezaehlt_nicht_je_batchgroesse(layout, op, statics):
+    """Sonst haenge die gemeldete Zahl an der Batchgroesse statt am Verhalten."""
+    net = M.GridCNN(layout)
+    with torch.no_grad():
+        net.correction.head.bias.fill_(500.0)
+    kw = dict(lag1=5, lag2=20, clamp=10.0)
+    _, einer = T.rollout(net, op, statics, **kw)
+    _, drei = T.rollout_batched(
+        net, T.stack_ops([op, _op_wie(op, 1), _op_wie(op, 2)]), statics, **kw)
+    assert drei > einer, "der Zaehler sieht die anderen OPs nicht"
+    assert drei <= 3 * einer + 3
+
+
+def test_eine_leere_op_liste_faellt_laut_aus():
+    with pytest.raises(ValueError, match="leere OP-Liste"):
+        T.stack_ops([])
+
+
+def test_die_cli_kennt_device():
+    """Es fehlte komplett -- ein Lauf auf der T4 braucht es."""
+    a = T.build_argparser().parse_args(["--device", "cuda:0"])
+    assert a.device == "cuda:0"
+    assert T.build_argparser().parse_args([]).device == "ask"
