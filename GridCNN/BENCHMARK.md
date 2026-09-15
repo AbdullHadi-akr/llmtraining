@@ -15,12 +15,10 @@ python3 GridCNN/benchmark.py --dry-run      # ausprobieren, nichts eintragen
 ```
 
 > **⚠ Was hier gemessen wird, ist der Unterbau — nicht die Architektur.**
-> Tor 0 ist am 09.09. rot gefallen (4 Moden bei 99.9 %), der Faltungsstapel ist
-> abgesagt und das ROM ist der Plan (`FAHRPLAN.md`). Die vier Stufen unten
-> prüfen Reshape, Padding, Stencil und Löser — und die tragen **beide**
-> Architekturen, weil das Galerkin-System `Φᵀ L Φ` aus genau diesem `L`
-> entsteht. Eine Stufe, die rot wird, sagt also weiterhin etwas über die
-> Physik, nicht über die Wahl zwischen Faltung und Basis.
+> Die vier Stufen unten prüfen Reshape, Padding, Stencil und Löser. Eine Stufe,
+> die rot wird, sagt etwas über die **Physik** — nicht darüber, ob der CNN die
+> richtige Wahl war. Diese Frage beantwortet Stufe 4 des Fahrplans über die
+> Ablation A/B/C, und keine Zahl auf dieser Seite nimmt sie vorweg.
 
 ---
 
@@ -119,26 +117,25 @@ Form. Würde GridCNN die andere nehmen, wäre ein Vergleich der beiden Modelle
 keine Architekturaussage mehr, sondern eine Diskretisierungsaussage. Wenn
 geändert, dann in beiden Projekten gleichzeitig und als eigene Achse.
 
-### R5 · Die Größe des Faltungsstapels — **verworfen, 15.09.**
+### R5 · Die Größe des Faltungsstapels — **offen, gebaut**
 
-> Stand 14.09.: *„Der Rangtest hat vier Moden bei 99.9 % gemessen. Der Entwurf
-> sah 64 Kanäle × 4 Blöcke vor (~100 k Parameter) — auf elf Trajektorien.
-> Vorgesehen sind jetzt 16 Kanäle × 3 Blöcke ≈ 11 k Parameter, mit 24 × 3 als
-> Gegenprobe."*
+Der Rangtest hat vier Moden bei 99.9 % gemessen, und der Entwurf sah 64 × 4 vor
+— auf elf Trajektorien. Gebaut ist deshalb **16 × 3 = 11 427 Parameter**; die
+Präsentationsgröße bleibt als Sweep-Achse erreichbar.
 
-Diese Route hat auf die Messung mit **Verkleinern** geantwortet. Das war die
-falsche Antwort, und der Fahrplan hatte sich vorher schon auf die richtige
-festgelegt: *„≤ ~5 Moden → 🔴 Umbau. Statt Stufe 4–5 wird ein ROM gebaut."*
+| `--width` / `--blocks` | Parameter | |
+|---|---|---|
+| 16 / 3 | **11 427** | Vorgabe |
+| 24 / 3 | 20 595 | Gegenprobe |
+| 64 / 4 | **137 923** | der Entwurf |
 
-Ein Faltungsstapel mit 16 Kanälen über 11 × 11 ist immer noch ein
-Faltungsstapel — er lernt weiterhin einen Raum, der sich mit **vier Zahlen**
-beschreiben lässt, nur mit weniger Gewichten. Die Frage „bringt größer etwas?"
-ist gegenüber der Frage „braucht es hier überhaupt eine Faltung?" die kleinere,
-und die größere ist beantwortet.
+⚠ **137 923, nicht „~100 k".** README §11.4 und frühere Fassungen des Fahrplans
+nennen für 64 × 4 rund 100 k Parameter. Nachgerechnet sind es 38 % mehr; die
+Schätzung hatte den Sprung 44 → 64 in der ersten Schicht und die vierte
+64×64-Faltung zu klein angesetzt. `tests/test_model.py` nagelt beide Zahlen fest.
 
-**Bleibt als Beleg stehen,** damit die 16 × 3 nicht in drei Wochen als neue Idee
-zurückkommen. Die Größenfrage lebt in der ROM-Form weiter: `g` ist mit ~5 k
-Parametern angesetzt, und ob das reicht, ist Teil der Ablation A/B/C.
+Die Achse prüft, ob größer überhaupt etwas bringt. Bringt sie nichts, ist das
+kein Nullergebnis, sondern eine Bestätigung des Rangtests.
 ### R6 · Der Stern ist nicht bilanztreu — **offen, beziffert**
 
 Gemessen am 14.09. im Workflow-Test: rollt man ein zufälliges Feld adiabat aus,
@@ -163,7 +160,12 @@ versteckt. Möglicher Umbau, falls er zu groß wird: Halbzellgewichte an den
 y/z-Rändern — das wäre eine eigene Achse und keine stille Korrektur.
 
 
-### R7 · Die POD-Basis als eigene Benchmark-Stufe — **offen**
+### R7 · Die POD-Basis als eigene Benchmark-Stufe — **verworfen, 15.09.**
+
+> **Der ROM ist gestrichen** (Fahrplan, 15.09.), damit auch diese Stufe. Sie
+> bleibt mit Begründung stehen, wie das Dokument es für verworfene Routen
+> vorschreibt — und weil sie die eine Messung wäre, die man nachholt, wenn
+> Stufe 4 den CNN nicht trägt. Was unten stand, gilt inhaltlich unverändert:
 
 Die Leiter oben hat vier Stufen und misst den **Gitter**-Unterbau. Mit dem
 Umbau auf das ROM kommt eine Zusage dazu, die genauso billig prüfbar ist und

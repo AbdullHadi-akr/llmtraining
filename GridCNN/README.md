@@ -1,31 +1,34 @@
 # GridCNN — das Feld auf einmal, statt Punkt für Punkt
 
-> ## ⚠ 09.09. — die Messung hat entschieden: **kein CNN.**
+> ## Status (15.09.): der CNN ist gebaut — 11 427 Parameter
 >
-> Der Rangtest ist gelaufen. **Die gepoolte Ortsstruktur braucht 4 Moden für
-> 99.9 % der Energie.** Damit ist das Tor aus §9 rot, und §11.7 wird eingelöst:
-> es wird ein **ROM** gebaut, kein Faltungsstapel — POD-Projektion auf 4–6
-> Moden, darauf ein kleines Netz von ~5 k Parametern.
+> `grid.py`, `physics.py`, `solve.py`, **`model.py`**, **`train.py`** und
+> `benchmark.py` liegen im Repo. **91 Tests, Sekunden, ohne `data_cache`.** Was fehlt, ist der
+> Ladepfad an `data.py` und der kalibrierte Wandterm — beides hängt an Stufe 2
+> des [`FAHRPLAN.md`](FAHRPLAN.md). Protokoll der Läufe:
+> [`BENCHMARK.md`](BENCHMARK.md).
 >
-> **Was bleibt:** die Physik. Randbedingungen, Wandterm, Quelle, die Analyse des
-> Versuchsplans — alles ab §5 gilt unverändert. **Was hinfällig ist:** §2 und
-> §7, die Argumente für die Faltung und ihr Flussdiagramm. Sie bleiben als
-> Beleg stehen, wie die Entscheidung zustande kam.
+> ### ⚠ Der Entwurf ist gegen eine Messung gebaut. Das gehört hierher.
 >
-> Und §11.1 hat genau das vorhergesagt: *die meisten Gewinne dieses Entwurfs
-> sind Gitter-Gewinne, nicht CNN-Gewinne.* Die Gitter-Gewinne sind eingetreten
-> und stecken heute in `grid.py` und `physics.py`; nur die zwei echten
-> Faltungs-Argumente sind mit dem Tor gefallen.
+> Der Rangtest (§9) ist am 09.09. gelaufen: **die gepoolte Ortsstruktur braucht
+> 4 Moden für 99.9 % der Energie.** Das Tor aus §9 war damit **rot**, und §11.7
+> hätte ein ROM verlangt — POD auf 4–6 Moden, darauf ~5 k Parameter.
 >
-> Der neue Plan steht in [`FAHRPLAN.md`](FAHRPLAN.md). Der Ordner heißt weiter
-> `GridCNN`, damit die Verweise aus PR #31 halten.
+> **Am 15.09. ist entschieden worden, den CNN trotzdem zu bauen.** Der ehrliche
+> Satz dazu: ein Tor sagt *„billiger geht auch"*, nicht *„das hier geht nicht"*.
+> Das Risiko ist **Überparametrisierung, nicht Unmöglichkeit** — und es ist
+> messbar statt behauptet, denn die Ablation A/B/C im Fahrplan trennt genau das
+> auf.
 >
-> **Status (15.09.): der Gitter-Unterbau steht, das Modell fehlt.**
-> `grid.py`, `physics.py`, `solve.py` und `benchmark.py` liegen im Repo — 45
-> Tests, CI grün. Sie sind für den CNN entstanden und tragen das ROM genauso:
-> das Galerkin-System `Φᵀ L Φ` wird aus genau diesem `L` gebaut, der Stern wird
-> also **projiziert, nicht ersetzt**. Was fehlt, ist `rom.py`, `model.py` und
-> `train.py`. Protokoll der Läufe: [`BENCHMARK.md`](BENCHMARK.md).
+> **Was die Messung trotzdem verändert hat:** die Größe. Gebaut sind
+> **16 Kanäle × 3 Blöcke = 11 427 Parameter** statt der 64 × 4 aus dem Entwurf
+> unten. Die sind über `--width 64 --blocks 4` weiter erreichbar — und kosten
+> **137 923** Parameter, nicht die „~100 k", die §11.4 nennt (38 % daneben,
+> nachgerechnet und getestet).
+>
+> **§2 und §7 gelten damit wieder**, §11.1 bleibt aber der schärfste Einwand im
+> Dokument und ist nicht entkräftet: *die meisten Gewinne dieses Entwurfs sind
+> Gitter-Gewinne, nicht CNN-Gewinne.* Was davon stimmt, sagt Stufe 4.
 >
 > **02.09. — alle Geometrie- und Wärmestromfragen sind beantwortet.** Damit
 > stehen die Randbedingungen, das x-Layout (§5), der Wandterm mit `A = 0.0206 m²`
@@ -122,13 +125,12 @@ an den Randbedingungen und nicht am Geschmack.
 
 ---
 
-## 2. Was für den CNN sprach — *überholt am 09.09.*
+## 2. Was für den CNN spricht
 
-> Dieser Abschnitt ist **Beleg, nicht Plan.** Tor 0 hat den Faltungsstapel
-> abgesagt (4 Moden bei 99.9 %). Die Punkte (a)–(e) bleiben lesenswert, weil
-> vier von ihnen **Gitter**-Gewinne sind und damit ins ROM übergehen — nur die
-> zwei echten Faltungs-Argumente sind weg. Genau diese Trennung hatte §11.1
-> vorhergesagt.
+> **Wieder gültig ab 15.09.** — der CNN ist die Entscheidung. Beim Lesen aber
+> §11.1 danebenhalten: vier der Punkte unten sind **Gitter**-Gewinne, die jedes
+> Gittermodell bekäme, und nur zwei sind echte *Faltungs*-Argumente. Welche
+> davon tragen, misst die Ablation A/B/C (Fahrplan, Stufe 4).
 
 Das Tempo-Argument trägt **nicht** — `rollout()` in `PINNmodulusTwo/model.py`
 batcht alle 363 Punkte schon in einen MLP-Forward pro Zeitschritt. Pro Schritt
@@ -609,13 +611,13 @@ Gegenprobe reicht direktes Einlesen der CSVs; fuer das **Training** muessen
 bauen (10-30 min). Das ist ein Eingriff in geteilte Infrastruktur und gehoert
 in den Plan, nicht nebenbei erledigt. Siehe [`GridCNN/FAHRPLAN.md`](FAHRPLAN.md), Stufe 2.
 
-## 7. Das Flussdiagramm — *für den CNN, überholt*
+## 7. Das Flussdiagramm
 
-> Tafel 1 und 2 zeigen den Conv-Entwurf vom 02.09. Sie bleiben stehen, weil
-> **die Physik darin unverändert gilt** — Symmetrie, Wandfluss, freier Rollout.
-> Nur der Kasten „Conv-Stapel" wird im ROM ein 6×6-Galerkin-System plus ein
-> kleines MLP, und das Padding entfällt (die Basis erfüllt die Symmetrie exakt,
-> `FAHRPLAN.md` Stufe 3).
+> **Wieder gültig ab 15.09.** Zwei Abweichungen vom Bild unten, beide
+> dokumentiert: der Conv-Stapel hat **3 Blöcke à 16 Kanäle**, nicht 4 à 64, und
+> die statischen Karten sind **17**, nicht 14 (§3c zählt sie auf). Alles andere
+> — Symmetrie, Wandfluss, Padding vor dem Netz, freier Rollout — ist gebaut wie
+> gezeichnet.
 
 ### Ein Rollout-Schritt
 
@@ -718,7 +720,10 @@ OP16), sonst ist der Vergleich wertlos.
 > statischen Karten zum Brechen der Translationsäquivarianz wäre ein
 > umständlicher Weg, vier Zahlen auszudrücken.
 >
-> **Tor: 🔴 ROM statt CNN.** Genau der Fall, für den das Tor gebaut war.
+> **Tor: 🔴** Genau der Fall, für den das Tor gebaut war — es hätte ein ROM
+> verlangt. Am 15.09. ist dagegen entschieden worden; geblieben ist die
+> Verkleinerung des Stapels auf 16 × 3. Begründung im Kasten ganz oben und im
+> Fahrplan.
 >
 > Und es war vorhersehbar: §3b hatte gezeigt, dass `T` der *einzige* räumlich
 > strukturierte zeitabhängige Input ist — die Quelle ist Skalar × fester Karte.
@@ -866,13 +871,20 @@ Billigste und Sicherste zuerst, der CNN erst, wenn die Messung ihn rechtfertigt.
 Wenn Stufe 1 sagt „fuenf Moden", baue ich das ROM und sage es dir, statt den
 CNN trotzdem zu bauen, weil er im Entwurf steht.
 
-> ### ✅ Eingelöst am 09.09.
+> ### Eingelöst am 09.09. — und am 15.09. überstimmt
 >
-> Der Rangtest sagte **vier Moden**. Der Faltungsstapel ist abgesagt, das ROM
-> ist der Plan. Der Absatz oben war keine Floskel — und §11.1 („die meisten
-> Gewinne sind keine CNN-Gewinne") war die richtige Diagnose: vier der sechs
-> Argumente gehen unverändert ins ROM über, die zwei echten Faltungs-Argumente
-> sind weg.
+> Der Rangtest sagte **vier Moden**, der Faltungsstapel war damit abgesagt und
+> das ROM der Plan. Der Absatz oben war insofern keine Floskel: die Messung ist
+> gelaufen, das Tor hat gefeuert, und der Umbau war eingearbeitet.
+>
+> **Am 15.09. ist der CNN trotzdem gewählt worden.** Das ist eine Entscheidung
+> des Projekteigners gegen die Messung, und sie steht hier, statt dass der
+> Absatz oben stillschweigend verschwindet. Was die Messung durchgesetzt hat,
+> ist die **Größe**: 16 × 3 statt 64 × 4.
+>
+> §11.1 („die meisten Gewinne sind keine CNN-Gewinne") bleibt damit
+> **unbeantwortet, nicht widerlegt** — und ist jetzt die Frage, die Stufe 4
+> beantwortet. Genau dafür gibt es die Ablation A/B/C.
 
 ---
 
