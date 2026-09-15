@@ -399,10 +399,32 @@ gehört aber **neben** die Physik-Latte geschrieben, nicht darunter versteckt.
 | | was | blockiert durch |
 |---|---|---|
 | **`model.py`** | der Conv-Stapel in Δ-Form: 44 → 16 → 16 → 16 → 3 Kanäle, 3×3-Kerne, ~11 400 Parameter | nichts — kann gebaut werden |
-| **`train.py`** | Trainingsschleife, Ein-Schritt zuerst (parallel zu `PINNmodulusTwo`) | `model.py` |
+| **`train.py`** | Trainingsschleife, Ein-Schritt zuerst (parallel zu `PINNmodulusTwo`) — **kein Teacher Forcing**, siehe Kasten | `model.py` |
 | **Wandterm benutzbar** | `U(V̇)` kalibrieren | **Stufe 2**: `q_solid_to_fluid`, `mdot`, `cp_fluid`, `fluid_out_temp` fehlen im Bündel |
 | **Physik-Latte** | Stufe 3 mit echter Wand | Wandterm |
 | **`C_fluid`** | Wärmekapazität des Kühlmittels im Kanal, für den Kapazitätsmodus | liegt nicht vor — **nicht raten**, siehe R3 |
+
+⚠ **Kein Teacher Forcing — und das wird oft falsch erzählt.**
+`train.py:911` rollt **einmal je Epoche je OP** die *eigene* Trajektorie unter
+`torch.no_grad()` aus, gesät nur von der gemessenen Anfangsbedingung, und friert
+sie ein. Erst darauf laufen `inner_steps` Ein-Schritt-Updates gegen die Labels.
+Der Kommentar dort sagt es wörtlich: *„No teacher forcing: this is the
+free-running rollout"*, und `evaluate()` wiederholt es.
+
+Der Unterschied zwischen Training und Auswertung ist also **nicht** der
+Eingangszustand — beide rollen frei. Er ist:
+
+| | Training | Auswertung |
+|---|---|---|
+| Trajektorie | eingefroren, je Epoche erneuert | live |
+| Labels | ja, als Ziel | nein |
+| Gradient | nur **ein** Schritt (Historie detached) | keiner |
+
+**Daraus folgt der ganze Hebel von Stufe 5.** Weil der Gradient die Historie nie
+überquert, kann er den Spätfehler (O13) strukturell nicht erreichen — egal wie
+lange man trainiert. Truncated BPTT ist die einzige Änderung, die daran etwas
+ändert. Wer `train.py` baut, darf diese Eigenschaft nicht versehentlich
+wegoptimieren.
 
 ⚠ **Der Löser läuft heute adiabat.** Der Wandterm ist gebaut und getestet, aber
 ohne die vier Cache-Größen nicht kalibrierbar. `solve.rollout` trägt das als
