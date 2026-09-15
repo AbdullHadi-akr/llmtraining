@@ -160,31 +160,16 @@ versteckt. Möglicher Umbau, falls er zu groß wird: Halbzellgewichte an den
 y/z-Rändern — das wäre eine eigene Achse und keine stille Korrektur.
 
 
-### R7 · Die POD-Basis als eigene Benchmark-Stufe — **verworfen, 15.09.**
+### R7 · Die POD-Basis als eigene Stufe — **verworfen, 15.09.**
 
-> **Der ROM ist gestrichen** (Fahrplan, 15.09.), damit auch diese Stufe. Sie
-> bleibt mit Begründung stehen, wie das Dokument es für verworfene Routen
-> vorschreibt — und weil sie die eine Messung wäre, die man nachholt, wenn
-> Stufe 4 den CNN nicht trägt. Was unten stand, gilt inhaltlich unverändert:
+Der Rangtest hat vier Moden gemessen; eine Stufe, die den **Projektionsrest**
+`‖T − ΦΦᵀT‖ / ‖T‖` je ausgehaltenem OP misst, wäre die einzige Messung im
+Projekt, die eine Obergrenze **vor** dem Training nennt: liegt der Rest auf
+OP06 bei 2 %, kommt kein `g_θ` darunter.
 
-Die Leiter oben hat vier Stufen und misst den **Gitter**-Unterbau. Mit dem
-Umbau auf das ROM kommt eine Zusage dazu, die genauso billig prüfbar ist und
-genauso vorn stehen gehört:
-
-> Erfasst eine Basis aus den elf Trainings-OPs auch **OP06, OP09, OP13, OP15,
-> OP16** auf 99.9 %?
-
-Gerechnet wird der Projektionsrest `‖T − ΦΦᵀT‖ / ‖T‖` je ausgehaltenem OP.
-Kein Training, keine Gewichte, Sekunden — aber es braucht den `data_cache`,
-gehört also in dieselbe Gruppe wie Stufe 1 und 3.
-
-**Der Wert liegt darin, dass es eine Obergrenze *vor* dem Training nennt.**
-Liegt der Rest auf OP06 bei 2 %, kommt kein `g` der Welt darunter — der Fehler
-steckt dann in `Φ` und nicht im Lernen. Das ist die erste Messung des Projekts,
-die eine Grenze benennt, bevor Rechenzeit hineingeht, statt danach.
-
-Im Fahrplan steht sie als **Stufe 3b**. Als Benchmark-Stufe ist sie noch nicht
-gebaut — sie braucht `rom.py`, und das gibt es noch nicht.
+Verworfen, weil der ROM gestrichen ist (Fahrplan, 15.09.). Bleibt mit
+Begründung stehen, wie es das Dokument für verworfene Routen vorschreibt — und
+weil sie die Messung ist, die man nachholt, wenn Stufe 4 den CNN nicht trägt.
 
 ---
 

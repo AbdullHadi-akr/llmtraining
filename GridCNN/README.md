@@ -1,82 +1,139 @@
 # GridCNN — das Feld auf einmal, statt Punkt für Punkt
 
-> ## Status (15.09.): der CNN ist gebaut — 11 427 Parameter
->
-> `grid.py`, `physics.py`, `solve.py`, **`model.py`**, **`train.py`** und
-> `benchmark.py` liegen im Repo. **91 Tests, Sekunden, ohne `data_cache`.** Was fehlt, ist der
-> Ladepfad an `data.py` und der kalibrierte Wandterm — beides hängt an Stufe 2
-> des [`FAHRPLAN.md`](FAHRPLAN.md). Protokoll der Läufe:
-> [`BENCHMARK.md`](BENCHMARK.md).
->
-> ### ⚠ Der Entwurf ist gegen eine Messung gebaut. Das gehört hierher.
->
-> Der Rangtest (§9) ist am 09.09. gelaufen: **die gepoolte Ortsstruktur braucht
-> 4 Moden für 99.9 % der Energie.** Das Tor aus §9 war damit **rot**, und §11.7
-> hätte ein ROM verlangt — POD auf 4–6 Moden, darauf ~5 k Parameter.
->
-> **Am 15.09. ist entschieden worden, den CNN trotzdem zu bauen.** Der ehrliche
-> Satz dazu: ein Tor sagt *„billiger geht auch"*, nicht *„das hier geht nicht"*.
-> Das Risiko ist **Überparametrisierung, nicht Unmöglichkeit** — und es ist
-> messbar statt behauptet, denn die Ablation A/B/C im Fahrplan trennt genau das
-> auf.
->
-> **Was die Messung trotzdem verändert hat:** die Größe. Gebaut sind
-> **16 Kanäle × 3 Blöcke = 11 427 Parameter** statt der 64 × 4 aus dem Entwurf
-> unten. Die sind über `--width 64 --blocks 4` weiter erreichbar — und kosten
-> **137 923** Parameter, nicht die „~100 k", die §11.4 nennt (38 % daneben,
-> nachgerechnet und getestet).
->
-> **§2 und §7 gelten damit wieder**, §11.1 bleibt aber der schärfste Einwand im
-> Dokument und ist nicht entkräftet: *die meisten Gewinne dieses Entwurfs sind
-> Gitter-Gewinne, nicht CNN-Gewinne.* Was davon stimmt, sagt Stufe 4.
->
-> **02.09. — alle Geometrie- und Wärmestromfragen sind beantwortet.** Damit
-> stehen die Randbedingungen, das x-Layout (§5), der Wandterm mit `A = 0.0206 m²`
-> und `U(V̇)` (§6), und beide Werkzeuge der Stufen 0 und 1 sind gebaut.
-> **`L_phys` bleibt drin** — begründet in §12.
->
-> Offen sind nur noch Messungen, keine Entscheidungen: der Rangtest (§9) und die
-> Bilanzprobe (`FAHRPLAN.md` Stufe 1).
-
 Ein zweiter, **unabhängiger** Modellansatz neben
-[`PINNmodulusTwo/`](../PINNmodulusTwo/). Was der Datensatz dabei *nicht*
-hergeben kann, steht in [`README_OPS.md`](README_OPS.md). Nicht dessen Ersatz: dasselbe Datum,
-derselbe Split, dieselben Metriken, damit die beiden vergleichbar sind — aber
-eigenes Modell, eigenes Training, eigener Verlust.
+[`PINNmodulusTwo/`](../PINNmodulusTwo/) für dasselbe Problem: die
+Temperaturentwicklung einer Batteriezelle auf einem 3 × 11 × 11-Gitter
+vorhersagen. Nicht dessen Ersatz — **dasselbe Datum, derselbe Split, dieselben
+Metriken**, damit die beiden vergleichbar sind, aber eigenes Modell, eigenes
+Training, eigener Verlust.
 
 ---
 
-# ▶ Stand der offenen Punkte
+# ▶ Wenn du hier neu bist: das Nötigste auf einer Seite
 
-Alle sechs vom 02.09. sind beantwortet. Was jetzt noch offen ist, steht in §12.
+> Dieser Abschnitt setzt **kein Vorwissen** voraus. Alles darunter ab
+> „Der Entwurf" ist die ausführliche Begründung und kann warten.
 
-| # | Frage | Antwort |
-|---|---|---|
-| 1 | Rangtest oder `model.py` zuerst? | **Rangtest.** `tools/spatial_rank.py` ist geschrieben und getestet — läuft bei dir in Sekunden, braucht nur numpy. §8 |
-| 2 | Läuft PINNmodulusTwo parallel? | **Ja**, Achse 0 läuft/lief. Ich brauche die Zahl, siehe §12 |
-| 3 | Name `GridCNN`? | bleibt |
-| 4 | `subsample_time` 2 oder 1? | **2.** Zwei Gründe: ~20 % Luft zum CFL-Limit (0.2 gegen 0.241 s), und Schritt 6 lief auf `2` — nur so ist der Vergleich gegen die 6.270 / 3.585 C ein Vergleich. `1` ist die Gegenprobe, falls `L_phys` sich auffällig verhält |
-| 5 | Wand-BC in den Fahrplan? | erklärt unten |
-| 6 | Fluidtemperatur an der Wand | **beides.** Bilanz im Modell, gemessene Werte als Aufsicht und Gegenprobe. §5/§6 — und dort steht auch die Falle |
+## Was gebaut ist
 
-## Zu 5: was ich damit meinte
+```
+GridCNN/
+  grid.py        Reshape 363 -> (3,11,11) aus den Koordinaten, drei Paddings
+  physics.py     FD-Stern (x nicht-äquidistant), Kreuzterm, Quelle, Wandterm
+  solve.py       expliziter Euler -- die Physik OHNE Netz (Stufe 3)
+  model.py       der Faltungsstapel in Δ-Form, 11 427 Parameter  (Stufe 4)
+  train.py       Trainingsschleife, Ein-Schritt, frei laufender Rollout
+  benchmark.py   Stufenläufer, schreibt in BENCHMARK.md
+  tools/         spatial_rank.py (Rangtest), balance_check.py (Wärmebilanz)
+  tests/         99 Tests, Sekunden, ohne GPU und ohne data_cache
+```
 
-Es geht **nicht** um GridCNN, sondern um einen Befund über **`PINNmodulusTwo`**.
+Das Modell rechnet:
 
-`grep -rin "convect|robin|htc|h_conv|wall.*flux"` über `physics.py`, `model.py`
-und `train.py` findet nichts. `heat_residual` ist reine Leitung plus Quelle,
-ohne Senke, und der einzige BC-Term sitzt per `bc_mask = |x| < 1e-6` an der
-Symmetrieebene. Also: **die Gehäusewand hat gar keine Randbedingung.** Der
-Wärmeaustritt ist physikalisch unbeschränkt und wird allein aus dem Datenterm
-gelernt — obwohl dort laut Energiebilanz bis zu die Hälfte der Quellenergie
-hinausgeht.
+```
+T_{t+1}  =  T_t  +  Δt · ( L(T_t)  +  Qsrc_t  +  g_θ(X_t) )
+                          ^feste Physik        ^gelernt, 11 427 Parameter
+```
 
-Das ist ein offener Punkt in *deinem* Fahrplan, nicht in meinem Entwurf. Mein
-Vorschlag: als **O16** in Teil I, mit der Einschränkung dazu, dass er die
-val-Fehler **nicht** erklärt (§11.5 sagt, V̇ = 0 ist der *schwierigere* Fall,
-also bleibt es dafür bei O14). Sag „ja", dann trage ich ihn in
-`PINNmodulusTwo/FAHRPLAN.md` ein — es ist deine Datei und die O-Nummern sind
-deine Buchführung, deshalb frage ich statt es zu tun.
+`L` **ist** `physics.anisotropic_laplacian` — derselbe Operator, den `solve.py`
+benutzt, keine zweite Fassung. Bei Initialisierung ist `g_θ` exakt null, das
+Modell rechnet also **Bit für Bit** den Löser aus Stufe 3 und lernt von dort aus
+die Korrektur.
+
+## Was sofort läuft
+
+```bash
+python3 -m pytest GridCNN/tests -q              # 99 Tests, ~5 s
+python3 GridCNN/benchmark.py --stage 0 2 --dry-run   # Stencil + Workflow
+```
+
+Beides braucht **keine Daten und keine GPU**. Wenn das grün ist, ist der
+Unterbau in Ordnung.
+
+> ⚠ `GridCNN` und `PINNmodulusTwo` haben **beide** ein Modul namens `physics`.
+> In einer gemeinsamen pytest-Invokation gewinnt das erste und die Tests des
+> zweiten prüfen still den falschen Code. Die CI ruft sie deshalb getrennt auf.
+> Ein gemeinsamer Lauf bricht beim Import ab — das ist nachgeprüft.
+
+## Was NICHT läuft, und warum
+
+| | blockiert durch |
+|---|---|
+| `train.py` mit echten Daten | der **Ladepfad** an `PINNmodulusTwo/data.py` fehlt, und der `data_cache` liegt nicht im Repo |
+| der **Wandterm** (Kühlung) | `U(V̇)` ist nicht kalibrierbar: `q_solid_to_fluid`, `mdot`, `cp_fluid`, `fluid_out_temp` fehlen im Bündel → **Stufe 2** im Fahrplan |
+| die **Physik-Latte** | braucht den Wandterm |
+| `benchmark.py` Stufe 1 und 3 | brauchen den `data_cache` |
+
+⚠ **Solange der Wandterm fehlt, laufen Löser und Training adiabat** — also ohne
+Kühlung. Das ist physikalisch falsch und wird überall so ausgewiesen
+(`SolveResult.summary()` schreibt „Wandterm AUS (adiabat)", `train._wall_ghost`
+**wirft**, statt ein `U` zu raten). **Eine adiabate Zahl ist eine Ablation und
+darf nicht als Physik-Latte zitiert werden.**
+
+## Was als Nächstes zu tun ist, in dieser Reihenfolge
+
+1. **`balance_check.py` ein zweites Mal laufen lassen** — Minuten, nur numpy,
+   braucht die Rohdaten. Klärt `Q_ht/tot` und ob `U(V̇)` über drei Flusslevel
+   auf einer Kurve liegt. Kommandos im [`FAHRPLAN.md`](FAHRPLAN.md) ganz oben.
+2. **Stufe 2, der Cache-Umbau** — vier Spalten mitschreiben, alle sechzehn OPs
+   neu bauen (30 min). Danach ist der Wandterm kalibrierbar.
+3. **Den Ladepfad in `train.py` anschließen** und Konfiguration **A** fahren.
+
+## Die Entscheidung, die man kennen muss
+
+Der Rangtest (§9) hat am 09.09. gemessen: **die gepoolte Ortsstruktur braucht
+4 Moden für 99.9 % der Energie.** Das Tor aus §9 war damit rot und hätte ein
+ROM statt eines CNN verlangt.
+
+**Am 15.09. ist entschieden worden, den CNN trotzdem zu bauen.** Ein Tor sagt
+*„billiger geht auch"*, nicht *„das hier geht nicht"* — das Risiko ist
+**Überparametrisierung, nicht Unmöglichkeit**, und die Ablation A/B/C misst es.
+
+Was die Messung durchgesetzt hat, ist die **Größe**: 16 Kanäle × 3 Blöcke
+= 11 427 Parameter statt der 64 × 4 aus der Präsentation (die 137 923 kosten —
+nicht „~100 k", wie §11.4 behauptet).
+
+## Die Regeln, die nicht verhandelbar sind
+
+Sie stehen hier, weil ein Verstoß dagegen jede spätere Zahl wertlos macht und
+in keiner Trainingskurve sichtbar wäre:
+
+1. **`Q̇(t)` und `T_fluid_out(t)` gehen nie als Modelleingang rein.** Beide sind
+   Simulationsergebnisse, zur Laufzeit nicht verfügbar. Aufsicht (`L_wall`) und
+   Gegenprobe ja — Eingang nie.
+2. **`U` wird nie auf OP13 / OP15 / OP16 kalibriert.** Trainierte Flusslevel
+   sind 0 / 15 / 30 l/min; OP16 fährt 90 und ist die *Gegenprobe*.
+3. **Ein Seed ist keine Streuung.** Gemessen: 0.518 / 0.882 °C, auf OP06 bis
+   1.63 °C. Ein Unterschied unter ~1 °C ist mit drei Seeds nicht lesbar.
+4. **Kein `L_bc`.** Die Randbedingungen sind Padding. Braucht das Modell einen
+   Strafterm für die Symmetrie, ist das Padding falsch — dann wird das Padding
+   repariert, nicht ein Term addiert.
+5. **Divergenz wird nicht mit dem Netz übertüncht.** Ein Löser, der wegläuft,
+   hat einen Fehler in Padding oder CFL.
+6. **Der Gradient überquert die Historie nie.** Das ist der Grund, warum
+   Stufe 5 (BPTT) die einzige Änderung ist, die den Spätfehler O13 erreicht.
+   Drei Tests halten es fest — wer die Trainingsschleife optimiert, muss sie
+   brechen sehen.
+
+## Die Rechenmaschine
+
+Eine **Tesla T4** (g4dn, sm_75, 15.6 GiB). Der Engpass ist dort **nicht** die
+Rechenleistung, sondern die Kernel-Startlatenz: ~7000 sequentielle
+Rollout-Schritte je OP, jeder ein winziger Kernel. Deshalb rollt `train.py`
+**alle OPs in einem Durchgang** (`stack_ops`). Was dort nicht hilft — TF32
+(ist Ampere+, die T4 ist Turing), ein breiteres Netz, `channels_last` — steht
+im Modulkopf von `train.py`.
+
+Setup der Maschine: [`../PINNmodulusTwo/README_GPU_SERVER.md`](../PINNmodulusTwo/README_GPU_SERVER.md).
+
+## Welches Dokument was sagt
+
+| Datei | |
+|---|---|
+| **README.md** (hier) | *warum* — der Entwurf, die Begründungen, die Einwände |
+| [**FAHRPLAN.md**](FAHRPLAN.md) | *was, in welcher Reihenfolge, und woran es scheitert* — die Leiter mit Toren |
+| [**BENCHMARK.md**](BENCHMARK.md) | *was gemessen wurde* — Lauf-Protokoll und offene Routen |
+| [**README_OPS.md**](README_OPS.md) | *was der Datensatz nicht hergibt* — Kritik am Versuchsplan |
 
 ---
 
@@ -720,10 +777,9 @@ OP16), sonst ist der Vergleich wertlos.
 > statischen Karten zum Brechen der Translationsäquivarianz wäre ein
 > umständlicher Weg, vier Zahlen auszudrücken.
 >
-> **Tor: 🔴** Genau der Fall, für den das Tor gebaut war — es hätte ein ROM
-> verlangt. Am 15.09. ist dagegen entschieden worden; geblieben ist die
-> Verkleinerung des Stapels auf 16 × 3. Begründung im Kasten ganz oben und im
-> Fahrplan.
+> **Tor: 🔴** Genau der Fall, für den das Tor gebaut war. Wie damit umgegangen
+> wurde, steht im Kaltstart-Kopf ganz oben — geblieben ist die Verkleinerung
+> des Stapels auf 16 × 3.
 >
 > Und es war vorhersehbar: §3b hatte gezeigt, dass `T` der *einzige* räumlich
 > strukturierte zeitabhängige Input ist — die Quelle ist Skalar × fester Karte.
@@ -871,20 +927,15 @@ Billigste und Sicherste zuerst, der CNN erst, wenn die Messung ihn rechtfertigt.
 Wenn Stufe 1 sagt „fuenf Moden", baue ich das ROM und sage es dir, statt den
 CNN trotzdem zu bauen, weil er im Entwurf steht.
 
-> ### Eingelöst am 09.09. — und am 15.09. überstimmt
+> ### Was daraus geworden ist
 >
-> Der Rangtest sagte **vier Moden**, der Faltungsstapel war damit abgesagt und
-> das ROM der Plan. Der Absatz oben war insofern keine Floskel: die Messung ist
-> gelaufen, das Tor hat gefeuert, und der Umbau war eingearbeitet.
+> Der Rangtest lief, das Tor fiel rot — und am 15.09. ist der CNN trotzdem
+> gewählt worden. Der Absatz oben bleibt stehen, statt stillschweigend zu
+> verschwinden. **Die ganze Entscheidung steht im Kaltstart-Kopf ganz oben**;
+> geblieben ist von der Messung die Größe: 16 × 3 statt 64 × 4.
 >
-> **Am 15.09. ist der CNN trotzdem gewählt worden.** Das ist eine Entscheidung
-> des Projekteigners gegen die Messung, und sie steht hier, statt dass der
-> Absatz oben stillschweigend verschwindet. Was die Messung durchgesetzt hat,
-> ist die **Größe**: 16 × 3 statt 64 × 4.
->
-> §11.1 („die meisten Gewinne sind keine CNN-Gewinne") bleibt damit
-> **unbeantwortet, nicht widerlegt** — und ist jetzt die Frage, die Stufe 4
-> beantwortet. Genau dafür gibt es die Ablation A/B/C.
+> §11.1 ist damit **unbeantwortet, nicht widerlegt** — und genau die Frage,
+> die Stufe 4 mit der Ablation A/B/C beantwortet.
 
 ---
 

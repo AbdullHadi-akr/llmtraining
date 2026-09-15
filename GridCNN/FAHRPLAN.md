@@ -7,55 +7,23 @@
 > seinen eigenen, und die `.gitignore` führt genau diesen Namen auf ihrer
 > Whitelist.
 
-> ## ⚠ 15.09. — Der CNN wird gebaut. Gegen das Tor, und mit offenen Karten.
+> ## ⚠ 15.09. — Der CNN wird gebaut, gegen das rote Tor 0
 >
-> **Das gehört an den Anfang, weil es sonst später wie ein Versehen aussieht.**
+> Tor 0 ist am 09.09. rot gefallen (**4 Moden bei 99.9 %**) und hätte ein ROM
+> verlangt. Am 15.09. ist entschieden worden, den CNN trotzdem zu bauen; der
+> ROM-Plan ist gestrichen.
 >
-> Tor 0 ist am 09.09. **rot** gefallen: die gepoolte Ortsstruktur braucht
-> **4 Moden für 99.9 %** der Energie (1 / 2 / 4 / 6 für 90 / 99 / 99.9 /
-> 99.99 %). Der Fahrplan hatte sich für genau diesen Fall vorab festgelegt —
-> *„≤ ~5 Moden → 🔴 Umbau, ROM statt CNN"* — und der Umbau war am 15.09. auch
-> schon eingearbeitet.
+> **Die vollständige Begründung steht im [`README.md`](README.md)** unter
+> „Die Entscheidung, die man kennen muss" — hier nur die Folgen für den Plan:
 >
-> **Am selben Tag ist entschieden worden, den CNN trotzdem zu bauen** und den
-> ROM-Plan zu streichen. Das ist eine Entscheidung des Projekteigners gegen
-> eine Messung, keine Ableitung aus ihr, und sie wird hier genau so notiert.
->
-> ### Was das Tor gesagt hat, und was es nicht gesagt hat
->
-> | | |
-> |---|---|
-> | **gemessen** | der Raum der Trainings-Schnappschüsse ist praktisch vierdimensional |
-> | **daraus folgt** | ein ROM mit ~5 k Parametern *sollte* reichen |
-> | **daraus folgt NICHT** | dass ein CNN es nicht kann. Ein Tor sagt „billiger geht auch", nicht „das hier geht nicht" |
->
-> Der ehrliche Satz ist also: **das Risiko ist Überparametrisierung, nicht
-> Unmöglichkeit.** Und es ist messbar statt behauptet — die Ablation A/B/C
-> unten trennt genau das auf, und Stufe 4 vergleicht gegen die Physik-Latte.
->
-> ### Die Größe ist die Konsequenz, die geblieben ist
->
-> Gebaut werden **16 Kanäle × 3 Blöcke = 11 427 Parameter**, nicht die
-> 64 × 4 aus der Präsentation. Das ist der eine Punkt, an dem die Messung
-> den Entwurf verändert hat.
->
-> ⚠ **Und die Präsentationsgröße ist größer, als die Doku behauptet hat.**
-> README §11.4 und frühere Fassungen dieses Fahrplans nennen für 64 × 4
-> „~100 k Parameter". Nachgerechnet sind es **137 923** — 38 % mehr. Die
-> Schätzung hatte den Sprung 44 → 64 in der ersten Schicht und die vierte
-> 64×64-Faltung zu klein angesetzt. `tests/test_model.py` nagelt beide Zahlen
-> fest.
->
-> Erreichbar bleibt sie über `--width 64 --blocks 4`: die Größe ist eine
-> **Sweep-Achse**, kein Umbau.
->
-> ### Was vom ROM-Plan bleibt
->
-> Nichts im Plan — die Stufen sind zurückgebaut. Aber: `spatial_rank.py` und
-> das Messergebnis bleiben stehen, in „Erledigt" und in der Stand-Tabelle.
-> **Eine Messung wird nicht dadurch ungültig, dass man sich anders
-> entscheidet**, und wenn Stufe 4 den CNN nicht trägt, ist sie die erste
-> Stelle, an der man nachsieht.
+> * Gebaut werden **16 × 3 = 11 427 Parameter**, nicht die 64 × 4 aus der
+>   Präsentation (die **137 923** kosten, nicht „~100 k" wie §11.4 sagt).
+>   Die Größe bleibt als Sweep-Achse erreichbar.
+> * Stufe 3 ist wieder der explizite Löser, Stufe 4 der CNN. Stufe 3b entfällt.
+> * Der Rangtest und sein Ergebnis bleiben in „Erledigt" und in der
+>   Stand-Tabelle. **Eine Messung wird nicht dadurch ungültig, dass man sich
+>   anders entscheidet** — sie ist die erste Stelle, an der man nachsieht,
+>   wenn Stufe 4 nicht trägt.
 
 **Sortierung:** von oben nach unten — was zu tun ist, steht oben; was erledigt
 ist, wandert nach unten in „Erledigt".
