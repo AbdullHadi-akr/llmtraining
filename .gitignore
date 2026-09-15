@@ -45,6 +45,13 @@
 # Same for the profile extension (its config.yaml IS the benchmark configuration)
 !PINNmodulusTwoExtProfiles/config.yaml
 
+# Keep the ssh access helper tracked: Makefile, shell scripts and the settings
+# TEMPLATE. The filled-in zugang.env and any key material are ignored at the
+# very bottom of this file, where no allowlist rule can reach them.
+!ssh-zugang/Makefile
+!ssh-zugang/scripts/*.sh
+!ssh-zugang/zugang.env.example
+
 # Keep this file tracked
 !.gitignore
 
@@ -72,3 +79,16 @@ storeOps/
 # ---------------------------------------------------------------------------
 data_cache/
 material_properties/
+
+# ---------------------------------------------------------------------------
+# Key material and the filled-in ssh settings. These rules are LAST on purpose:
+# in .gitignore the last matching rule wins, so nothing above can pull a private
+# key, a public key or the local zugang.env (IPs, usernames, key paths) back
+# into the repo. Keys belong in ~/.ssh and nowhere else.
+# ---------------------------------------------------------------------------
+ssh-zugang/zugang.env
+ssh-zugang/**/*.pub
+ssh-zugang/**/*.pem
+ssh-zugang/**/id_*
+ssh-zugang/**/*_key
+ssh-zugang/**/*-key
