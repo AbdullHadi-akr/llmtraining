@@ -215,16 +215,39 @@ Gitterlösers. Sekunden pro Trajektorie statt Stunden.
   was `g` lernen muss.
 * **Testet den Kapazitätsterm aus 1b** — ohne ein einziges Gewicht.
 
-### Was wegfällt
+### Was wegfällt — und was ausdrücklich nicht
 
-Padding, Geisterschichten, der nicht-äquidistante x-Stencil, der Kreuzterm für
-`λ_xy` als FD. Die Basis trägt das alles implizit:
+> **Präzisiert am 15.09.** Hier stand ursprünglich, Padding, Geisterschichten,
+> der x-Stencil und der Kreuzterm fielen weg. Das war zu grob formuliert, und
+> mit dem Code aus #37 im Repo würde es zu einem falschen Schluss verleiten:
+> dass `grid.py` und `physics.py` mit der Absage des CNN erledigt seien.
+
+**Aus dem Rollout fällt der Gitterlöser heraus** — gerollt wird auf `r + 1`
+Zahlen, nicht auf 363 Knoten. Das ist der Gewinn.
+
+**Aus dem Aufbau fällt gar nichts.** `L` in `Φᵀ L Φ` ist genau der Operator aus
+`physics.anisotropic_laplacian`, angewandt auf den gepaddeten Stapel aus
+`grid.pad_all`. Um die `r × r`-Matrix **einmal** zu bilden, wird `L` auf jede
+der `r` Basisfunktionen angewandt — mit Padding, mit Geisterschichten, mit dem
+nicht-äquidistanten x-Stern und mit dem Kreuzterm. Danach nie wieder.
+
+Der Unterschied ist also `r + 1` Operatoranwendungen **insgesamt** statt einer
+je Zeitschritt und Trajektorie. Deshalb ist die Stufe billiger — nicht, weil
+weniger Physik gerechnet würde.
 
 > **Die Symmetrie ist gratis und exakt.** `dT/dx = 0` an der Zellmitte ist eine
 > *homogene lineare* Bedingung. Jeder Trainings-Schnappschuss erfüllt sie, also
 > erfüllt sie jede Linearkombination — und `Φ` spannt nichts anderes auf. Kein
-> Padding, kein `w_bc`, kein Strafterm. Das ist sauberer als die
-> Geisterschicht-Variante, die dafür gebaut worden wäre.
+> `w_bc`, kein Strafterm.
+>
+> Das **Padding** bleibt trotzdem nötig, und zwar beim Aufbau von `Φᵀ L Φ`:
+> `L` braucht Werte außerhalb des Gebiets, egal worauf es angewandt wird. Was
+> gratis wird, ist die *Einhaltung* der Bedingung durch den Zustand — nicht
+> ihre *Umsetzung* im Operator.
+
+⚠ **Und R6 überlebt die Projektion.** `Φᵀ L Φ` erbt die Bilanzuntreue von `L`
+(3.6 % Drift, sättigend). Der Umbau aufs ROM erledigt den Befund nicht, er
+macht ihn nur billiger messbar.
 
 ### Tor
 
