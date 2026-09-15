@@ -1,6 +1,21 @@
 # GridCNN — das Feld auf einmal, statt Punkt für Punkt
 
-> **Status: Entwurf, kein Code.** Diese Datei ist die Design-Diskussion.
+> ## ⚠ 09.09. — die Messung hat entschieden: **kein CNN.**
+>
+> Der Rangtest ist gelaufen. **Die gepoolte Ortsstruktur braucht 4 Moden für
+> 99.9 % der Energie.** Damit ist das Tor aus §9 rot, und §11.7 wird eingelöst:
+> es wird ein **ROM** gebaut, kein Faltungsstapel — POD-Projektion auf 4–6
+> Moden, darauf ein kleines Netz von ~5 k Parametern.
+>
+> **Was bleibt:** die Physik. Randbedingungen, Wandterm, Quelle, die Analyse des
+> Versuchsplans — alles ab §5 gilt unverändert. **Was hinfällig ist:** §2 und
+> §7, die Argumente für die Faltung und ihr Flussdiagramm. Sie bleiben als
+> Beleg stehen, wie die Entscheidung zustande kam.
+>
+> Der neue Plan steht in [`FAHRPLAN.md`](FAHRPLAN.md). Der Ordner heißt weiter
+> `GridCNN`, damit die Verweise aus PR #31 halten.
+>
+> **Status: Entwurf, kein Modellcode. Zwei Werkzeuge gelaufen.**
 >
 > **02.09. — alle Geometrie- und Wärmestromfragen sind beantwortet.** Damit
 > stehen die Randbedingungen, das x-Layout (§5), der Wandterm mit `A = 0.0206 m²`
@@ -97,7 +112,13 @@ an den Randbedingungen und nicht am Geschmack.
 
 ---
 
-## 2. Was tatsächlich für den CNN spricht
+## 2. Was für den CNN sprach — *überholt am 09.09.*
+
+> Dieser Abschnitt ist **Beleg, nicht Plan.** Tor 0 hat den Faltungsstapel
+> abgesagt (4 Moden bei 99.9 %). Die Punkte (a)–(e) bleiben lesenswert, weil
+> vier von ihnen **Gitter**-Gewinne sind und damit ins ROM übergehen — nur die
+> zwei echten Faltungs-Argumente sind weg. Genau diese Trennung hatte §11.1
+> vorhergesagt.
 
 Das Tempo-Argument trägt **nicht** — `rollout()` in `PINNmodulusTwo/model.py`
 batcht alle 363 Punkte schon in einen MLP-Forward pro Zeitschritt. Pro Schritt
@@ -456,6 +477,8 @@ Geschlossen, ohne einen einzigen freien Parameter im Fluidpfad:
 # 1. Fluidtemperatur laengs der Wand -- Enthalpiebilanz entlang +y.
 #    Das Kuehlmittel fliesst entlang +y und erwaermt sich dabei, die Wand
 #    sieht also bei kleinem y kaelteres Fluid als bei grossem.
+#
+#    !! KORRIGIERT 09.09. -- diese Form divergiert fuer mdot -> 0, siehe unten.
 T_fluid(y, t) = T_in(t) + Q_kumuliert(y, t) / (mdot(t) * Cp_fluid)
                           ^ Integral der Wandwaerme von y_min bis y
 
@@ -496,6 +519,61 @@ elf Trajektorien zaehlt jeder, den man nicht braucht.
 > nicht allein flussabhaengig. Dann -- und nur dann -- wird es gelernt, aber
 > weiterhin mit `L_wall` gegen `Q̇` beaufsichtigt.
 
+### ⚠ 09.09. — der Fluidpfad braucht einen Kapazitätsterm
+
+Die Bilanzprobe hat bei **ṁ = 0** (OP07, OP14) einen Wandanteil von **~0.27**
+gemessen, nicht ~0. Mein Torkriterium erwartete ~0 und war **falsch gedacht**:
+
+> **`ṁ = 0` heißt kein *Fluss*, nicht kein *Fluid*.** Das Kühlmittel steht im
+> Kanal und nimmt Wärme in seine **eigene Wärmekapazität** auf. Die Energie wird
+> gespeichert, nicht abtransportiert.
+
+Die gemessenen `U` bestätigen es: **~1130 W/m²K** mit Fluss gegen **~50** ohne —
+Faktor ~23. Stehendes Flüssigkühlmittel bei O(50) und Zwangskonvektion in einer
+Kühlplatte bei O(1000) sind beide lehrbuchplausibel. Das ist eine **Bestätigung
+der Messkette**, kein Fehler in den Daten.
+
+**Die Folge ist eine Modelländerung.** `ΔT_fluid = Q̇/(ṁ·Cp)` hat eine Polstelle
+bei ṁ = 0. Richtig ist Advektion **und** Speicherung:
+
+```
+C_fluid · dT_fluid/dt  =  Q̇  −  ṁ · Cp · (T_fluid − T_in)
+                          ^Quelle   ^Advektion
+```
+
+Bei ṁ = 0 bleibt reines Aufladen; bei großem ṁ fällt die alte stationäre Bilanz
+heraus. **Eine Zustandsvariable mehr, keine Singularität.**
+
+> ### Und das trifft genau O14
+>
+> V̇ = 0 ist das Regime mit dem schlechtesten ausgehaltenen Wert (Mittel 5.374
+> gegen 2.928 °C; OP06 bei 6.270 °C). Bisher lautete die Erklärung
+> **Abdeckung** — nur zwei Trainings-OPs, beide Kälteextreme. Jetzt steht
+> daneben ein **Mechanismus**: es ist das Regime, in dem die Fluidbeschreibung
+> als reine Advektion zusammenbricht.
+>
+> **Die Abdeckungserklärung bleibt gültig.** Die beiden ersetzen sich nicht —
+> aber sie sind **trennbar**, und das ist die interessante Messung: *verbessert
+> ein Kapazitätsterm die V̇ = 0-OPs, ohne dass neue Daten dazukommen?* Wenn ja,
+> war O14 nicht nur eine Envelope-Grenze.
+>
+> Geprüft wird das in `FAHRPLAN.md` **Stufe 3** — im Löser ohne Netz, also ohne
+> dass ein Gewicht das Ergebnis verwischen kann.
+
+### Und ein zweiter Befund, noch unbestätigt
+
+`Q_ht/JR1 ≈ 2.5` im späten Fenster — weder 1 (eine Platte) noch 2 (beide).
+Hypothese: der Monitor draint die **Gesamterzeugung**, und `total_w/JR1 ≈ 2.5`.
+Doc 030 hat festgestellt, dass `Heat Source Monitor (total)` größer als
+`JR1 + JR2` ist.
+
+Wenn das stimmt, ist 2.5 **kein Konventionsfehler**, sondern die Aussage: *die
+Zelle erzeugt mehr Wärme als 2 × JR1, und die Modellquelle `q_dot` deckt nur JR1
+ab* — grob 20 % der Gesamterzeugung fehlen (Ableiter, Stromschienen,
+Kontaktwiderstände). Das wäre ein **O17** für `PINNmodulusTwo`.
+
+Der zweite `balance_check.py`-Lauf hat die Spalte `Q_ht/tot` und entscheidet es.
+
 ### Die zwei Gegenproben, die dadurch gratis sind
 
 ```
@@ -521,7 +599,13 @@ Gegenprobe reicht direktes Einlesen der CSVs; fuer das **Training** muessen
 bauen (10-30 min). Das ist ein Eingriff in geteilte Infrastruktur und gehoert
 in den Plan, nicht nebenbei erledigt. Siehe [`GridCNN/FAHRPLAN.md`](FAHRPLAN.md), Stufe 2.
 
-## 7. Das Flussdiagramm
+## 7. Das Flussdiagramm — *für den CNN, überholt*
+
+> Tafel 1 und 2 zeigen den Conv-Entwurf vom 02.09. Sie bleiben stehen, weil
+> **die Physik darin unverändert gilt** — Symmetrie, Wandfluss, freier Rollout.
+> Nur der Kasten „Conv-Stapel" wird im ROM ein 6×6-Galerkin-System plus ein
+> kleines MLP, und das Padding entfällt (die Basis erfüllt die Symmetrie exakt,
+> `FAHRPLAN.md` Stufe 3).
 
 ### Ein Rollout-Schritt
 
@@ -611,7 +695,25 @@ OP16), sonst ist der Vergleich wertlos.
 
 ---
 
-## 9. Der Rangtest — das Werkzeug steht
+## 9. Der Rangtest — **gelaufen, 09.09.**
+
+> ### Ergebnis
+>
+> | | Moden für 90 / 99 / 99.9 / 99.99 % |
+> |---|---|
+> | **gepoolte Ortsstruktur** | **1 / 2 / 4 / 6** |
+>
+> **Vier Moden bei 99.9 %.** Das Gitter hat 363 Punkte; der Raum, den sie
+> aufspannen, ist praktisch vierdimensional. Ein 3×3-Kernel mit vierzehn
+> statischen Karten zum Brechen der Translationsäquivarianz wäre ein
+> umständlicher Weg, vier Zahlen auszudrücken.
+>
+> **Tor: 🔴 ROM statt CNN.** Genau der Fall, für den das Tor gebaut war.
+>
+> Und es war vorhersehbar: §3b hatte gezeigt, dass `T` der *einzige* räumlich
+> strukturierte zeitabhängige Input ist — die Quelle ist Skalar × fester Karte.
+> Wenn nichts Zeitabhängiges Ortsstruktur einträgt, kann das Feld nicht
+> hochrangig sein. Der Test hat das bestätigt statt es zu vermuten.
 
 [`tools/spatial_rank.py`](tools/spatial_rank.py), geschrieben und gegen ein
 nachgebautes Buendel getestet. Braucht **nur numpy** — kein Torch, kein pandas,
@@ -753,6 +855,14 @@ Deshalb ist [`GridCNN/FAHRPLAN.md`](FAHRPLAN.md) eine **Leiter**, keine gerade L
 Billigste und Sicherste zuerst, der CNN erst, wenn die Messung ihn rechtfertigt.
 Wenn Stufe 1 sagt „fuenf Moden", baue ich das ROM und sage es dir, statt den
 CNN trotzdem zu bauen, weil er im Entwurf steht.
+
+> ### ✅ Eingelöst am 09.09.
+>
+> Der Rangtest sagte **vier Moden**. Der Faltungsstapel ist abgesagt, das ROM
+> ist der Plan. Der Absatz oben war keine Floskel — und §11.1 („die meisten
+> Gewinne sind keine CNN-Gewinne") war die richtige Diagnose: vier der sechs
+> Argumente gehen unverändert ins ROM über, die zwei echten Faltungs-Argumente
+> sind weg.
 
 ---
 
