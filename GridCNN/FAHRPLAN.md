@@ -436,7 +436,8 @@ Damit der Umfang nicht wandert:
 | **22.09.** | **Der Geometrie-Test war zirkulär** und hätte gegen die echten Koordinaten in allen vier Vergleichen gefallen. `test_layout_aus_den_echten_koordinaten` schließt den Kreis |
 | **22.09.** | **Materialverteilung gemessen:** `region`/`rho`/`Cp` je x-Ebene konstant; `lam` variiert, aber nur in zwei Zeilen am unteren y-Rand (22 von 121 Punkten) |
 | **22.09.** | **§2b widerspricht `model.py:193`** — die zwei Koordinatenkarten geben dem Kern die Position, die §2b ihm abspricht. Offen, Route R8 |
-| **22.09.** | Eine float32-Schranke im gepaddeten Rollout-Test hielt zufällig (1.2e-6 gegen 1e-6). Jetzt float64 **ohne Toleranz**, wie beim Schwestertest |
+| **22.09.** | **`main` war seit dem 17.09. rot** und niemand hat es bemerkt: `pytest (GridCNN)` meldete auf `163b21c` `2 failed, 97 passed`, und der Benchmark-Schritt dahinter wurde seither übersprungen. PR #40 erbt dieses Rot — seine vier Dateien liegen alle in `PINNmodulusTwo/`, dessen Suite grün ist |
+| **22.09.** | Beide fallenden Tests repariert: die float32-Schranke im gepaddeten Rollout (1.2e-6 gegen 1e-6, hielt zufällig) und **`torch.equal` im float64-Vergleich** — Bitgleichheit zwischen zwei Batchgrößen ist durch nichts garantiert und war nicht portabel (lokal grün, auf dem Runner rot). Jetzt beide gegen eine relative Schranke `1e-12` |
 
 ## Stand
 

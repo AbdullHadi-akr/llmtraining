@@ -335,7 +335,25 @@ def _op_wie(op, seed, n_t=None):
         dtn=op.dtn, split_t=min(30, n_t - 1), n_t=n_t)
 
 
-def test_gebatcht_rollt_in_float64_BIT_FUER_BIT_wie_einzeln(layout):
+# Die Schranke fuer den float64-Vergleich gebatcht gegen einzeln: relativ zur
+# Feldamplitude. 1e-12 ist grob 1e4 Rundungseinheiten von float64 und damit sechs
+# Groessenordnungen unter der float32-Abweichung (~1e-6 relativ), die derselbe
+# Vergleich zeigt. Das ist die Aussage, auf die es ankommt -- **Batchen aendert
+# das Experiment nicht** -- und sie haelt auf jeder Maschine.
+#
+# ⚠ NICHT ``torch.equal``. Bis zum 22.09. stand hier Bitgleichheit, und sie war
+# **nicht portabel**: derselbe Test lief lokal gruen und fiel auf dem
+# GitHub-Runner (main, 163b21c, 17.09., ``2 failed, 97 passed`` -- main war
+# deswegen fuenf Tage rot, und der Benchmark-Schritt dahinter wurde stillschweigend
+# uebersprungen). torch waehlt den Faltungsalgorithmus nach Batchgroesse UND
+# Maschine; Gleitkommaaddition ist nicht assoziativ, also ist Bitgleichheit
+# zwischen Batch 1 und Batch 3 durch nichts garantiert -- auch in float64 nicht.
+# Sie trat ein, solange die Algorithmen zufaellig uebereinstimmten. Ein Test, der
+# auf so einen Zufall baut, misst die Maschine und nicht den Code.
+REL_F64 = 1e-12
+
+
+def test_gebatcht_rollt_in_float64_wie_einzeln(layout):
     """**Die Zusage, auf der die T4-Optimierung steht.**
 
     Elf OPs zusammen zu rollen ist nur dann eine Beschleunigung und keine
@@ -343,13 +361,12 @@ def test_gebatcht_rollt_in_float64_BIT_FUER_BIT_wie_einzeln(layout):
     spaetere Zahl mit der Batchgroesse verwechselbar -- und das faellt in einer
     Trainingskurve nicht auf.
 
-    Geprueft wird in **float64 ohne Toleranz**. In float32 weichen die beiden
-    Wege um ~8e-6 ab, und zwar nicht wegen eines Fehlers: die
+    Geprueft wird in float64 gegen :data:`REL_F64`. In float32 weichen die beiden
+    Wege um ~1e-6 relativ ab, und zwar nicht wegen eines Fehlers: die
     Faltungsbibliothek waehlt fuer Batch 1 einen anderen Algorithmus als fuer
-    Batch 3, und Gleitkommaaddition ist nicht assoziativ. In float64
-    verschwindet der Unterschied **exakt** -- was genau belegt, dass es
-    Rechenreihenfolge ist und keine Physik. Der Test daneben misst die
-    float32-Groessenordnung, damit sie nicht unbemerkt waechst.
+    Batch 3. In float64 faellt der Unterschied um sechs Groessenordnungen -- was
+    genau belegt, dass es Rechenreihenfolge ist und keine Physik. Der Test daneben
+    misst die float32-Groessenordnung, damit sie nicht unbemerkt waechst.
     """
     d = torch.float64
     torch.manual_seed(0)
@@ -364,7 +381,13 @@ def test_gebatcht_rollt_in_float64_BIT_FUER_BIT_wie_einzeln(layout):
     gebatcht, _ = T.rollout_batched(net, T.stack_ops(ops), statics, **kw)
 
     for i, e in enumerate(einzeln):
-        assert torch.equal(gebatcht[:e.shape[0], i], e), f"OP {i}"
+        abw = float((gebatcht[:e.shape[0], i] - e).abs().max())
+        skala = float(e.abs().max())
+        assert abw <= REL_F64 * skala, (
+            f"OP {i}: gebatcht weicht um {abw:.3e} ab, Feldamplitude {skala:.3e} "
+            f"-> relativ {abw / skala:.3e} > {REL_F64:.0e}. Das ist zu viel fuer "
+            f"Rechenreihenfolge in float64 -- Batchen aendert hier das Ergebnis."
+        )
 
 
 def test_in_float32_bleibt_die_abweichung_im_rundungsrauschen(net, op, statics):
@@ -428,7 +451,10 @@ def test_der_kurze_op_rollt_trotzdem_richtig(layout, net, op, statics):
     nichts geaendert hatte. Eine Schranke, die auf eine Korrektur in der
     fuenften Stelle der Gitterweite reagiert, misst Rundung und nicht Padding.
 
-    In float64 ist die Differenz **exakt null**, auch fuer den gepaddeten OP.
+    In float64 faellt die Differenz um sechs Groessenordnungen, auch fuer den
+    gepaddeten OP; geprueft gegen :data:`REL_F64` und nicht auf Bitgleichheit --
+    die ist zwischen zwei Batchgroessen durch nichts garantiert. Warum, steht bei
+    :data:`REL_F64`.
     """
     d = torch.float64
     torch.manual_seed(0)
@@ -443,7 +469,12 @@ def test_der_kurze_op_rollt_trotzdem_richtig(layout, net, op, statics):
     allein = T.rollout(netz, kurz64, stat64, **kw)[0]
     zusammen, _ = T.rollout_batched(
         netz, T.stack_ops([lang64, kurz64]), stat64, **kw)
-    assert torch.equal(zusammen[:25, 1], allein)
+    abw = float((zusammen[:25, 1] - allein).abs().max())
+    skala = float(allein.abs().max())
+    assert abw <= REL_F64 * skala, (
+        f"gepaddet weicht um {abw:.3e} ab, Feldamplitude {skala:.3e} "
+        f"-> relativ {abw / skala:.3e} > {REL_F64:.0e}"
+    )
 
     # Die Gegenprobe in float32: gross genug, um sie zu bemerken, aber im
     # Rundungsrauschen -- dieselbe Schranke wie beim Schwestertest.

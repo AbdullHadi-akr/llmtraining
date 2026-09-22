@@ -286,10 +286,26 @@ Kein `benchmark.py`-Lauf: die Zahlen kommen von der Maschine mit `data_cache/`
 - `OK` `lam_xz`/`lam_yz` sind global null — genau die zwei, die
   `build_static_maps` von vornherein weglässt. `lam_xy` ist ungleich null
   **genau auf JR1**, wie der Kommentar dort behauptet. Beides bestätigt.
-- `FUND` Eine float32-Schranke im gepaddeten Rollout-Test (`< 1e-6`) hielt
-  zufällig; der Schwestertest nennt ~8e-6 als normale float32-Abweichung.
-  Jetzt float64 **ohne Toleranz** — dort ist die Differenz exakt null, auch für
-  den gepaddeten OP.
+- `FUND` **`main` war seit dem 17.09. rot.** Der Lauf auf `163b21c` (Merge von
+  PR #39) meldet im Schritt `pytest (GridCNN)` `2 failed, 97 passed`;
+  PINNmodulusTwos eigene Suite ist grün (`133 passed`). Weil der GridCNN-Schritt
+  fällt, wurde der Schritt dahinter — `GridCNN Benchmark, Stufe 0 und 2` — fünf
+  Tage lang **übersprungen**. PR #40 ist nur deshalb rot: seine vier Dateien
+  liegen alle in `PINNmodulusTwo/`.
+- `FUND` Beide fallenden Tests hingen am selben Muster: **eine Schranke, die
+  Rundung misst statt Verhalten.**
+  1. `test_der_kurze_op_rollt_trotzdem_richtig` verglich float32 gegen `< 1e-6`,
+     während der Schwestertest ~8e-6 als normale float32-Abweichung ausweist.
+  2. `test_gebatcht_rollt_..._BIT_FUER_BIT_...` forderte `torch.equal` in
+     float64. **Bitgleichheit zwischen Batch 1 und Batch 3 ist durch nichts
+     garantiert** — torch wählt den Faltungsalgorithmus nach Batchgröße *und*
+     Maschine. Derselbe Test lief lokal grün und fiel auf dem Runner.
+
+  Beide prüfen jetzt eine **relative** Schranke von `1e-12` in float64. Gemessen:
+  float64 0.0, float32 4.9e-7 — die Schranke liegt viereinhalb Größenordnungen
+  unter dem float32-Wert und vier über `eps(float64)`. Die Zusage selbst
+  (*Batchen ändert das Experiment nicht*) ist damit schärfer belegt als vorher,
+  weil sie jetzt auf jeder Maschine gilt statt nur auf manchen.
 - **100 Tests grün** (99 + der neue Koordinatentest), 5.3 s, ohne GPU und ohne
   `data_cache`.
 
