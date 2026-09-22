@@ -629,7 +629,7 @@ systemctl status nvidia-mps          # "active (running)"
 Danach ist MPS nach jedem Boot da. Pruefen laesst es sich jederzeit mit
 
 ```bash
-ls /tmp/nvidia-mps/control && pgrep -x nvidia-cuda-mps-control
+ls /tmp/nvidia-mps/control && pgrep -x nvidia-cuda-mps
 ```
 
 und `sweep.py` sagt es in Zeile 4 seiner Ausgabe ohnehin von selbst.

@@ -335,7 +335,25 @@ def _op_wie(op, seed, n_t=None):
         dtn=op.dtn, split_t=min(30, n_t - 1), n_t=n_t)
 
 
-def test_gebatcht_rollt_in_float64_BIT_FUER_BIT_wie_einzeln(layout):
+# Die Schranke fuer den float64-Vergleich gebatcht gegen einzeln: relativ zur
+# Feldamplitude. 1e-12 ist grob 1e4 Rundungseinheiten von float64 und damit sechs
+# Groessenordnungen unter der float32-Abweichung (~1e-6 relativ), die derselbe
+# Vergleich zeigt. Das ist die Aussage, auf die es ankommt -- **Batchen aendert
+# das Experiment nicht** -- und sie haelt auf jeder Maschine.
+#
+# ⚠ NICHT ``torch.equal``. Bis zum 22.09. stand hier Bitgleichheit, und sie war
+# **nicht portabel**: derselbe Test lief lokal gruen und fiel auf dem
+# GitHub-Runner (main, 163b21c, 17.09., ``2 failed, 97 passed`` -- main war
+# deswegen fuenf Tage rot, und der Benchmark-Schritt dahinter wurde stillschweigend
+# uebersprungen). torch waehlt den Faltungsalgorithmus nach Batchgroesse UND
+# Maschine; Gleitkommaaddition ist nicht assoziativ, also ist Bitgleichheit
+# zwischen Batch 1 und Batch 3 durch nichts garantiert -- auch in float64 nicht.
+# Sie trat ein, solange die Algorithmen zufaellig uebereinstimmten. Ein Test, der
+# auf so einen Zufall baut, misst die Maschine und nicht den Code.
+REL_F64 = 1e-12
+
+
+def test_gebatcht_rollt_in_float64_wie_einzeln(layout):
     """**Die Zusage, auf der die T4-Optimierung steht.**
 
     Elf OPs zusammen zu rollen ist nur dann eine Beschleunigung und keine
@@ -343,13 +361,12 @@ def test_gebatcht_rollt_in_float64_BIT_FUER_BIT_wie_einzeln(layout):
     spaetere Zahl mit der Batchgroesse verwechselbar -- und das faellt in einer
     Trainingskurve nicht auf.
 
-    Geprueft wird in **float64 ohne Toleranz**. In float32 weichen die beiden
-    Wege um ~8e-6 ab, und zwar nicht wegen eines Fehlers: die
+    Geprueft wird in float64 gegen :data:`REL_F64`. In float32 weichen die beiden
+    Wege um ~1e-6 relativ ab, und zwar nicht wegen eines Fehlers: die
     Faltungsbibliothek waehlt fuer Batch 1 einen anderen Algorithmus als fuer
-    Batch 3, und Gleitkommaaddition ist nicht assoziativ. In float64
-    verschwindet der Unterschied **exakt** -- was genau belegt, dass es
-    Rechenreihenfolge ist und keine Physik. Der Test daneben misst die
-    float32-Groessenordnung, damit sie nicht unbemerkt waechst.
+    Batch 3. In float64 faellt der Unterschied um sechs Groessenordnungen -- was
+    genau belegt, dass es Rechenreihenfolge ist und keine Physik. Der Test daneben
+    misst die float32-Groessenordnung, damit sie nicht unbemerkt waechst.
     """
     d = torch.float64
     torch.manual_seed(0)
@@ -364,7 +381,13 @@ def test_gebatcht_rollt_in_float64_BIT_FUER_BIT_wie_einzeln(layout):
     gebatcht, _ = T.rollout_batched(net, T.stack_ops(ops), statics, **kw)
 
     for i, e in enumerate(einzeln):
-        assert torch.equal(gebatcht[:e.shape[0], i], e), f"OP {i}"
+        abw = float((gebatcht[:e.shape[0], i] - e).abs().max())
+        skala = float(e.abs().max())
+        assert abw <= REL_F64 * skala, (
+            f"OP {i}: gebatcht weicht um {abw:.3e} ab, Feldamplitude {skala:.3e} "
+            f"-> relativ {abw / skala:.3e} > {REL_F64:.0e}. Das ist zu viel fuer "
+            f"Rechenreihenfolge in float64 -- Batchen aendert hier das Ergebnis."
+        )
 
 
 def test_in_float32_bleibt_die_abweichung_im_rundungsrauschen(net, op, statics):
@@ -400,7 +423,7 @@ def _op_dtype(layout, dtype, seed, n_t=40):
         tn_ic=torch.randn(nx, ny, nz, dtype=dtype), qsrc=q, fo=fo,
         config=torch.randn(n_t, 7, dtype=dtype),
         forcing=torch.randn(n_t, 11, dtype=dtype),
-        dtn=0.01, split_t=30, n_t=n_t)
+        dtn=0.01, split_t=min(30, n_t - 1), n_t=n_t)
 
 
 def test_verschieden_lange_ops_lassen_sich_stapeln(net, op, statics):
@@ -414,13 +437,52 @@ def test_verschieden_lange_ops_lassen_sich_stapeln(net, op, statics):
     assert torch.equal(b.config[1, -1], kurz.config[24])
 
 
-def test_der_kurze_op_rollt_trotzdem_richtig(net, op, statics):
-    """Auffuellen darf den gueltigen Teil des kurzen OP nicht veraendern."""
-    kurz = _op_wie(op, 3, n_t=25)
+def test_der_kurze_op_rollt_trotzdem_richtig(layout, net, op, statics):
+    """Auffuellen darf den gueltigen Teil des kurzen OP nicht veraendern.
+
+    Geprueft wird wie beim Schwestertest oben: **float64, ohne Toleranz**, und
+    daneben die float32-Groessenordnung.
+
+    ⚠ Bis zum 22.09. stand hier nur ein float32-Vergleich gegen ``< 1e-6``.
+    Diese Schranke widersprach dem Test daneben, der ~8e-6 als die normale
+    float32-Abweichung ausweist -- sie hielt bei 1.2e-6 rein zufaellig. Als in
+    ``conftest.py`` ``dy``/``dz`` auf die gemessenen Werte korrigiert wurden,
+    stieg die Abweichung auf 1.9e-6 und der Test fiel, obwohl sich am Verhalten
+    nichts geaendert hatte. Eine Schranke, die auf eine Korrektur in der
+    fuenften Stelle der Gitterweite reagiert, misst Rundung und nicht Padding.
+
+    In float64 faellt die Differenz um sechs Groessenordnungen, auch fuer den
+    gepaddeten OP; geprueft gegen :data:`REL_F64` und nicht auf Bitgleichheit --
+    die ist zwischen zwei Batchgroessen durch nichts garantiert. Warum, steht bei
+    :data:`REL_F64`.
+    """
+    d = torch.float64
+    torch.manual_seed(0)
+    netz = M.GridCNN(layout).to(d)
+    with torch.no_grad():
+        netz.correction.head.weight.normal_(0.0, 0.05)
+    stat64 = _statics_dtype(layout, d)
+    lang64 = _op_dtype(layout, d, 0)
+    kurz64 = _op_dtype(layout, d, 3, n_t=25)
     kw = dict(lag1=5, lag2=20)
-    allein = T.rollout(net, kurz, statics, **kw)[0]
-    zusammen, _ = T.rollout_batched(net, T.stack_ops([op, kurz]), statics, **kw)
-    assert float((zusammen[:25, 1] - allein).abs().max()) < 1e-6
+
+    allein = T.rollout(netz, kurz64, stat64, **kw)[0]
+    zusammen, _ = T.rollout_batched(
+        netz, T.stack_ops([lang64, kurz64]), stat64, **kw)
+    abw = float((zusammen[:25, 1] - allein).abs().max())
+    skala = float(allein.abs().max())
+    assert abw <= REL_F64 * skala, (
+        f"gepaddet weicht um {abw:.3e} ab, Feldamplitude {skala:.3e} "
+        f"-> relativ {abw / skala:.3e} > {REL_F64:.0e}"
+    )
+
+    # Die Gegenprobe in float32: gross genug, um sie zu bemerken, aber im
+    # Rundungsrauschen -- dieselbe Schranke wie beim Schwestertest.
+    kurz32 = _op_wie(op, 3, n_t=25)
+    allein32 = T.rollout(net, kurz32, statics, **kw)[0]
+    zus32, _ = T.rollout_batched(net, T.stack_ops([op, kurz32]), statics, **kw)
+    abw = float((zus32[:25, 1] - allein32).abs().max())
+    assert abw < 1e-4, f"float32-Abweichung {abw} ist zu gross fuer Rundung"
 
 
 def test_verschiedene_zeitschritte_fallen_laut_aus(op):
@@ -454,3 +516,57 @@ def test_die_cli_kennt_device():
     a = T.build_argparser().parse_args(["--device", "cuda:0"])
     assert a.device == "cuda:0"
     assert T.build_argparser().parse_args([]).device == "ask"
+
+
+# ---------------------------------------------------------------------------
+# Die Ablationsflags -- eine Uebersetzung, an einer Stelle
+# ---------------------------------------------------------------------------
+def _args(*argv):
+    return T.build_argparser().parse_args(list(argv))
+
+
+def test_no_coord_maps_kommt_an_BEIDEN_stellen_an():
+    """Karten und erste Faltung muessen zusammen schmal werden, nicht eine.
+
+    Die haeufigste Art, diese Ablation kaputtzumachen, ist, nur eine der beiden
+    Breiten umzustellen. Dann faellt es beim ersten Forward auf -- aber erst
+    nach dem Laden der Daten, also Minuten spaeter und auf der Maschine.
+    """
+    kw = T.modell_kwargs(_args("--no-coord-maps"))
+    assert kw["static"]["coord_maps"] is False
+    assert kw["net"]["n_static"] == M.CH_STATIC_OHNE_KOORD
+
+    vor = T.modell_kwargs(_args())
+    assert vor["static"]["coord_maps"] is True
+    assert vor["net"]["n_static"] == M.CH_STATIC
+
+
+def test_die_uebersetzung_baut_ein_netz_das_zu_den_karten_passt(layout):
+    """Ende zu Ende: was modell_kwargs sagt, laeuft auch durch."""
+    import numpy as np
+    n = layout.n_points
+    rng = np.random.default_rng(0)
+    for argv, breite in (((), 44), (("--no-coord-maps",), 42)):
+        kw = T.modell_kwargs(_args(*argv))
+        statics = M.build_static_maps(
+            layout, lam=rng.random((n, 3, 3)) + 1.0, rho=np.full(n, 2500.0),
+            cp=np.full(n, 900.0), **kw["static"])
+        netz = M.GridCNN(layout, **kw["net"])
+        nx, ny, nz = layout.shape
+        torch.manual_seed(0)
+        state = M.state_channels(*(torch.randn(2, nx, ny, nz) for _ in range(3)))
+        drivers = M.driver_channels(torch.randn(2, 7), torch.randn(2, 11), ny, nz)
+        x = M.assemble_input(state, statics, drivers)
+        assert x.shape[1] == breite
+        assert netz.correction(x).shape == (2, nx, ny, nz)
+
+
+def test_der_konfigurationsname_trifft_die_vier_arme():
+    """A/B/C/D wie in der Fahrplantabelle -- damit im Log steht, was lief."""
+    assert T.konfigurationsname(_args()).startswith("B")
+    assert T.konfigurationsname(_args("--no-physics")).startswith("A")
+    assert T.konfigurationsname(_args("--w-phys", "0.1")).startswith("C")
+    assert T.konfigurationsname(_args("--no-coord-maps")).startswith("D")
+    # A schlaegt D: ohne Physik ist die Kartenfrage nicht mehr dieselbe Frage.
+    assert T.konfigurationsname(
+        _args("--no-physics", "--no-coord-maps")).startswith("A")

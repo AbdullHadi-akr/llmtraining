@@ -515,6 +515,13 @@ def build_argparser() -> argparse.ArgumentParser:
     p.add_argument("--no-physics", action="store_true",
                    help="Konfiguration A der Ablation: reine Blackbox, "
                         "f = g_theta ohne den Physik-Term in der Architektur.")
+    p.add_argument("--no-coord-maps", action="store_true",
+                   help="Konfiguration D der Ablation: B ohne die zwei "
+                        "Koordinatenkarten (y/z), also 42 statt 44 Kanaele. "
+                        "Prueft, ob das Netz seine Ortsstruktur aus den "
+                        "Materialkarten begruenden kann -- die Behauptung aus "
+                        "README Sec. 2b, der model.py:193 widerspricht. "
+                        "Route R8 in BENCHMARK.md.")
     p.add_argument("--w-data", type=float, default=1.0)
     p.add_argument("--w-phys", type=float, default=0.0,
                    help="Konfiguration C: der Physik-Strafterm OBENDRAUF. "
@@ -555,6 +562,43 @@ def resolve_device(spec: str):
     return device_utils.resolve_device(spec)
 
 
+def modell_kwargs(args) -> dict:
+    """Die Ablationsflags in die Argumente von ``model.py`` uebersetzen.
+
+    Steht als eigene Funktion da, obwohl ``main`` sie heute nur ausgibt: der
+    Ladepfad fehlt noch (FAHRPLAN, „Was fehlt"), und ein Flag, das bis dahin
+    nirgends ankommt, ist ein Flag, das beim Anschliessen vergessen wird. So ist
+    die Uebersetzung schon jetzt an einer Stelle und pruefbar -- der Ladepfad
+    ruft sie spaeter nur noch auf.
+
+    ``--no-coord-maps`` ist **Konfiguration D**: B ohne die zwei y/z-Karten.
+    Die Breite muss an ZWEI Stellen zusammenpassen -- an den ``StaticMaps`` und
+    an der ersten Faltung -- und genau deshalb kommen beide aus diesem einen
+    Aufruf.
+    """
+    return {
+        "static": {"coord_maps": not args.no_coord_maps},
+        "net": {
+            "width": args.width,
+            "blocks": args.blocks,
+            "use_physics": not args.no_physics,
+            "n_static": (M.CH_STATIC_OHNE_KOORD if args.no_coord_maps
+                         else M.CH_STATIC),
+        },
+    }
+
+
+def konfigurationsname(args) -> str:
+    """A / B / C / D aus der Ablationstabelle im Fahrplan, als ein Wort."""
+    if args.no_physics:
+        return "A (Blackbox, ohne Physik in der Architektur)"
+    if args.no_coord_maps:
+        return "D (B ohne die zwei Koordinatenkarten)"
+    if args.w_phys > 0.0:
+        return f"C (B plus Physik-Strafterm, w_phys={args.w_phys})"
+    return "B (Physik in der Architektur, kein Strafterm)"
+
+
 def main(argv: list | None = None) -> int:
     args = build_argparser().parse_args(argv)
     if args.seeds < 3:
@@ -578,6 +622,11 @@ def main(argv: list | None = None) -> int:
               "gesetzt: das ist Ampere und neuer, die T4 ist Turing (sm_75).",
               flush=True)
 
+    kw = modell_kwargs(args)
+    print(f"[konfiguration] {konfigurationsname(args)}")
+    print(f"[modell] {kw['net']['n_static']} statische Karten -> "
+          f"{M.CH_STATE + kw['net']['n_static'] + M.CH_DRIVER} Eingangskanaele, "
+          f"width={kw['net']['width']} blocks={kw['net']['blocks']}")
     print("Der Ladepfad ueber PINNmodulusTwo/data.py ist noch nicht "
           "angeschlossen -- siehe FAHRPLAN, 'Was fehlt'. Die Mechanik "
           "(Rollout, Verluste, Epoche) steht und ist getestet.")

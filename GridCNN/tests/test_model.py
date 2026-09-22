@@ -343,3 +343,97 @@ def test_die_wand_veraendert_die_rate(layout, fo_field, batch):
     assert (kalt - warm).abs().max() > 1e-6
     # und nur die wandnaechste Ebene sieht den Unterschied direkt
     assert (kalt[:, 0] - warm[:, 0]).abs().max() == 0.0
+
+
+# ---------------------------------------------------------------------------
+# Ablationsarm D -- B ohne die zwei Koordinatenkarten
+# ---------------------------------------------------------------------------
+def test_arm_d_zieht_genau_die_zwei_koordinatenkarten(layout):
+    """D unterscheidet sich von B in genau zwei Kanaelen, sonst in nichts.
+
+    Das ist die ganze Zusage einer Ablation: **ein** Eingriff, sonst identisch.
+    Waeren die fuenfzehn Materialkarten dabei auch nur anders skaliert, waere
+    eine Differenz zwischen B und D keinem einzelnen Grund mehr zuzuordnen.
+    """
+    rng = np.random.default_rng(0)
+    n = layout.n_points
+    kw = dict(lam=rng.random((n, 3, 3)) + 1.0,
+              rho=np.where(np.arange(n) % 3 == 1, 2800.0, 2500.0),
+              cp=np.full(n, 900.0))
+    mit = M.build_static_maps(layout, **kw)
+    ohne = M.build_static_maps(layout, coord_maps=False, **kw)
+
+    assert mit.n_channels == M.CH_STATIC == 17
+    assert ohne.n_channels == M.CH_STATIC_OHNE_KOORD == 15
+    assert mit.hat_koordinatenkarten and not ohne.hat_koordinatenkarten
+    # Die fuenfzehn Materialkarten sind BITGLEICH, nicht nur aehnlich.
+    assert torch.equal(mit.maps[:15], ohne.maps)
+
+
+def test_arm_d_traegt_keine_ortsinformation_mehr_in_der_ebene(layout):
+    """Der Sinn der Sache: ohne die zwei Karten ist Rand nicht mehr Rand.
+
+    Die y/z-Karten sind das Einzige an den statischen Kanaelen, was sich
+    innerhalb einer Ebene monoton aendert. Faellt dieser Test, tragen die
+    Materialkarten ploetzlich Ortsstruktur mit -- und dann misst D etwas
+    anderes, als der Fahrplan behauptet.
+    """
+    rng = np.random.default_rng(0)
+    n = layout.n_points
+    # Material rein nach x-Ebene, wie am 22.09. am echten Cache gemessen:
+    # region/rho/Cp sind dort je Ebene konstant.
+    ebene = np.repeat(np.arange(layout.shape[0]), layout.shape[1] * layout.shape[2])
+    flach = gridmod.to_flat(
+        torch.as_tensor(ebene, dtype=torch.float64).reshape(layout.shape),
+        layout).numpy()
+    lam = np.zeros((n, 3, 3))
+    for i in range(3):
+        lam[:, i, i] = 1.0 + flach
+    ohne = M.build_static_maps(layout, lam=lam, rho=2500.0 + 100.0 * flach,
+                               cp=np.full(n, 900.0), coord_maps=False)
+    # Jede Karte ist in (y, z) konstant -- kein Kanal unterscheidet Rand von Mitte.
+    for k in range(ohne.n_channels):
+        karte = ohne.maps[k]
+        assert torch.allclose(karte, karte.reshape(-1)[0].expand_as(karte)), (
+            f"statischer Kanal {k} variiert in der Ebene, obwohl das Material "
+            f"je x-Ebene konstant ist")
+
+
+def test_arm_d_laeuft_durch_und_ist_kleiner(layout):
+    """42 Kanaele statt 44 -- und das Netz rechnet damit wirklich."""
+    rng = np.random.default_rng(0)
+    n = layout.n_points
+    ohne = M.build_static_maps(
+        layout, lam=rng.random((n, 3, 3)) + 1.0, rho=np.full(n, 2500.0),
+        cp=np.full(n, 900.0), coord_maps=False)
+    netz_d = M.GridCNN(layout, n_static=M.CH_STATIC_OHNE_KOORD)
+    netz_b = M.GridCNN(layout)
+
+    nx, ny, nz = layout.shape
+    torch.manual_seed(0)
+    state = M.state_channels(*(torch.randn(2, nx, ny, nz) for _ in range(3)))
+    drivers = M.driver_channels(torch.randn(2, 7), torch.randn(2, 11), ny, nz)
+    x = M.assemble_input(state, ohne, drivers)
+    assert x.shape[1] == M.CH_IN - M.CH_COORD == 42
+    assert netz_d.correction(x).shape == (2, nx, ny, nz)
+
+    # 2 Kanaele weniger in der ersten Faltung: 2 * width * 9 Gewichte.
+    assert netz_b.n_parameters - netz_d.n_parameters == 2 * 16 * 9
+
+
+def test_die_falsche_kartenbreite_faellt_laut_aus(layout):
+    """B-Netz mit D-Karten: das muss brechen, nicht stillschweigend rechnen."""
+    rng = np.random.default_rng(0)
+    n = layout.n_points
+    ohne = M.build_static_maps(
+        layout, lam=rng.random((n, 3, 3)) + 1.0, rho=np.full(n, 2500.0),
+        cp=np.full(n, 900.0), coord_maps=False)
+    nx, ny, nz = layout.shape
+    torch.manual_seed(0)
+    state = M.state_channels(*(torch.randn(1, nx, ny, nz) for _ in range(3)))
+    drivers = M.driver_channels(torch.randn(1, 7), torch.randn(1, 11), ny, nz)
+    x = M.assemble_input(state, ohne, drivers)
+    with pytest.raises(RuntimeError):
+        M.GridCNN(layout).correction(x)          # erwartet 44, bekommt 42
+    with pytest.raises(ValueError, match="n_static"):
+        M.GridCNN(layout, n_static=16)

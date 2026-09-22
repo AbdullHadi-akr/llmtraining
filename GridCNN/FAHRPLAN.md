@@ -182,10 +182,21 @@ Weil OP04 **und** OP05 beide V̇ = 30 fahren. Behoben, siehe „Das Nächste".
 
 Unverändert: `q_solid_to_fluid`, `fluid_out_temp`, `cp_fluid`, `mdot` in
 `generate_cache.py` und `opbundle_contract.md`, `schema_version` hoch, alle
-sechzehn OPs neu bauen (10–30 min).
+siebzehn OPs neu bauen (10–30 min).
 
 **Dazu neu:** `total_w` gehört mit hinein, falls 1a sich bestätigt — sonst ist
 O17 nie messbar.
+
+⚠ **Es sind siebzehn OPs, nicht sechzehn.** Im Cache liegen OP01–OP16 **plus
+OP19** (der Report-only-OP aus O11). Wer sechzehn neu baut, lässt OP19 auf dem
+alten `schema_version` zurück — und merkt es erst, wenn Stufe 6 ihn mitrollen
+will. Gemessen am 22.09.
+
+⚠ **Der Cache-Umbau macht die Gittergleichheit wieder ungeprüft.** Am 22.09. ist
+gemessen, dass `xyz` über alle siebzehn OPs bitgleich ist; `load_ops` nimmt sie
+aber weiterhin unbesehen aus `raw[0]`. Nach dem Rebuild gehört der Vergleich
+als Prüfung in `load_ops` — drei Zeilen, und sie fangen genau den Fehler, den
+`grid.derive_layout` nicht sehen kann.
 
 **Tor:** `profile_report`, `coverage_report` und `energy_balance_report` müssen
 **exakt dieselben Zahlen** liefern wie vorher.
@@ -286,14 +297,41 @@ Randbedingung, die niemand beschlossen hat.
 
 Drei Konfigurationen, die sich in genau einer Sache unterscheiden:
 
-| | die Rate `f` | `w_phys` | CLI | misst |
-|---|---|---|---|---|
-| **A** | `g_θ` allein | 0 | `--no-physics` | reine Blackbox — die Latte |
-| **B** | `L+Q+g_θ` | 0 | (Vorgabe) | was die Physik **in der Architektur** bringt |
-| **C** | `L+Q+g_θ` | > 0 | `--w-phys 0.1` | was der Strafterm **obendrauf** bringt |
+| | die Rate `f` | Eingang | `w_phys` | CLI | misst |
+|---|---|---|---|---|---|
+| **A** | `g_θ` allein | 44 Kanäle | 0 | `--no-physics` | reine Blackbox — die Latte |
+| **B** | `L+Q+g_θ` | 44 Kanäle | 0 | (Vorgabe) | was die Physik **in der Architektur** bringt |
+| **C** | `L+Q+g_θ` | 44 Kanäle | > 0 | `--w-phys 0.1` | was der Strafterm **obendrauf** bringt |
+| **D** | `L+Q+g_θ` | **42** — ohne `y_map`/`z_map` | 0 | `--no-coord-maps` | ob der Ortsprior aus §2b **echt** ist |
 
 A → B ändert die Architektur bei gleichem Verlust, B → C den Verlust bei
 gleicher Architektur. Jede Differenz ist einem einzigen Eingriff zuzuordnen.
+
+> ### Arm D — neu am 22.09., ✅ gebaut
+>
+> **Die Frage:** README §2b führt als Vorteil des CNN an, dass er Position
+> *nicht* auswendig lernen **kann** und räumliche Struktur deshalb über die
+> Materialkarten begründen **muss**. [`model.py:193`](model.py) gibt ihm die
+> Position trotzdem — zwei z-gescorte Koordinatenkarten, mit dem Kommentar,
+> ohne sie wäre *„jede Randzelle von jeder Mittelzelle ununterscheidbar"*.
+> Beide Texte gehen von derselben Prämisse aus und ziehen den entgegengesetzten
+> Schluss. **A/B/C berühren das nicht — alle drei tragen die Karten.**
+>
+> **Was D ändert:** genau zwei Kanäle von 44. 11 139 Parameter statt 11 427
+> (2 × 16 × 9 = 288 weniger in der ersten Faltung). Sonst identisch — ein Test
+> hält fest, dass die fünfzehn Materialkarten **bitgleich** bleiben.
+>
+> | Ergebnis | Folge |
+> |---|---|
+> | **D ≈ B** | 🟢 der Ortsprior ist echt, §2b stimmt, und der CNN steht dort wirklich anders als das MLP |
+> | **D deutlich schlechter** | 🔴 der CNN hat dieselbe Positionskrücke wie das MLP. §2b beschreibt dann einen Entwurf, den der Code nicht umsetzt — und §11.1 ist beantwortet, nur anders als erhofft |
+>
+> ⚠ **Und D ist ein enger Test.** Am 22.09. gemessen: `region`/`rho`/`Cp` sind
+> je x-Ebene konstant, `lam` variiert nur in **zwei Zeilen am unteren y-Rand**
+> (22 von 121 Punkten), und der Kontrast in der Ebene ist nach dem z-Score rund
+> **zwölfmal schwächer** als der zwischen den Ebenen. D fragt also, ob dieses
+> schmale Band reicht. Fällt D durch, ist damit **nicht** gezeigt, dass ein
+> Ortsprior unmöglich wäre — nur, dass dieser Datensatz ihn nicht hergibt.
 
 > **Beide starten auf etwas Sinnvollem.** Weil `head` null ist, startet **A**
 > bei `persistence` (Rate null) und **B** bei der Physik. Keine der beiden
@@ -420,6 +458,16 @@ Damit der Umfang nicht wandert:
 | **15.09.** | **Entscheidung: CNN statt ROM**, 16 × 3 = 11 427 Parameter. Der ROM-Plan ist gestrichen |
 | **15.09.** | `model.py` und `train.py` gebaut, 46 Tests. Bei Init rechnet das Modell **exakt** den Löser |
 | **15.09.** | Zwei Funde aus Tests: 64 × 4 sind **137 923** statt „~100 k"; ein konstanter Materialkanal wurde zu ±1 statt 0 |
+| **22.09.** | **Gittergleichheit gemessen statt angenommen.** `xyz` ist über alle **siebzehn** Cache-OPs bitgleich, gleiche Reihenfolge, `layer` ebenso — `data.py:653` nahm das bisher unbesehen aus `raw[0]` |
+| **22.09.** | **Die dokumentierte Spannweite war falsch.** 0.198089 × 0.104441 an sieben Stellen; gemessen sind 0.198094368 × 0.104431991 m. Cache und Legacy-CSVs stimmen exakt überein |
+| **22.09.** | **Der Geometrie-Test war zirkulär** und hätte gegen die echten Koordinaten in allen vier Vergleichen gefallen. `test_layout_aus_den_echten_koordinaten` schließt den Kreis |
+| **22.09.** | **Materialverteilung gemessen:** `region`/`rho`/`Cp` je x-Ebene konstant; `lam` variiert, aber nur in zwei Zeilen am unteren y-Rand (22 von 121 Punkten) |
+| **22.09.** | **§2b widerspricht `model.py:193`** — die zwei Koordinatenkarten geben dem Kern die Position, die §2b ihm abspricht. Offen, Route R8 |
+| **22.09.** | **`main` war seit dem 17.09. rot** und niemand hat es bemerkt: `pytest (GridCNN)` meldete auf `163b21c` `2 failed, 97 passed`, und der Benchmark-Schritt dahinter wurde seither übersprungen. PR #40 erbt dieses Rot — seine vier Dateien liegen alle in `PINNmodulusTwo/`, dessen Suite grün ist |
+| **22.09.** | **Ablationsarm D gebaut** — `--no-coord-maps`, 42 statt 44 Kanäle, 11 139 Parameter. Sieben Tests, darunter einer, der die fünfzehn Materialkarten bitgleich festhält |
+| **22.09.** | **Die Gittergleichheit ist jetzt geprüft statt angenommen**: `data._assert_shared_geometry` fällt, wenn ein OP eine andere Punktreihenfolge hat. Test in beide Richtungen, mit reiner Zeilenvertauschung |
+| **22.09.** | PR #40 (Achse 1, O18, MPS-Prüfung) in diesen Branch hereingeholt — ein PR statt zwei |
+| **22.09.** | Beide fallenden Tests repariert: die float32-Schranke im gepaddeten Rollout (1.2e-6 gegen 1e-6, hielt zufällig) und **`torch.equal` im float64-Vergleich** — Bitgleichheit zwischen zwei Batchgrößen ist durch nichts garantiert und war nicht portabel (lokal grün, auf dem Runner rot). Jetzt beide gegen eine relative Schranke `1e-12` |
 
 ## Stand
 
@@ -436,7 +484,15 @@ Damit der Umfang nicht wandert:
 | 1 | `U` mit Fluss / ohne | **~1130 / ~50 W/m²K**, Faktor ~23 — vorläufig, Faktor 2 aus 1a offen | 09.09. |
 | 1 | `U(V̇)` auf einer Kurve? | *offen* — erster Lauf hatte nur zwei Level | |
 | 2 | Reports unverändert | | |
-| — | Reshape aus Koordinaten ableitbar und umkehrbar | **ja**, 0.198089 × 0.104441 m | 14.09. |
+| — | Reshape aus Koordinaten ableitbar und umkehrbar | **ja**, 0.198094368 × 0.104431991 m | 14.09. / korrigiert 22.09. |
+| — | `xyz` über alle siebzehn Cache-OPs identisch | **ja, bitgleich**, gleiche Reihenfolge | 22.09. |
+| — | Cache-Koordinaten = Legacy-CSVs | **ja, exakt** | 22.09. |
+| — | Äquidistanz in y/z im Cache | **bis float32**: 4e-7 relativ gegen `_uniform`-Toleranz 1e-6, Reserve 3.7× | 22.09. |
+| — | `region`/`rho`/`Cp` in der Ebene | **konstant** je x-Ebene | 22.09. |
+| — | `lam` in der Ebene | **variabel**, aber nur zwei Zeilen am unteren y-Rand; 99/121 Punkte ein Wert | 22.09. |
+| — | Kontrast in der Ebene gegen zwischen den Ebenen (nach z-Score) | **Faktor ~12 schwächer** | 22.09. |
+| — | Kanäle, die in der Ebene variieren | **17 von 44** (9 Zustand + 6 `lam` + 2 Koordinaten) | 22.09. |
+| — | davon strukturell flache Gewichte in Schicht 1 | **3 456 von 11 427 = 30 %**, effektiv ≈ 7 971 | 22.09. |
 | — | `dT/dx` an der Symmetrieebene | **exakt `0.0`**, ohne Toleranz | 14.09. |
 | — | zentrale Differenz am y/z-Rand | **exakt `0.0`** | 14.09. |
 | — | Stencil-Ordnung d²/dy², d²/dz² | **1.98 / 1.98** | 14.09. |
@@ -475,8 +531,18 @@ beim Import ab.
 
 ### Die vier Zusagen, die bewiesen sind statt behauptet
 
-1. Der Reshape wird **abgeleitet**, nicht geraten, und trifft die dokumentierte
-   Geometrie: Spannweite 0.198089 × 0.104441 m, `dx = 10.786 / 11.114 mm`.
+1. Der Reshape wird **abgeleitet**, nicht geraten, und trifft die **gemessene**
+   Geometrie: Spannweite 0.198094368 × 0.104431991 m, `dx = 10.785542 / 11.114458 mm`.
+
+   > ⚠ **Diese Zusage war bis zum 22.09. keine.** Der Test, der sie prüfte, las
+   > dieselben Konstanten, aus denen `conftest.py` sein Testgitter baut — er
+   > konnte nicht fallen. Und die Konstanten waren falsch: gegen die echten
+   > Koordinaten wären alle vier Vergleiche durchgefallen (`dx` um 4.6e-7, die
+   > Spannweiten um 5.4e-6 bzw. 9.0e-6). Seit dem 22.09. leitet
+   > `test_layout_aus_den_echten_koordinaten` das Gitter direkt aus den drei
+   > CSVs in `legacy/.../coordinates/` ab — den Dateien, die im Repo liegen und
+   > mit dem Cache aller siebzehn OPs bitgleich sind. **Erst dieser Test macht
+   > die Zusage falsifizierbar.**
 2. `dT/dx` an der Symmetrieebene ist **exakt `0.0`** — ohne Toleranz geprüft,
    über Feldskalen von 1e-8 bis 1e8. Im Zähler steht `T₁ − T₁`.
 3. Die zentrale Differenz am y/z-Rand ist **exakt `0.0`**. `reflect`, nicht
@@ -509,6 +575,13 @@ abgefangen, und tote Kanäle werden **gemeldet** statt still zu bleiben.
 | | was | blockiert durch |
 |---|---|---|
 | **Ladepfad** | `train.py` an `PINNmodulusTwo/data.py` anschließen: Bündel laden, `OPTensors` füllen, `op_metrics` auswerten | `data_cache` (liegt nicht im Repo) |
+
+> **Was der Ladepfad schon vorfindet** (22.09. gebaut, mit Tests):
+> `train.modell_kwargs(args)` übersetzt die Ablationsflags an **einer** Stelle
+> in die Argumente von `build_static_maps` und `GridCNN` — er muss sie nur noch
+> aufrufen. Und `derive_layout` gehört mit `bundle.xn` (float64) × `L_ref`
+> gefüttert, **nicht** mit `op.xn`: der ist float32 und halbiert die Reserve der
+> Äquidistanzprüfung (4e-7 gemessen gegen `rtol` 1e-6).
 | **Wandterm benutzbar** | `U(V̇)` kalibrieren | **Stufe 2**: `q_solid_to_fluid`, `mdot`, `cp_fluid`, `fluid_out_temp` fehlen im Bündel |
 | **Physik-Latte** | Stufe 3 mit echter Wand | Wandterm |
 | **`L_wall`** | der einzige Verlustterm mit gemessenem Ziel | Wandterm |

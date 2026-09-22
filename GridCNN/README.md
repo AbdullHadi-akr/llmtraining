@@ -75,9 +75,40 @@ darf nicht als Physik-Latte zitiert werden.**
 1. **`balance_check.py` ein zweites Mal laufen lassen** — Minuten, nur numpy,
    braucht die Rohdaten. Klärt `Q_ht/tot` und ob `U(V̇)` über drei Flusslevel
    auf einer Kurve liegt. Kommandos im [`FAHRPLAN.md`](FAHRPLAN.md) ganz oben.
-2. **Stufe 2, der Cache-Umbau** — vier Spalten mitschreiben, alle sechzehn OPs
+2. **Stufe 2, der Cache-Umbau** — vier Spalten mitschreiben, alle siebzehn OPs
    neu bauen (30 min). Danach ist der Wandterm kalibrierbar.
 3. **Den Ladepfad in `train.py` anschließen** und Konfiguration **A** fahren.
+   ⚠ `derive_layout` dabei mit `bundle.xn` (float64) × `L_ref` füttern, **nicht**
+   mit `op.xn` — das ist float32 und halbiert die Reserve der
+   Äquidistanzprüfung. Begründung im [`BENCHMARK.md`](BENCHMARK.md), Lauf vom
+   22.09.
+
+## Was am 22.09. gemessen wurde
+
+Am Cache der **siebzehn** OPs (nicht sechzehn — OP19 liegt mit drin) und an den
+drei Koordinaten-CSVs, die im Repo liegen:
+
+| | |
+|---|---|
+| `xyz` über alle siebzehn OPs | **bitgleich**, gleiche Reihenfolge. `data.py:653` nahm das bisher unbesehen aus `raw[0]` an |
+| Cache gegen Legacy-CSVs | **exakt gleich** |
+| die dokumentierte Spannweite | **war falsch** (0.198089 × 0.104441); richtig ist 0.198094368 × 0.104431991 m |
+| der Test, der das prüfte | **war zirkulär** — er las die Konstanten, aus denen die Fixture ihr Gitter baut. Jetzt gibt es einen, der die CSVs liest |
+| `region`, `rho`, `Cp` in der Ebene | **konstant** je x-Ebene |
+| `lam` in der Ebene | **variabel**, aber 99 von 121 Punkten tragen einen Wert; der Rest ist ein Band aus zwei Zeilen am unteren y-Rand |
+
+**Was daraus folgt, steht in §2b** (der Kasten vom 22.09.) und als Route **R8**
+und **R9** in [`BENCHMARK.md`](BENCHMARK.md). Kurz: `model.py` gibt dem Kern
+zwei Koordinatenkarten, die §2b ihm abspricht — und die Materialkarten, auf die
+§2b stattdessen verweist, tragen in der Ebene kaum etwas. Ein vierter
+Ablationsarm **D** (B ohne die Koordinatenkarten) macht die Frage messbar.
+
+✅ **Die Gittergleichheit ist seit dem 22.09. geprüft statt angenommen.**
+`data._assert_shared_geometry` vergleicht `xyz` und `layer` jedes OP gegen das
+erste und fällt bei abweichender Punktreihenfolge — genau der Fehler, den
+`grid.derive_layout` nicht sehen kann, weil er ein wohlgeformtes Tensorgitter
+hinterlässt. Der Cache-Umbau aus Stufe 2 kann die Zusage damit nicht mehr
+stillschweigend brechen.
 
 ## Die Entscheidung, die man kennen muss
 
@@ -165,12 +196,12 @@ Alle drei Layer haben **exakt dieselben 11 y- und 11 z-Werte**, äquidistant:
 
 **Und der äußere Ring ist die Domänengrenze.** Der `legacy`-PINN-README sagt
 *„Face spans `dy=0.198 m`, `dz=0.104 m`"*; das Raster spannt gemessen
-0.198089 m × 0.104441 m — beides exakt die README-Werte auf drei Stellen. Das
+0.198094368 m × 0.104431991 m — beides exakt die README-Werte auf drei Stellen. Das
 Raster liegt also **Kante auf Kante auf der Zellfläche**, nicht irgendwo innen
 drin. Damit gilt am Randring eine echte Randbedingung, und Padding ist das
 richtige Mittel (§5).
 
-Also ein **3 × 11 × 11 Tensorgitter, identisch über alle sechzehn OPs**.
+Also ein **3 × 11 × 11 Tensorgitter, identisch über alle siebzehn OPs im Cache**.
 `data.Tn` ist `(n_t, 363)` und wird mit *einem* `reshape` zu `(n_t, 3, 11, 11)`.
 Kein Vernetzen, kein Interpolieren.
 
@@ -205,6 +236,40 @@ lernen. Das MLP bekommt (x, y, z) und darf; genau daher kommt ein Teil seiner
 guten In-Sample-Zahlen (OP01: 1.000 C) bei mäßiger Verallgemeinerung. Der CNN
 muss räumliche Struktur über die Materialkarten begründen. Das ist der
 schärfere Prior.
+
+> ### ⚠ 22.09. — gemessen, und der Absatz steht so nicht mehr ganz
+>
+> Zwei Messungen an diesem Argument, beide am Cache der siebzehn OPs:
+>
+> **Erstens: `model.py` gibt dem Kern die Position doch.** Die 17 statischen
+> Kanäle enthalten zwei **Koordinatenkarten** (`y_map`, `z_map`,
+> [`model.py:193`](model.py)), und der Kommentar dort sagt das Gegenteil von
+> diesem Absatz: *„Sie sind der Grund, warum der Kern überhaupt etwas über
+> Position wissen kann […] Ohne diese beiden wäre jede Randzelle von jeder
+> Mittelzelle ununterscheidbar."* Beide Texte gehen von derselben Prämisse
+> aus — geteilter Kern, also ortsblind —, und ziehen den **entgegengesetzten**
+> Schluss. Der CNN hat damit dieselbe Positionsinformation wie das MLP, nur
+> als Kanal statt als Eingang. **Keine der drei Ablationen A/B/C berührt das.**
+>
+> **Zweitens: die Materialkarten tragen fast keine Ortsstruktur.**
+> `region`, `rho` und `Cp` sind je x-Ebene **konstant** — in der Ebene also
+> strukturlos. `lam` hat Struktur, aber eine sehr schmale: 99 der 121 Punkte je
+> Ebene tragen **einen einzigen Wert**; die Variation sitzt in **zwei Zeilen am
+> unteren y-Rand** (22 Punkte), und innerhalb dieser Zeilen springen die Werte
+> ohne räumliche Ordnung (`lam_xx` 5.18 … 6.31 zwischen Nachbarn). Nach dem
+> z-Score über alle 363 Punkte ist der Kontrast *in* der Ebene rund
+> **zwölfmal schwächer** als der zwischen den Ebenen.
+>
+> Der Satz *„der CNN muss räumliche Struktur über die Materialkarten
+> begründen"* beschreibt damit etwas, das kaum trägt: was die Materialkarten in
+> der Ebene hergeben, ist im Wesentlichen ein Randband — also fast dieselbe
+> Information wie eine geschwellte y-Karte.
+>
+> **Entschieden ist nichts.** Der Absatz bleibt stehen, weil er der schärfere
+> Entwurf wäre; er ist nur nicht mehr das, was der Code tut. Messbar ist die
+> Frage seit dem 22.09.: **Ablationsarm D** ist gebaut — `--no-coord-maps`,
+> 42 statt 44 Kanäle, 11 139 statt 11 427 Parameter, sonst identisch. Er
+> braucht nur noch den Ladepfad. Route R8 in [`BENCHMARK.md`](BENCHMARK.md).
 
 **c) Die Symmetrie wird Struktur statt Gewicht.** `dT/dx = 0` an der Zellmitte
 ist eine Spiegelung -- exakt, ohne `w_bc`, Achse 2 des Fahrplans löst sich auf.
@@ -427,7 +492,7 @@ plus Nachpruefung im Code. Alle drei Flaechen sind jetzt entschieden.
 | y/z-Umfang | **adiabat / Symmetrie.** Die Kuehlung sitzt nur auf ±x; die Coolant-Inlets bei y = −0.1265 / +0.14605 liegen im Fluidkanal der Kuehlplatte, nicht an der Zellseitenflaeche. Im Modul liegt seitlich die Nachbarzelle | **`reflect`-Padding** |
 
 Und, weil §1 es misst: der Randring liegt **auf** der Flaechenkante
-(0.198089 × 0.104441 m gegen `dy=0.198`, `dz=0.104` im README). Der Randknoten
+(0.198094368 × 0.104431991 m gegen `dy=0.198`, `dz=0.104` im README). Der Randknoten
 sitzt also auf der Grenze, nicht davor.
 
 > **Korrektur an der Auskunft.** Die Antwort auf Frage 1 lautete „vermutlich ein
@@ -664,7 +729,7 @@ sagt vor dem ersten Training, ob die Bilanz ueberhaupt aufgeht.
 Die vier Groessen liegen roh vor, aber nicht im `.npz`. Fuer die reine
 Gegenprobe reicht direktes Einlesen der CSVs; fuer das **Training** muessen
 `Q̇(t)`, `T_fluid_out(t)`, `Cp_fluid` und `mdot` ins Buendel — also
-`schema_version` hoch, `opbundle_contract.md` erweitern, alle sechzehn OPs neu
+`schema_version` hoch, `opbundle_contract.md` erweitern, alle siebzehn OPs neu
 bauen (10-30 min). Das ist ein Eingriff in geteilte Infrastruktur und gehoert
 in den Plan, nicht nebenbei erledigt. Siehe [`GridCNN/FAHRPLAN.md`](FAHRPLAN.md), Stufe 2.
 
