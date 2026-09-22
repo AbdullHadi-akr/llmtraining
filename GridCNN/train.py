@@ -98,7 +98,9 @@ genau davor. Geschwindigkeit ja, Experiment anfassen nein.
 from __future__ import annotations
 
 import argparse
+import json
 import sys
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -487,6 +489,213 @@ def train_epoch(net: M.GridCNN, batch: OPBatch, statics: M.StaticMaps,
 # ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# Der Ladepfad -- importiert aus PINNmodulusTwo, nicht nachgebaut
+# ---------------------------------------------------------------------------
+_PINN_DIR = HERE.parent / "PINNmodulusTwo"
+
+
+def _pinn_module(name: str):
+    """``PINNmodulusTwo/<name>.py`` importieren.
+
+    Genau wie ``resolve_device``: **importiert, nicht kopiert**. Die
+    Normierungskonstanten, der Fourier-Tensor und die Treiberkanaele muessen
+    dieselben sein wie im Basisprojekt, sonst vergleicht der Benchmark zwei
+    verschiedene Datensaetze und nennt das eine Architekturaussage.
+    """
+    if str(_PINN_DIR) not in sys.path:
+        sys.path.insert(0, str(_PINN_DIR))
+    return __import__(name)
+
+
+def layout_aus_bundle(bundle) -> GridLayout:
+    """``derive_layout`` aus den Koordinaten des Buendels.
+
+    ⚠ ``bundle.xn`` (float64), **nicht** ``op.xn``. Der ist float32, und die
+    Aequidistanzpruefung in ``derive_layout`` laeuft mit ``rtol=1e-6``: gemessen
+    bleiben in float32 nur 4e-7 Reserve, also die Haelfte. Das faellt nicht
+    heute, sondern an dem Tag, an dem jemand die Koordinaten neu exportiert.
+    """
+    xyz = np.asarray(bundle.xn, dtype=np.float64) * float(bundle.L_ref)
+    return gridmod.derive_layout(xyz)
+
+
+def statics_aus_bundle(bundle, layout: GridLayout, *, coord_maps: bool,
+                       device) -> M.StaticMaps:
+    """Die 17 (bzw. 15) ortsfesten Karten aus den Materialdaten.
+
+    ``lam`` steht **nicht** im Buendel -- dort liegt nur ``Fo``, in das es
+    zusammen mit ``rho*Cp`` schon eingerechnet ist. Es aus ``Fo`` zurueck-
+    zurechnen hiesse, durch ein ``+1e-30`` zu dividieren und das Ergebnis
+    Materialdaten zu nennen. Also aus der Quelle geholt; die Zuordnung
+    Region -> Schicht steht in ``materials.load_material_properties``
+    (0 = cc, 1 = jr1c, 2 = g) und ist genau die, die ``data._grid_arrays``
+    hineingeschrieben hat.
+    """
+    materials = _pinn_module("materials")
+    layer = np.array(["cc", "jr1c", "g"], dtype=object)[
+        np.asarray(bundle.region, dtype=np.int64)]
+    props = materials.load_material_properties(layer=layer)
+    return M.build_static_maps(
+        layout, lam=props["lambda_tensor"], rho=bundle.rho, cp=bundle.Cp,
+        device=device, coord_maps=coord_maps)
+
+
+def op_tensoren(op, layout: GridLayout, device) -> OPTensors:
+    """Ein ``data.OPData`` in die Gitterform bringen, einmal je Lauf.
+
+    ``to_field`` bildet die letzte Achse ``(..., n_points)`` auf
+    ``(..., nx, ny, nz)`` ab. ``Fo`` traegt seine 3x3 aber **hinten**
+    (``(n_points, 3, 3)``), also wandert die Punktachse erst ans Ende und das
+    Ergebnis danach zurueck -- sonst stuende der Tensor auf dem Kopf und
+    ``anisotropic_laplacian`` griffe ``fo[..., 0, 0]`` aus einer Ortsachse.
+    """
+    def feld(a):
+        return gridmod.to_field(
+            torch.as_tensor(np.asarray(a), dtype=torch.float32), layout)
+
+    fo_flat = torch.as_tensor(np.asarray(op.Fo), dtype=torch.float32)   # (n,3,3)
+    fo = gridmod.to_field(fo_flat.permute(1, 2, 0), layout)             # (3,3,nx,ny,nz)
+    fo = fo.permute(2, 3, 4, 0, 1).contiguous()                         # (nx,ny,nz,3,3)
+
+    return OPTensors(
+        op_id=op.op_id,
+        tn_seq=feld(op.Tn).to(device),
+        tn_ic=feld(op.Tn_ic).to(device),
+        qsrc=feld(op.Qsrc).to(device),
+        fo=fo.to(device),
+        config=torch.as_tensor(np.asarray(op.config_feat),
+                               dtype=torch.float32).to(device),
+        forcing=torch.as_tensor(np.asarray(op.forcing_feat),
+                                dtype=torch.float32).to(device),
+        dtn=float(op.dtn),
+        split_t=int(op.split_t),
+        n_t=int(op.n_t),
+    )
+
+
+def lade_datensatz(args, device):
+    """Buendel laden, Layout ableiten, Karten bauen, OPs in Gitterform.
+
+    Zurueck kommt ``(bundle, train, val, layout, statics)``. Die Haltemenge
+    wird mit ``build_op`` gegen die **Trainings**konstanten gebaut -- nichts
+    wird nachgefittet, sonst waere sie keine Haltemenge mehr.
+    """
+    D = _pinn_module("data")
+    t0 = time.time()
+    bundle = D.load_ops(op_ids=list(args.ops), subsample_time=args.subsample)
+    held = [D.build_op(o, bundle, subsample_time=args.subsample)
+            for o in args.val_ops]
+
+    layout = layout_aus_bundle(bundle)
+    kw = modell_kwargs(args)
+    statics = statics_aus_bundle(bundle, layout,
+                                 coord_maps=kw["static"]["coord_maps"],
+                                 device=device)
+
+    train = [op_tensoren(o, layout, device) for o in bundle.ops]
+    val = [op_tensoren(o, layout, device) for o in held]
+
+    print(f"[daten] {len(train)} Trainings-OPs, {len(val)} Halte-OPs, "
+          f"subsample={args.subsample} -> dt_n={train[0].dtn:.6g}, "
+          f"{time.time() - t0:.1f}s")
+    print(f"[gitter] {layout.describe().splitlines()[0]}")
+    print(f"[normierung] T_mu={bundle.T_mu:.4g} T_sigma={bundle.T_sigma:.4g} C "
+          f"L_ref={bundle.L_ref:.6g} m T_span_ref={bundle.T_span_ref:.6g} s")
+
+    # Die CFL-Schranke VOR dem Lauf, nicht als Raetsel danach. Der FAHRPLAN
+    # sagt zu einem weglaufenden Rollout: "entweder CFL (dann subsample_time:
+    # 1) oder ein Vorzeichenfehler im Padding" -- diese Zeile entscheidet
+    # zwischen den beiden, bevor Stunden verbrannt sind. Sie ist eine
+    # RICHTGROESSE: der Kreuzterm steckt nicht drin, und das Netz ist nicht
+    # der blanke explizite Stern. Deshalb eine Warnung und kein Abbruch.
+    dt_max = phys.cfl_limit(layout, train[0].fo)
+    dt_max_s = dt_max * float(bundle.T_span_ref)
+    dt_s = train[0].dtn * float(bundle.T_span_ref)
+    if train[0].dtn > dt_max:
+        print(f"!! [CFL] dt_n={train[0].dtn:.6g} ({dt_s:.4g} s) liegt "
+              f"{train[0].dtn / dt_max:.1f}x UEBER der expliziten Schranke "
+              f"dt_max_n={dt_max:.6g} ({dt_max_s:.4g} s).\n"
+              f"   Laeuft der Rollout weg, ist DAS die erste Erklaerung -- "
+              f"nicht das Netz. Kleineres --subsample, oder pruefen, ob die "
+              f"Materialdaten echt sind: ein synthetisches "
+              f"material_properties/ macht das Problem viel steifer, als es "
+              f"ist. Arm A (--no-physics) ist davon nicht betroffen.",
+              file=sys.stderr)
+    else:
+        print(f"[CFL] dt_n={train[0].dtn:.6g} ({dt_s:.4g} s) unter der "
+              f"Schranke dt_max_n={dt_max:.6g} ({dt_max_s:.4g} s).")
+    if statics.dead:
+        print(f"[karten] tot (konstant, auf 0 gezwungen): "
+              f"{', '.join(statics.dead)}")
+    return bundle, train, val, layout, statics
+
+
+@torch.no_grad()
+def val_mae(net: M.GridCNN, ops: list, statics: M.StaticMaps, *,
+            lag1: int, lag2: int, clamp: float, T_sigma: float) -> dict:
+    """Freilaufende MAE je Halte-OP, in Grad Celsius.
+
+    ``tn_seq`` ist ``(T - T_mu) / T_sigma``, der Versatz ``T_mu`` faellt in der
+    Differenz also heraus und ``T_sigma`` ist der ganze Umrechnungsfaktor --
+    kein zweiter Weg zu denselben Labels, der auseinanderdriften koennte.
+
+    Freilaufend, nicht ein Schritt: gemessen wird, was das Modell allein
+    erzeugt. Ein Ein-Schritt-Fehler sieht immer gut aus.
+    """
+    out = {}
+    for op in ops:
+        traj, _ = rollout(net, op, statics, lag1=lag1, lag2=lag2, clamp=clamp)
+        out[op.op_id] = float(
+            (traj - op.tn_seq).abs().mean().item() * T_sigma)
+    return out
+
+
+def fahre_einen_lauf(args, seed: int, device, daten, out_dir: Path) -> dict:
+    """Ein Seed: Netz bauen, Epochen fahren, Artefakte schreiben."""
+    bundle, train, val, layout, statics = daten
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    torch.manual_seed(seed)
+    np.random.seed(seed)
+    if device.type == "cuda":
+        torch.cuda.manual_seed_all(seed)
+    rng = np.random.default_rng(seed)
+
+    kw = modell_kwargs(args)
+    net = M.GridCNN(layout, **kw["net"]).to(device)
+    n_par = sum(p.numel() for p in net.parameters())
+    print(f"\n[seed {seed}] {n_par} Parameter -> {out_dir}")
+
+    opt = torch.optim.Adam(net.parameters(), lr=args.lr)
+    batch = stack_ops(train)
+    verlauf = []
+    for epoch in range(1, args.epochs + 1):
+        st = train_epoch(net, batch, statics, opt,
+                         inner_steps=args.inner_steps, batch_t=args.batch_t,
+                         lag1=args.lag1, lag2=args.lag2, w_data=args.w_data,
+                         w_phys=args.w_phys, w_wall=args.w_wall,
+                         clamp=args.clamp, rng=rng)
+        print(f"[seed {seed}] {st.line(epoch)}", flush=True)
+        verlauf.append({"epoch": epoch, "data": st.data, "phys": st.phys,
+                        "wall": st.wall, "saturated": st.saturated,
+                        "spread_space": st.spread_space,
+                        "spread_time": st.spread_time})
+
+    mae = val_mae(net, val, statics, lag1=args.lag1, lag2=args.lag2,
+                  clamp=args.clamp, T_sigma=bundle.T_sigma)
+    for op_id, v in sorted(mae.items()):
+        print(f"[seed {seed}] val-MAE {op_id}: {v:.4f} C")
+
+    torch.save(net.state_dict(), out_dir / "model.pt")
+    (out_dir / "history.json").write_text(json.dumps(verlauf, indent=2))
+    (out_dir / "metrics.json").write_text(json.dumps(
+        {"seed": seed, "konfiguration": konfigurationsname(args),
+         "parameter": n_par, "val_mae_C": mae,
+         "epochs": args.epochs}, indent=2))
+    return mae
+
+
 def build_argparser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         description="GridCNN trainieren -- Ein-Schritt gegen eine "
@@ -500,6 +709,20 @@ def build_argparser() -> argparse.ArgumentParser:
                         "einem Log sehr leicht zu uebersehen und kostet den "
                         "ganzen Lauf an Tempo. Geteilt mit PINNmodulusTwo "
                         "ueber device_utils.py.")
+    p.add_argument("--ops", nargs="+", default=None,
+                   help="Trainings-OPs. Vorgabe: op_registry.DEFAULT_TRAIN_OPS "
+                        "-- die Liste kommt aus der Registry und nicht aus dem "
+                        "Gedaechtnis")
+    p.add_argument("--val-ops", nargs="+", default=None,
+                   help="Halte-OPs, gegen die gemessen wird. Vorgabe: "
+                        "op_registry.DEFAULT_VAL_OPS (OP06, OP09)")
+    p.add_argument("--subsample", type=int, default=2,
+                   help="jeder N-te Rohschritt (Roh-dt = 0.1 s). 2 -> dt = 0.2 s")
+    p.add_argument("--artifacts-dir", type=Path, default=Path("GridCNN/artifacts"),
+                   help="Wurzel fuer die Artefakte. JEDER Seed bekommt darunter "
+                        "ein eigenes Verzeichnis -- ohne das schreiben "
+                        "gleichzeitige Laeufe in dieselbe model.pt, und das "
+                        "scheitert nicht, es mischt")
     p.add_argument("--epochs", type=int, default=60)
     p.add_argument("--inner-steps", type=int, default=100,
                    help="Updates je OP und Epoche auf der eingefrorenen "
@@ -608,19 +831,19 @@ def main(argv: list | None = None) -> int:
               "Seed-Streuung ist 0.518 / 0.882 C, auf OP06 bis 1.63 C. Ein "
               "Vergleich zweier Konfigurationen braucht eine Seed-Schleife.",
               file=sys.stderr)
-    elif args.seeds > 1:
-        # Sonst hielte man drei Seeds in der Hand und haette einen Lauf. Die
-        # Schleife kommt mit dem Ladepfad; bis dahin sagt der Flag die
-        # Wahrheit, statt sie zu suggerieren.
-        print(f"!! --seeds {args.seeds} ist heute nur eine Absichtserklaerung: "
-              f"train.py dreht KEINE Seed-Schleife und rechnet einen Lauf mit "
-              f"--seed {args.seed}. Siehe FAHRPLAN, 'Was fehlt'.",
-              file=sys.stderr)
     if not args.cache.exists():
         print(f"!! Kein Cache unter {args.cache}. Auf der Rechenmaschine "
               f"liegt er unter data_cache/; hier im Repo liegt er nicht.",
               file=sys.stderr)
         return 2
+
+    # Erst hier, nicht im Argparser: der zieht sonst PINNmodulusTwo auf den
+    # sys.path, sobald irgendein Test nur die Flags lesen will.
+    reg = _pinn_module("op_registry")
+    if args.ops is None:
+        args.ops = list(reg.DEFAULT_TRAIN_OPS)
+    if args.val_ops is None:
+        args.val_ops = list(reg.DEFAULT_VAL_OPS)
 
     device = resolve_device(args.device)
     if device.type == "cuda":
@@ -637,10 +860,50 @@ def main(argv: list | None = None) -> int:
     print(f"[modell] {kw['net']['n_static']} statische Karten -> "
           f"{M.CH_STATE + kw['net']['n_static'] + M.CH_DRIVER} Eingangskanaele, "
           f"width={kw['net']['width']} blocks={kw['net']['blocks']}")
-    print("Der Ladepfad ueber PINNmodulusTwo/data.py ist noch nicht "
-          "angeschlossen -- siehe FAHRPLAN, 'Was fehlt'. Die Mechanik "
-          "(Rollout, Verluste, Epoche) steht und ist getestet.")
-    return 1
+    if args.w_wall > 0.0:
+        print("!! --w-wall > 0, aber der Wandterm haengt an den vier "
+              "Cache-Groessen aus Stufe 2. Ist der Cache aelter, wirft "
+              "_wall_ghost -- das ist Absicht, ein geratenes U waere "
+              "schlimmer.", file=sys.stderr)
+    else:
+        print("[wand] AUS -- dieser Lauf ist adiabat. Das ist eine ABLATION, "
+              "keine Latte, und darf auch nicht als eine zitiert werden "
+              "(FAHRPLAN, 'Was fehlt').")
+
+    # Einmal laden, ueber alle Seeds hinweg. Die Daten haengen nicht am Seed,
+    # und sie je Seed neu zu bauen kostet Minuten und aendert nichts.
+    daten = lade_datensatz(args, device)
+    bundle = daten[0]
+
+    wurzel = args.artifacts_dir / konfigurationsname(args).split()[0]
+    alle: dict[str, list] = {}
+    for n in range(args.seeds):
+        seed = args.seed + n
+        mae = fahre_einen_lauf(args, seed, device, daten, wurzel / f"seed{seed}")
+        for op_id, v in mae.items():
+            alle.setdefault(op_id, []).append(v)
+
+    print(f"\n{'=' * 60}")
+    print(f"{konfigurationsname(args)}  --  {args.seeds} Seed(s), "
+          f"{args.epochs} Epochen")
+    for op_id, werte in sorted(alle.items()):
+        a = np.asarray(werte)
+        # ddof=1: die Streuung EINER Stichprobe, nicht der Grundgesamtheit.
+        # Bei drei Seeds ist der Unterschied 22 %, und die Zahl wird gegen
+        # eine ~1 C-Latte gelesen.
+        sd = float(a.std(ddof=1)) if a.size > 1 else float("nan")
+        print(f"  val-MAE {op_id}: {a.mean():.4f} +- {sd:.4f} C   "
+              f"({', '.join(f'{v:.4f}' for v in werte)})")
+    if args.seeds < 3:
+        print("  ⚠ unter drei Seeds ist das +- keine Streuung, sondern Zierde.")
+    zus = wurzel / "zusammenfassung.json"
+    zus.write_text(json.dumps(
+        {"konfiguration": konfigurationsname(args), "seeds": args.seeds,
+         "epochs": args.epochs, "ops": list(args.ops),
+         "val_ops": list(args.val_ops), "val_mae_C": alle,
+         "T_sigma": float(bundle.T_sigma)}, indent=2))
+    print(f"  -> {zus}")
+    return 0
 
 
 if __name__ == "__main__":

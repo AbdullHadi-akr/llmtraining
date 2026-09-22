@@ -33,7 +33,28 @@ Der Plan ist eine **Leiter mit Toren**, keine gerade Linie. **Ein rotes Tor
 
 ---
 
-## ▶ Das Nächste: **Stufe 2, der Cache-Umbau** — Stufe 1 ist durch
+## ▶ Das Nächste: **Konfiguration A fahren** — Stufe 1 und 2 sind durch
+
+> **Stand 22.09., abends.** Stufe 1 abgeschlossen (`U(V̇)` kalibriert), Stufe 2
+> **durch mit grünem Tor** (17/17 OPs auf Schema v3, die drei Reports
+> zeichengleich), und der **Ladepfad ist angeschlossen** — `train.py` trainiert.
+> Was jetzt fehlt, ist kein Code, sondern eine **Messung**: Konfiguration A,
+> `--seeds 3`, auf der Maschine mit echten Daten. Sie ist die Latte für B, C
+> und D.
+>
+> ```bash
+> python3 GridCNN/train.py --no-physics --seeds 3 --epochs 60 \
+>     --device cuda --cache data_cache 2>&1 | tee 14_konfigA.txt
+> ```
+>
+> Achte auf die `[CFL]`-Zeile am Anfang: liegt `dt_n` über der Schranke, ist
+> ein weglaufender Rollout **damit** erklärt und nicht mit dem Netz. Arm A ist
+> davon unberührt (keine Physik in der Architektur), B/C/D nicht.
+>
+> Der Lauf ist **adiabat** — `--w-wall` bleibt 0, bis `UCurve` an die vier
+> neuen Cache-Größen angeschlossen ist. Das ist eine **Ablation, keine Latte**.
+
+### Was Stufe 2 war — erledigt
 
 **Drei Läufe am 22.09.** (`10`/`11`/`12_bilanz.txt`; sieben
 Konstant-Treiber-Trainings-OPs, drei Flusslevel). **Stufe 1 ist damit
@@ -568,18 +589,17 @@ gleicher Architektur. Jede Differenz ist einem einzigen Eingriff zuzuordnen.
 > 1. **`GridCNN` hat kein `sweep.py`**, und `PINNmodulusTwo/sweep.py` kann hier
 >    nicht einspringen: `TRAIN_PY = THIS_DIR / "train.py"` zeigt fest auf den
 >    PINN.
-> 2. **Keine Artefakt-Trennung.** `sweep.py` isoliert jeden Lauf über
->    `--artifacts-dir` *und* `PINN_ART_DIR`. `GridCNN/train.py` hat **weder
->    noch** — zwölf gleichzeitige Läufe schrieben in dieselben Dateien. Das
->    scheitert nicht, es mischt.
-> 3. **`--seeds` dreht keine Schleife.** Es ist heute nur eine Warnschwelle
->    (`if args.seeds < 3: print(...)`, `train.py:604`). Wer `--seeds 3` tippt,
->    bekommt **einen** Lauf und glaubt, er habe drei — dieselbe Klasse stiller
->    Zusage wie `xyz = raw[0]` und die Zeitachsen in `balance_check`.
+> 2. ~~Keine Artefakt-Trennung.~~ ✅ **22.09. erledigt** — jeder Seed
+>    schreibt nach `<artifacts-dir>/<Arm>/seed<N>/`.
+> 3. ~~`--seeds` dreht keine Schleife.~~ ✅ **22.09. erledigt** — `--seeds N`
+>    fährt N Läufe und meldet Mittel ± `std(ddof=1)`. Vorher war es eine
+>    Warnschwelle: wer `--seeds 3` tippte, bekam **einen** Lauf und glaubte,
+>    er habe drei — dieselbe Klasse stiller Zusage wie `xyz = raw[0]`.
 >
-> **Reihenfolge:** erst der Ladepfad (dann trainiert `train.py` überhaupt),
-> dann Artefakt-Trennung + echte Seed-Schleife, dann erst lohnt ein `-j`.
-> Vorher ist Parallelität hier Bauen auf Sand.
+> **Es fehlt also nur noch der Treiber.** Der Ladepfad steht, die Trennung
+> steht, die Seeds laufen. Ein `-j` über Arme × Seeds ist jetzt Fleißarbeit
+> und kein Umbau mehr — und `sweep.py` bleibt trotzdem der falsche Ort dafür,
+> weil `TRAIN_PY` dort fest auf den PINN zeigt.
 >
 > **MPS gehört trotzdem an** — er kostet einen Einzellauf nichts und ist dann
 > schon da. Für den Cache-Rebuild ändert er allerdings **gar nichts**: der ist
@@ -757,6 +777,11 @@ Damit der Umfang nicht wandert:
 | **22.09.** | **Die Kurvenform bleibt offen und blockiert nichts.** Zwei Konvektionspunkte, `U ∝ ṁ^0.253`. OP16 trennt Potenzgesetz (662) von Serienwiderstand (591) — 12 % gegen 1.1–1.4 % Streuung, also eine scharfe Gegenprobe |
 | **22.09.** | **`A = 0.0206 m²` ist die y × z-Fläche des Gitters selbst** — gemessen 0.0206874, benutzt 0.0206, 0.42 % darunter. Unter der Streuung, aber nachzuziehen |
 | **22.09.** | Beide fallenden Tests repariert: die float32-Schranke im gepaddeten Rollout (1.2e-6 gegen 1e-6, hielt zufällig) und **`torch.equal` im float64-Vergleich** — Bitgleichheit zwischen zwei Batchgrößen ist durch nichts garantiert und war nicht portabel (lokal grün, auf dem Runner rot). Jetzt beide gegen eine relative Schranke `1e-12` |
+| **22.09.** | **Stufe 2 ist durch — Tor grün.** `generate_cache.py --all` hat **17/17** OPs auf Schema v3 gebaut; `profile_report`, `coverage_report` und `energy_balance_report` liefern danach **zeichengleich** dieselben Zahlen (`diff` leer). Der Wandpfad liegt im Cache, ohne dass sich etwas Bestehendes bewegt hat |
+| **22.09.** | **Der Ladepfad ist angeschlossen.** `train.py` trainiert — `lade_datensatz` zieht die Bündel über `PINNmodulusTwo/data.py`, `layout_aus_bundle` leitet den Reshape aus `bundle.xn` (float64) ab, `statics_aus_bundle` holt `lam` aus `materials`, nicht aus `Fo` zurückgerechnet. Alle vier Arme A/B/C/D laufen durch; **11 427 Parameter** wie geplant |
+| **22.09.** | **Die Gitterabbildung ist punktweise geprüft**, nicht angenommen: alle 363 Punkte, für `tn_seq` *und* für den 3×3-Tensor `fo` — der trägt seine Matrixachsen hinten und stünde bei naivem `to_field` auf dem Kopf |
+| **22.09.** | **`--seeds` dreht jetzt eine Schleife.** Vorher war es eine Warnschwelle: wer `--seeds 3` tippte, bekam **einen** Lauf. Jede Wiederholung schreibt in ihr eigenes `--artifacts-dir`, und die Zusammenfassung nennt Mittel **und** `std(ddof=1)` |
+| **22.09.** | **CFL wird vor dem Lauf ausgerechnet, nicht danach gerätselt.** Auf dem synthetischen Fixture liegt der Schritt selbst bei `subsample 1` **53×** über der Schranke (1.9 ms gegen die echten 0.241 s) — die Ersatz-Materialdaten machen das Problem viel steifer, als es ist. Arm A ist davon unberührt, B/C/D laufen dort weg. **Auf der Rechenmaschine mit echten Materialdaten ist das eine andere Zahl** |
 
 ## Stand
 
@@ -870,7 +895,7 @@ abgefangen, und tote Kanäle werden **gemeldet** statt still zu bleiben.
 
 | | was | blockiert durch |
 |---|---|---|
-| **Ladepfad** | `train.py` an `PINNmodulusTwo/data.py` anschließen: Bündel laden, `OPTensors` füllen, `op_metrics` auswerten | `data_cache` (liegt nicht im Repo) |
+| ~~**Ladepfad**~~ | ~~`train.py` an `PINNmodulusTwo/data.py` anschließen~~ | ✅ **erledigt 22.09.** — `lade_datensatz`, `op_tensoren`, `val_mae`, Seed-Schleife. Gegen das synthetische Fixture rauchgetestet, alle vier Arme laufen. `op_metrics` ist noch nicht angeschlossen: die val-MAE kommt heute aus dem freilaufenden Rollout gegen `tn_seq × T_sigma` |
 
 > **Was der Ladepfad schon vorfindet** (22.09. gebaut, mit Tests):
 > `train.modell_kwargs(args)` übersetzt die Ablationsflags an **einer** Stelle
@@ -883,8 +908,10 @@ abgefangen, und tote Kanäle werden **gemeldet** statt still zu bleiben.
 | **Physik-Latte** | Stufe 3 mit echter Wand | Wandterm |
 | **`L_wall`** | der einzige Verlustterm mit gemessenem Ziel | Wandterm |
 | **`C_fluid`** | Wärmekapazität des Kühlmittels im Kanal, für den Kapazitätsmodus | liegt nicht vor — **nicht raten** |
-| **Artefakt-Trennung** | `--artifacts-dir` je Lauf, wie `PINNmodulusTwo/train.py` es hat | Ladepfad. Ohne sie ist kein paralleler Sweep möglich: zwölf Läufe schrieben in dieselben Dateien |
-| **Seed-Schleife** | `--seeds` dreht keine; heute nur Warnschwelle (`train.py:604`) | Ladepfad. Bis dahin **lügt der Flag nicht mehr**: die Hilfe sagt es seit dem 22.09. |
+| ~~**Artefakt-Trennung**~~ | ~~`--artifacts-dir` je Lauf~~ | ✅ **erledigt 22.09.** — jeder Seed bekommt `<artifacts-dir>/<Arm>/seed<N>/` mit `model.pt`, `history.json`, `metrics.json` |
+| ~~**Seed-Schleife**~~ | ~~`--seeds` dreht keine~~ | ✅ **erledigt 22.09.** — `--seeds N` fährt N Läufe mit `seed, seed+1, …` und meldet Mittel ± `std(ddof=1)` |
+| **`op_metrics` anschließen** | die Kennzahlen des Basisprojekts (`peak_pred`, `late_bias_frac`) auch für den CNN | nichts — Fleißarbeit. Ohne sie ist **O17 am CNN nicht messbar** |
+| **Ein Sweep-Treiber** | `-j N` über Arme × Seeds, wie `PINNmodulusTwo/sweep.py` | nichts mehr. Die Artefakt-Trennung stand im Weg, sie steht jetzt |
 
 ⚠ **Der Löser und das Training laufen heute adiabat.** Der Wandterm ist gebaut
 und getestet, aber ohne die vier Cache-Größen nicht kalibrierbar.
