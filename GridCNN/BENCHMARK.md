@@ -171,7 +171,7 @@ Verworfen, weil der ROM gestrichen ist (Fahrplan, 15.09.). Bleibt mit
 Begründung stehen, wie es das Dokument für verworfene Routen vorschreibt — und
 weil sie die Messung ist, die man nachholt, wenn Stufe 4 den CNN nicht trägt.
 
-### R8 · Die zwei Koordinatenkarten — **offen, neu am 22.09.**
+### R8 · Die zwei Koordinatenkarten — **offen, gebaut am 22.09.**
 
 README §2b begründet den CNN damit, dass er Position **nicht** auswendig lernen
 *kann* und räumliche Struktur deshalb über die Materialkarten begründen *muss*.
@@ -205,8 +205,17 @@ Frage nicht — alle drei tragen die Karten.
 * **D deutlich schlechter** → der CNN hat dieselbe Positionskrücke wie das MLP,
   und §2b beschreibt einen Entwurf, den der Code nicht umsetzt.
 
-*Kosten:* ein Lauf je Seed, kein neuer Code außer dem Flag. Blockiert durch den
-Ladepfad wie A/B/C.
+*Kosten:* ein Lauf je Seed. **Der Code steht seit dem 22.09.**: `--no-coord-maps`
+in `train.py`, `coord_maps=False` in `build_static_maps`, `n_static` in
+`GridCNN`, und `train.modell_kwargs` hält beide Breiten an einer Stelle zusammen
+— die häufigste Art, diese Ablation kaputtzumachen, ist, nur eine davon
+umzustellen. D kostet 11 139 statt 11 427 Parameter (2 × 16 × 9 = 288 weniger in
+der ersten Faltung); ein Test hält fest, dass die fünfzehn Materialkarten dabei
+**bitgleich** bleiben. Gemessen wird erst mit dem Ladepfad, wie A/B/C.
+
+⚠ **D ist ein enger Test.** Was nach dem Ziehen der Karten an Ortsstruktur übrig
+bleibt, ist das Randband aus der Tabelle oben. Fällt D durch, ist gezeigt, dass
+**dieser Datensatz** den Prior nicht hergibt — nicht, dass es keinen gäbe.
 
 > **Nebenbefund, klein aber gegen die eigene Doktrin:** `rho*Cp` ist auf Ebene 0
 > und 1 bitgleich, die beiden Kanäle sind nach dem z-Score identische

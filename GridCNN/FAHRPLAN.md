@@ -297,14 +297,41 @@ Randbedingung, die niemand beschlossen hat.
 
 Drei Konfigurationen, die sich in genau einer Sache unterscheiden:
 
-| | die Rate `f` | `w_phys` | CLI | misst |
-|---|---|---|---|---|
-| **A** | `g_θ` allein | 0 | `--no-physics` | reine Blackbox — die Latte |
-| **B** | `L+Q+g_θ` | 0 | (Vorgabe) | was die Physik **in der Architektur** bringt |
-| **C** | `L+Q+g_θ` | > 0 | `--w-phys 0.1` | was der Strafterm **obendrauf** bringt |
+| | die Rate `f` | Eingang | `w_phys` | CLI | misst |
+|---|---|---|---|---|---|
+| **A** | `g_θ` allein | 44 Kanäle | 0 | `--no-physics` | reine Blackbox — die Latte |
+| **B** | `L+Q+g_θ` | 44 Kanäle | 0 | (Vorgabe) | was die Physik **in der Architektur** bringt |
+| **C** | `L+Q+g_θ` | 44 Kanäle | > 0 | `--w-phys 0.1` | was der Strafterm **obendrauf** bringt |
+| **D** | `L+Q+g_θ` | **42** — ohne `y_map`/`z_map` | 0 | `--no-coord-maps` | ob der Ortsprior aus §2b **echt** ist |
 
 A → B ändert die Architektur bei gleichem Verlust, B → C den Verlust bei
 gleicher Architektur. Jede Differenz ist einem einzigen Eingriff zuzuordnen.
+
+> ### Arm D — neu am 22.09., ✅ gebaut
+>
+> **Die Frage:** README §2b führt als Vorteil des CNN an, dass er Position
+> *nicht* auswendig lernen **kann** und räumliche Struktur deshalb über die
+> Materialkarten begründen **muss**. [`model.py:193`](model.py) gibt ihm die
+> Position trotzdem — zwei z-gescorte Koordinatenkarten, mit dem Kommentar,
+> ohne sie wäre *„jede Randzelle von jeder Mittelzelle ununterscheidbar"*.
+> Beide Texte gehen von derselben Prämisse aus und ziehen den entgegengesetzten
+> Schluss. **A/B/C berühren das nicht — alle drei tragen die Karten.**
+>
+> **Was D ändert:** genau zwei Kanäle von 44. 11 139 Parameter statt 11 427
+> (2 × 16 × 9 = 288 weniger in der ersten Faltung). Sonst identisch — ein Test
+> hält fest, dass die fünfzehn Materialkarten **bitgleich** bleiben.
+>
+> | Ergebnis | Folge |
+> |---|---|
+> | **D ≈ B** | 🟢 der Ortsprior ist echt, §2b stimmt, und der CNN steht dort wirklich anders als das MLP |
+> | **D deutlich schlechter** | 🔴 der CNN hat dieselbe Positionskrücke wie das MLP. §2b beschreibt dann einen Entwurf, den der Code nicht umsetzt — und §11.1 ist beantwortet, nur anders als erhofft |
+>
+> ⚠ **Und D ist ein enger Test.** Am 22.09. gemessen: `region`/`rho`/`Cp` sind
+> je x-Ebene konstant, `lam` variiert nur in **zwei Zeilen am unteren y-Rand**
+> (22 von 121 Punkten), und der Kontrast in der Ebene ist nach dem z-Score rund
+> **zwölfmal schwächer** als der zwischen den Ebenen. D fragt also, ob dieses
+> schmale Band reicht. Fällt D durch, ist damit **nicht** gezeigt, dass ein
+> Ortsprior unmöglich wäre — nur, dass dieser Datensatz ihn nicht hergibt.
 
 > **Beide starten auf etwas Sinnvollem.** Weil `head` null ist, startet **A**
 > bei `persistence` (Rate null) und **B** bei der Physik. Keine der beiden
@@ -437,6 +464,9 @@ Damit der Umfang nicht wandert:
 | **22.09.** | **Materialverteilung gemessen:** `region`/`rho`/`Cp` je x-Ebene konstant; `lam` variiert, aber nur in zwei Zeilen am unteren y-Rand (22 von 121 Punkten) |
 | **22.09.** | **§2b widerspricht `model.py:193`** — die zwei Koordinatenkarten geben dem Kern die Position, die §2b ihm abspricht. Offen, Route R8 |
 | **22.09.** | **`main` war seit dem 17.09. rot** und niemand hat es bemerkt: `pytest (GridCNN)` meldete auf `163b21c` `2 failed, 97 passed`, und der Benchmark-Schritt dahinter wurde seither übersprungen. PR #40 erbt dieses Rot — seine vier Dateien liegen alle in `PINNmodulusTwo/`, dessen Suite grün ist |
+| **22.09.** | **Ablationsarm D gebaut** — `--no-coord-maps`, 42 statt 44 Kanäle, 11 139 Parameter. Sieben Tests, darunter einer, der die fünfzehn Materialkarten bitgleich festhält |
+| **22.09.** | **Die Gittergleichheit ist jetzt geprüft statt angenommen**: `data._assert_shared_geometry` fällt, wenn ein OP eine andere Punktreihenfolge hat. Test in beide Richtungen, mit reiner Zeilenvertauschung |
+| **22.09.** | PR #40 (Achse 1, O18, MPS-Prüfung) in diesen Branch hereingeholt — ein PR statt zwei |
 | **22.09.** | Beide fallenden Tests repariert: die float32-Schranke im gepaddeten Rollout (1.2e-6 gegen 1e-6, hielt zufällig) und **`torch.equal` im float64-Vergleich** — Bitgleichheit zwischen zwei Batchgrößen ist durch nichts garantiert und war nicht portabel (lokal grün, auf dem Runner rot). Jetzt beide gegen eine relative Schranke `1e-12` |
 
 ## Stand
@@ -545,6 +575,13 @@ abgefangen, und tote Kanäle werden **gemeldet** statt still zu bleiben.
 | | was | blockiert durch |
 |---|---|---|
 | **Ladepfad** | `train.py` an `PINNmodulusTwo/data.py` anschließen: Bündel laden, `OPTensors` füllen, `op_metrics` auswerten | `data_cache` (liegt nicht im Repo) |
+
+> **Was der Ladepfad schon vorfindet** (22.09. gebaut, mit Tests):
+> `train.modell_kwargs(args)` übersetzt die Ablationsflags an **einer** Stelle
+> in die Argumente von `build_static_maps` und `GridCNN` — er muss sie nur noch
+> aufrufen. Und `derive_layout` gehört mit `bundle.xn` (float64) × `L_ref`
+> gefüttert, **nicht** mit `op.xn`: der ist float32 und halbiert die Reserve der
+> Äquidistanzprüfung (4e-7 gemessen gegen `rtol` 1e-6).
 | **Wandterm benutzbar** | `U(V̇)` kalibrieren | **Stufe 2**: `q_solid_to_fluid`, `mdot`, `cp_fluid`, `fluid_out_temp` fehlen im Bündel |
 | **Physik-Latte** | Stufe 3 mit echter Wand | Wandterm |
 | **`L_wall`** | der einzige Verlustterm mit gemessenem Ziel | Wandterm |

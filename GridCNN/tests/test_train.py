@@ -516,3 +516,57 @@ def test_die_cli_kennt_device():
     a = T.build_argparser().parse_args(["--device", "cuda:0"])
     assert a.device == "cuda:0"
     assert T.build_argparser().parse_args([]).device == "ask"
+
+
+# ---------------------------------------------------------------------------
+# Die Ablationsflags -- eine Uebersetzung, an einer Stelle
+# ---------------------------------------------------------------------------
+def _args(*argv):
+    return T.build_argparser().parse_args(list(argv))
+
+
+def test_no_coord_maps_kommt_an_BEIDEN_stellen_an():
+    """Karten und erste Faltung muessen zusammen schmal werden, nicht eine.
+
+    Die haeufigste Art, diese Ablation kaputtzumachen, ist, nur eine der beiden
+    Breiten umzustellen. Dann faellt es beim ersten Forward auf -- aber erst
+    nach dem Laden der Daten, also Minuten spaeter und auf der Maschine.
+    """
+    kw = T.modell_kwargs(_args("--no-coord-maps"))
+    assert kw["static"]["coord_maps"] is False
+    assert kw["net"]["n_static"] == M.CH_STATIC_OHNE_KOORD
+
+    vor = T.modell_kwargs(_args())
+    assert vor["static"]["coord_maps"] is True
+    assert vor["net"]["n_static"] == M.CH_STATIC
+
+
+def test_die_uebersetzung_baut_ein_netz_das_zu_den_karten_passt(layout):
+    """Ende zu Ende: was modell_kwargs sagt, laeuft auch durch."""
+    import numpy as np
+    n = layout.n_points
+    rng = np.random.default_rng(0)
+    for argv, breite in (((), 44), (("--no-coord-maps",), 42)):
+        kw = T.modell_kwargs(_args(*argv))
+        statics = M.build_static_maps(
+            layout, lam=rng.random((n, 3, 3)) + 1.0, rho=np.full(n, 2500.0),
+            cp=np.full(n, 900.0), **kw["static"])
+        netz = M.GridCNN(layout, **kw["net"])
+        nx, ny, nz = layout.shape
+        torch.manual_seed(0)
+        state = M.state_channels(*(torch.randn(2, nx, ny, nz) for _ in range(3)))
+        drivers = M.driver_channels(torch.randn(2, 7), torch.randn(2, 11), ny, nz)
+        x = M.assemble_input(state, statics, drivers)
+        assert x.shape[1] == breite
+        assert netz.correction(x).shape == (2, nx, ny, nz)
+
+
+def test_der_konfigurationsname_trifft_die_vier_arme():
+    """A/B/C/D wie in der Fahrplantabelle -- damit im Log steht, was lief."""
+    assert T.konfigurationsname(_args()).startswith("B")
+    assert T.konfigurationsname(_args("--no-physics")).startswith("A")
+    assert T.konfigurationsname(_args("--w-phys", "0.1")).startswith("C")
+    assert T.konfigurationsname(_args("--no-coord-maps")).startswith("D")
+    # A schlaegt D: ohne Physik ist die Kartenfrage nicht mehr dieselbe Frage.
+    assert T.konfigurationsname(
+        _args("--no-physics", "--no-coord-maps")).startswith("A")

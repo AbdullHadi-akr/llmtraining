@@ -103,9 +103,12 @@ zwei Koordinatenkarten, die §2b ihm abspricht — und die Materialkarten, auf d
 §2b stattdessen verweist, tragen in der Ebene kaum etwas. Ein vierter
 Ablationsarm **D** (B ohne die Koordinatenkarten) macht die Frage messbar.
 
-⚠ **Die Gittergleichheit wird durch Stufe 2 wieder ungeprüft.** Der Cache-Umbau
-baut alle siebzehn OPs neu; `load_ops` nimmt die Geometrie weiterhin aus
-`raw[0]`. Der Vergleich gehört danach als Prüfung hinein.
+✅ **Die Gittergleichheit ist seit dem 22.09. geprüft statt angenommen.**
+`data._assert_shared_geometry` vergleicht `xyz` und `layer` jedes OP gegen das
+erste und fällt bei abweichender Punktreihenfolge — genau der Fehler, den
+`grid.derive_layout` nicht sehen kann, weil er ein wohlgeformtes Tensorgitter
+hinterlässt. Der Cache-Umbau aus Stufe 2 kann die Zusage damit nicht mehr
+stillschweigend brechen.
 
 ## Die Entscheidung, die man kennen muss
 
@@ -263,9 +266,10 @@ schärfere Prior.
 > Information wie eine geschwellte y-Karte.
 >
 > **Entschieden ist nichts.** Der Absatz bleibt stehen, weil er der schärfere
-> Entwurf wäre; er ist nur nicht mehr das, was der Code tut. Messbar wird die
-> Frage über einen **vierten Ablationsarm D** — B ohne die zwei
-> Koordinatenkarten (Route R8 in [`BENCHMARK.md`](BENCHMARK.md)).
+> Entwurf wäre; er ist nur nicht mehr das, was der Code tut. Messbar ist die
+> Frage seit dem 22.09.: **Ablationsarm D** ist gebaut — `--no-coord-maps`,
+> 42 statt 44 Kanäle, 11 139 statt 11 427 Parameter, sonst identisch. Er
+> braucht nur noch den Ladepfad. Route R8 in [`BENCHMARK.md`](BENCHMARK.md).
 
 **c) Die Symmetrie wird Struktur statt Gewicht.** `dT/dx = 0` an der Zellmitte
 ist eine Spiegelung -- exakt, ohne `w_bc`, Achse 2 des Fahrplans löst sich auf.

@@ -108,6 +108,40 @@ def test_synthetic_bundle_loads_through_the_real_loader(synthetic_cache):
     assert bundle.bc_pairs > 0
 
 
+def test_the_shared_geometry_is_checked_and_not_assumed(synthetic_cache):
+    """Both directions: identical exports pass, a permuted one is caught.
+
+    ``load_ops`` reads the geometry from the FIRST op and applies it to all of
+    them. Until 22.09. that was a comment ("grid identical across OPs") and
+    nothing more. It happens to hold -- measured bit-identical across all
+    seventeen cached ops -- but a cache rebuild makes the measurement stale, and
+    the failure mode is the expensive kind: a permuted ``xyz`` still forms a
+    perfectly valid 3 x 11 x 11 tensor grid, so ``grid.derive_layout`` accepts
+    it and every field of that op is silently scrambled.
+
+    The permutation below is a pure ROW SWAP: same points, same shape, same
+    bounding box, same spacing. Nothing but an order comparison can see it --
+    which is exactly why the check has to be one.
+    """
+    # Direction 1: the untouched cache loads, so the check is not just a veto.
+    bundle = data_mod.load_ops(op_ids=["OP01", "OP02"], subsample_time=40)
+    assert len(bundle.ops) == 2
+
+    # Direction 2: swap two rows of the SECOND op's coordinates and nothing else.
+    roh = [data_mod._read_raw(op_id, 40, "mean") for op_id in ("OP01", "OP02")]
+    verdreht = dict(roh[1])
+    xyz = np.array(roh[1]["xyz"], copy=True)
+    xyz[[0, 1]] = xyz[[1, 0]]
+    verdreht["xyz"] = xyz
+
+    assert np.array_equal(np.sort(xyz, axis=0), np.sort(roh[0]["xyz"], axis=0)), (
+        "die Vertauschung darf die Punktmenge nicht aendern, sonst prueft der "
+        "Test die Menge statt der Reihenfolge"
+    )
+    with pytest.raises(ValueError, match="weicht von .* ab"):
+        data_mod._assert_shared_geometry([roh[0], verdreht])
+
+
 def test_synthetic_labels_satisfy_the_neumann_bc(synthetic_cache):
     """dT/dx = 0 at x = 0 in the fixture itself.
 

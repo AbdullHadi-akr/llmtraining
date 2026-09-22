@@ -75,6 +75,8 @@ from grid import GridLayout
 # Umbau am Eingang genau eine Stelle hat und nicht drei.
 CH_STATE = 9      # T_t (3) + Rate ueber kurzem Lag (3) + ueber langem Lag (3)
 CH_STATIC = 17    # lam_xx/yy/zz/xy x 3 Ebenen (12) + rho*Cp x 3 (3) + y/z-Karte (2)
+CH_COORD = 2      # davon die zwei Koordinatenkarten -- Ablationsarm D zieht sie
+CH_STATIC_OHNE_KOORD = CH_STATIC - CH_COORD   # 15
 CH_DRIVER = 18    # 7 config + 11 forcing, gebroadcastet
 CH_IN = CH_STATE + CH_STATIC + CH_DRIVER   # 44
 
@@ -94,9 +96,19 @@ class StaticMaps:
     dead: tuple = ()            # Namen der Groessen, die konstant und damit tot sind
 
     def __post_init__(self) -> None:
-        if self.maps.shape[0] != CH_STATIC:
+        if self.maps.shape[0] not in (CH_STATIC, CH_STATIC_OHNE_KOORD):
             raise ValueError(
-                f"StaticMaps braucht {CH_STATIC} Kanaele, hat {self.maps.shape[0]}")
+                f"StaticMaps braucht {CH_STATIC} Kanaele (oder "
+                f"{CH_STATIC_OHNE_KOORD} ohne die Koordinatenkarten), hat "
+                f"{self.maps.shape[0]}")
+
+    @property
+    def n_channels(self) -> int:
+        return int(self.maps.shape[0])
+
+    @property
+    def hat_koordinatenkarten(self) -> bool:
+        return self.n_channels == CH_STATIC
 
     def expand(self, batch: int) -> torch.Tensor:
         return self.maps.unsqueeze(0).expand(batch, -1, -1, -1)
@@ -110,8 +122,11 @@ class StaticMaps:
         Kanal -- er kostet Parameter in der ersten Faltung und verschleiert,
         wie viel Information wirklich hineingeht.
         """
-        lebt = CH_STATIC - 3 * len(self.dead)
-        zeile = f"{CH_STATIC} statische Karten, davon {lebt} mit Struktur"
+        lebt = self.n_channels - 3 * len(self.dead)
+        zeile = f"{self.n_channels} statische Karten, davon {lebt} mit Struktur"
+        if not self.hat_koordinatenkarten:
+            zeile += ("\n  ARM D: y/z-Karten GEZOGEN. Ortsstruktur muss aus den "
+                      "Materialkarten kommen -- siehe BENCHMARK.md, Route R8.")
         if self.dead:
             zeile += ("\n  TOT (konstant, auf 0 gesetzt): "
                       + ", ".join(self.dead))
@@ -151,8 +166,8 @@ def _zscore(a: torch.Tensor) -> torch.Tensor:
 
 
 def build_static_maps(layout: GridLayout, *, lam: np.ndarray, rho: np.ndarray,
-                      cp: np.ndarray, device=None,
-                      dtype=torch.float32) -> StaticMaps:
+                      cp: np.ndarray, device=None, dtype=torch.float32,
+                      coord_maps: bool = True) -> StaticMaps:
     """Baut die 17 Karten aus den Rohgroessen von ``data._grid_arrays``.
 
     ``lam`` ist ``(n_points, 3, 3)``, ``rho`` und ``cp`` sind ``(n_points,)``.
@@ -194,6 +209,22 @@ def build_static_maps(layout: GridLayout, *, lam: np.ndarray, rho: np.ndarray,
     # etwas ueber Position wissen kann: die Faltung ist ueber (y, z) geteilt,
     # also KANN sie Ort nicht auswendig lernen. Ohne diese beiden waere jede
     # Randzelle von jeder Mittelzelle ununterscheidbar.
+    #
+    # ⚠ Und genau darin widerspricht diese Datei dem README, Sec. 2b, das den
+    # geteilten Kern als VORTEIL fuehrt ("der CNN muss raeumliche Struktur ueber
+    # die Materialkarten begruenden"). Beide Texte gehen von derselben Praemisse
+    # aus und ziehen den entgegengesetzten Schluss; keiner von beiden ist
+    # gemessen. ``coord_maps=False`` ist **Ablationsarm D** und macht die Frage
+    # entscheidbar: derselbe Verlust, dieselbe Architektur sonst, zwei Kanaele
+    # weniger. Route R8 in BENCHMARK.md.
+    #
+    # Am 22.09. dazu gemessen, was die Materialkarten in der Ebene ueberhaupt
+    # hergeben: region/rho/Cp sind je x-Ebene KONSTANT, und ``lam`` variiert nur
+    # in zwei Zeilen am unteren y-Rand (22 von 121 Punkten). D ist damit ein
+    # fairer Test und kein Strohmann -- aber ein enger.
+    if not coord_maps:
+        return StaticMaps(maps=stacked.contiguous(), dead=tuple(dead))
+
     yv = torch.as_tensor(layout.yu, dtype=dtype, device=device)
     zv = torch.as_tensor(layout.zu, dtype=dtype, device=device)
     y_map = _zscore(yv).reshape(ny, 1).expand(ny, nz)
@@ -257,11 +288,20 @@ def driver_channels(config_feat: torch.Tensor, forcing_feat: torch.Tensor,
 
 def assemble_input(state: torch.Tensor, static: StaticMaps,
                    drivers: torch.Tensor) -> torch.Tensor:
-    """Die 44 Kanaele in der Reihenfolge aus README Sec. 3: Zustand, Karten, Treiber."""
+    """Die Kanaele in der Reihenfolge aus README Sec. 3: Zustand, Karten, Treiber.
+
+    44 mit den Koordinatenkarten, 42 ohne (Ablationsarm D). Die Breite kommt aus
+    ``static``, nicht aus :data:`CH_IN` -- sonst muesste man sie an zwei Stellen
+    gleichzeitig aendern, und die zweite wuerde vergessen.
+    """
     b = state.shape[0]
     x = torch.cat([state, static.expand(b), drivers], dim=1)
-    if x.shape[1] != CH_IN:
-        raise ValueError(f"{CH_IN} Kanaele erwartet, gebaut wurden {x.shape[1]}")
+    erwartet = CH_STATE + static.n_channels + CH_DRIVER
+    if x.shape[1] != erwartet:
+        raise ValueError(
+            f"{erwartet} Kanaele erwartet ({CH_STATE} Zustand + "
+            f"{static.n_channels} statisch + {CH_DRIVER} Treiber), gebaut "
+            f"wurden {x.shape[1]}")
     return x
 
 
@@ -321,15 +361,26 @@ class GridCNN(nn.Module):
     Fahrplan -- die reine Blackbox, gegen die B und C gemessen werden. Es ist
     kein Debug-Schalter: ohne A ist nicht zu sagen, ob die Physik in der
     Architektur etwas beitraegt oder ob das Netz sie ohnehin gelernt haette.
+
+    ``n_static`` ist :data:`CH_STATIC_OHNE_KOORD` fuer **Konfiguration D** --
+    B ohne die zwei Koordinatenkarten. Es muss zu den ``StaticMaps`` passen, mit
+    denen das Netz gefuettert wird; passt es nicht, faellt schon die erste
+    Faltung, und ``assemble_input`` faellt davor mit einer Zahl im Text.
     """
 
     def __init__(self, layout: GridLayout, *, width: int = 16, blocks: int = 3,
-                 use_physics: bool = True) -> None:
+                 use_physics: bool = True, n_static: int = CH_STATIC) -> None:
         super().__init__()
+        if n_static not in (CH_STATIC, CH_STATIC_OHNE_KOORD):
+            raise ValueError(
+                f"n_static ist {CH_STATIC} oder {CH_STATIC_OHNE_KOORD} "
+                f"(Ablationsarm D), nicht {n_static}")
         self.layout = layout
         self.use_physics = use_physics
-        self.correction = ConvCorrection(width=width, blocks=blocks,
-                                         out_ch=layout.shape[0])
+        self.n_static = n_static
+        self.correction = ConvCorrection(
+            in_ch=CH_STATE + n_static + CH_DRIVER,
+            width=width, blocks=blocks, out_ch=layout.shape[0])
 
     @property
     def n_parameters(self) -> int:

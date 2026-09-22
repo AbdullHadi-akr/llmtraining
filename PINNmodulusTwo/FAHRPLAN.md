@@ -2573,6 +2573,35 @@ Grenzflächen.
 | Jelly Roll (`jr1c`) | `lambda_zz = 1.2` W/mK | 2100 · 1100 | 5.2e-7 m²/s |
 | Gehäuse (`g`) | `lambda_iso = **200**` W/mK | 2700 · 900 | 8.2e-5 m²/s |
 
+> ### ⚠ Korrektur, 22.09. — die Zahlen oben sind die **synthetischen**
+>
+> `1.2` / `200` / `2100 · 1100` / `2700 · 900` stehen wörtlich in
+> `tools/make_synthetic_cache.py:285–286`, dem Ersatzcache für die Tests. Was
+> `materials.py` auf dem **echten** Gitter liefert, ist anders — am 22.09. an
+> allen siebzehn Cache-OPs gemessen (GridCNN `BENCHMARK.md`, Lauf vom 22.09.):
+>
+> | | λ_xx | λ_yy | λ_zz | ρ·Cp |
+> |---|---|---|---|---|
+> | Zellmitte (Ebene 0) | ~5.3 … 6.3 am Rand, sonst **0.755** | ~5.3 … 6.5 am Rand, sonst **22.4** | **11.2 / 22.4** | 2468.13 · 938.05 |
+> | Jelly Roll (Ebene 1) | **0.755** (+ 4 weitere) | **0.756** (+ 3) | **22.4** | 2468.13 · 938.05 |
+> | Gehäuse (Ebene 2) | **193** | **193** | **193** | 2700 · 893 |
+>
+> **Der Sprung ist richtungsabhängig, und das ist für O18 der Punkt:** in **x**
+> — der Richtung, in der laut diesem Abschnitt *jede* Ableitung eine Grenzfläche
+> überquert — springt λ von **0.755 auf 193**, also um **Faktor 256**. In z sind
+> es nur **8.6** (22.4 → 193).
+>
+> **Das Argument wird dadurch stärker, nicht schwächer** — der relevante Sprung
+> ist größer als die zitierten 167. Aber `(∇λ)·(∇T)` ist **anisotrop** zu
+> dimensionieren; mit einem skalaren λ-Sprung von 167 gerechnet, träfe der Term
+> weder x noch z.
+>
+> **Und die 3-Knoten-Geometrie ist jetzt gesehen, nicht erschlossen.** Die
+> Vorbedingung aus „Schritt 1" ist erfüllt: 363 = 3 x-Ebenen × 121 Punkte,
+> `region` genau 0 / 1 / 2 je Ebene, über alle siebzehn OPs **bitgleich** und
+> identisch mit den Koordinaten-CSVs im Repo. `load_ops` prüft das seit dem
+> 22.09. selbst (`_assert_shared_geometry`), statt es zu kommentieren.
+
 **λ springt um Faktor 167, α um Faktor ~159.** Das ist kein Gradient, das ist
 eine Sprungstelle — und `(∇λ)·(∇T)` ist dort eine Delta-Distribution, nicht ein
 kleiner Korrekturterm.

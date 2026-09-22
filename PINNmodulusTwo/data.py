@@ -437,6 +437,37 @@ def _read_raw(op_id: str, subsample_time: int, resample: str) -> dict:
     )
 
 
+def _assert_shared_geometry(raw: list) -> None:
+    """Every op must carry the SAME points in the SAME order. Raises if not.
+
+    ``load_ops`` takes the geometry from ``raw[0]`` and applies it to all of
+    them. That is only sound while the exports agree, and nothing downstream can
+    tell the difference: a permuted ``xyz`` produces a perfectly well-formed
+    tensor grid, just one whose rows no longer line up with ``Tn``.
+
+    Compared bitwise on purpose. These arrays come from the same upstream export
+    and are read through the same path, so equal inputs give equal bits; any
+    difference at all means the exports are not the same grid, and "how close is
+    close enough" is not a question the reshape can answer.
+    """
+    ref = raw[0]
+    for r in raw[1:]:
+        for feld in ("xyz", "layer"):
+            a, b = np.asarray(ref[feld]), np.asarray(r[feld])
+            if a.shape != b.shape or not np.array_equal(a, b):
+                wie = ("andere Form" if a.shape != b.shape else
+                       "gleiche Form, andere Werte oder andere Reihenfolge")
+                raise ValueError(
+                    f"{r['op_id']}: '{feld}' weicht von {ref['op_id']} ab "
+                    f"({wie}: {a.shape} gegen {b.shape}). load_ops nimmt die "
+                    f"Geometrie aus dem ERSTEN OP und wendet sie auf alle an -- "
+                    f"bei abweichender Punktreihenfolge waere jedes Feld dieses "
+                    f"OP still verwuerfelt. Am 22.09. waren alle siebzehn "
+                    f"Cache-OPs bitgleich; wenn das hier faellt, hat der Cache "
+                    f"sich geaendert und der Reshape ist nicht mehr sicher."
+                )
+
+
 def _grid_arrays(layer, xyz, T_span_ref, L_ref):
     props = load_material_properties(layer=layer)
     rho = np.asarray(props["rho"], dtype=np.float64)
@@ -650,6 +681,20 @@ def load_ops(
     raw = [_read_raw(op_id, subsample_time, resample) for op_id in op_ids]
 
     # ---- shared geometry (grid identical across OPs) ------------------------
+    # Until 22.09. the line below was all there was, with the parenthesis above
+    # as its only justification: the geometry of EVERY op came from raw[0], and
+    # nothing ever looked at the other fifteen. That assumption carries the whole
+    # of GridCNN -- its reshape maps a 363-vector onto (3, 11, 11) using one
+    # layout derived once -- and grid.derive_layout cannot catch a violation,
+    # because it only ever sees the one xn the bundle hands it. A single op
+    # exported with a different point ORDER would silently scramble that op's
+    # field, and it would surface weeks later as "the net converges badly".
+    #
+    # Measured on 22.09. across all seventeen cached ops: xyz is bit-identical,
+    # same row order, and so is `layer`. So the assumption holds -- but a cache
+    # rebuild (GridCNN FAHRPLAN, Stufe 2) makes that measurement stale again.
+    # Hence the check rather than the comment. It costs one array compare per op.
+    _assert_shared_geometry(raw)
     xyz = raw[0]["xyz"]
     xyz_min = xyz.min(axis=0)
     L_axis = xyz.max(axis=0) - xyz_min
