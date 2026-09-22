@@ -476,8 +476,18 @@ def main() -> None:
     print("   VORLAEUFIG, solange Punkt 1 offen ist: zaehlt der Monitor beide")
     print("   Platten, ist U hier um Faktor 2 zu hoch. Robust ist das VERHAELTNIS")
     print("   zwischen den Flusslevels, nicht der Absolutwert.")
-    print(f"{'OP':<6} {'V_dot':>7} {'mdot':>9} {'U [W/m2K]':>12}  "
-          f"{'T_fluid':<12}")
+    print("   ⚠ Die BEZUGSTEMPERATUR ist hier der groessere Hebel als die")
+    print("   Halbmodellfrage. Das Fluid erwaermt sich laengs +y um")
+    print("   dT_fluid = 3.5 ... 8.7 K; U gegen den Einlass gerechnet ist")
+    print("   deshalb eine UNTERE, gegen den Auslass eine OBERE Schranke.")
+    print("   physics.UCurve kalibriert gegen die MITTLERE Fluidtemperatur:")
+    print("     U(t) = Q_dot(t) / (A * (T2_mittel(t) - T_fluid_mittel(t)))")
+    print("   -- passend zum Marsch in WallModel._advective, der bei T_in")
+    print("   startet und bis T_out laeuft. Also ist U(T_mittel) die Spalte,")
+    print("   die ins Modell gehoert; die beiden anderen stehen daneben,")
+    print("   damit die Empfindlichkeit sichtbar ist statt versteckt.")
+    print(f"{'OP':<6} {'V_dot':>7} {'mdot':>9} {'U(T_in)':>10} "
+          f"{'U(T_mit)':>10} {'U(T_out)':>10} {'dT_fluid':>10}  {'Modus':<10}")
     any_wall = False
     for r in rows:
         Tw, tw = wall_temp_from_cache(r["op"])
@@ -485,18 +495,30 @@ def main() -> None:
             continue
         any_wall = True
         q = auf_achse(r["q"], r["t_q"], tw)
-        # Einlass, wenn es ihn gibt, sonst Auslass -- und es steht in der
-        # Tabelle, welcher es war: U haengt daran, und dT_fluid ist hier
-        # 3.5 ... 8.7 K gross.
-        if r["t_in"] is not None:
-            tf, tf_src = auf_achse(r["t_in"], r["t_in_ax"], tw), "T_in"
-        else:
-            tf, tf_src = auf_achse(r["t_out"], r["t_tm"], tw), "T_out"
-        dT = Tw - tf
-        ok = np.abs(dT) > 1e-6
-        h = np.nanmean(q[ok] / (args.area * dT[ok])) if ok.any() else np.nan
-        print(f"{r['op']:<6} {'':>7} {r['mdot']:>9.4g} {h:>12.2f}  "
-              f"{tf_src:<12}")
+        t_out = auf_achse(r["t_out"], r["t_tm"], tw)
+        t_in = (auf_achse(r["t_in"], r["t_in_ax"], tw)
+                if r["t_in"] is not None else None)
+
+        def u_gegen(tf):
+            if tf is None:
+                return np.nan
+            dT = Tw - tf
+            ok = np.abs(dT) > 1e-6
+            if not ok.any():
+                return np.nan
+            return float(np.nanmean(q[ok] / (args.area * dT[ok])))
+
+        t_mit = None if t_in is None else 0.5 * (t_in + t_out)
+        u_in, u_mit, u_out = u_gegen(t_in), u_gegen(t_mit), u_gegen(t_out)
+        d_fl = (np.nan if t_in is None
+                else float(np.nanmean(t_out - t_in)))
+        # Bei mdot = 0 marschiert nichts: die Advektionsform setzt dort
+        # T_fluid = T_in als UNTERE Schranke und ueberlaesst den Fall dem
+        # Modus 'capacity'. Ein Mittel aus Ein- und Auslass beschreibt dann
+        # nichts -- deshalb steht dort, welcher Modus gilt.
+        modus = "capacity" if r["mdot"] <= 0 else "advective"
+        print(f"{r['op']:<6} {'':>7} {r['mdot']:>9.4g} {u_in:>10.2f} "
+              f"{u_mit:>10.2f} {u_out:>10.2f} {d_fl:>10.4f}  {modus:<10}")
     if not any_wall:
         print("   uebersprungen -- kein data_cache gefunden (braucht T an der Wand)")
     else:

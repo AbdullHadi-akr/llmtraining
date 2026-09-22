@@ -33,24 +33,24 @@ Der Plan ist eine **Leiter mit Toren**, keine gerade Linie. **Ein rotes Tor
 
 ---
 
-## ▶ Das Nächste: Abschnitt 4 nachholen, dann Stufe 2
+## ▶ Das Nächste: `U` gegen die **mittlere** Fluidtemperatur, dann Stufe 2
 
-**Der zweite Lauf ist am 22.09. gefahren** (`10_bilanz.txt`, sieben
-Konstant-Treiber-Trainings-OPs, drei Flusslevel). Abschnitt 1 bis 3 sind
-durch, **Abschnitt 4 ist abgestürzt** — also genau `U(V̇)`, die Frage, für die
-der Lauf gemacht wurde. Wieder das Werkzeug, wieder nicht die Daten; der Fehler
-ist repariert (siehe unten). Es fehlt nur der Wiederholungslauf:
+**Zwei Läufe am 22.09.** (`10_bilanz.txt`, `11_bilanz.txt`; sieben
+Konstant-Treiber-Trainings-OPs, drei Flusslevel). Abschnitt 1–3 sind durch,
+Abschnitt 4 stürzte erst ab und läuft seit der Zeitachsen-Reparatur — und die
+Spalte `T_fluid`, die dabei dazukam, hat sofort einen Fehler aufgedeckt, der
+größer ist als die Halbmodellfrage. Deshalb noch ein Lauf:
 
 ```bash
 cd ~/llmtraining            # nicht der Windows-Pfad; python3 aus modulus_env
-git checkout main && git pull
-python3 GridCNN/tools/balance_check.py 2>&1 | tee 11_bilanz.txt
+git fetch origin claude/nifty-faraday-wupjv2
+git checkout claude/nifty-faraday-wupjv2
+python3 GridCNN/tools/balance_check.py 2>&1 | tee 12_bilanz.txt
 ```
 
 Abschnitt 1–3 kommen dabei unverändert wieder — nachgerechnet, der reparierte
-Pfad gibt in Abschnitt 2 denselben Wert wie der alte. Neu ist Abschnitt 4 und
-eine Spalte `T_fluid`, die mitschreibt, **welche** Fluidtemperatur in `dT`
-steckt.
+Pfad gibt in Abschnitt 2 denselben Wert wie der alte. Neu ist in Abschnitt 4
+`U` gegen **drei** Bezugstemperaturen nebeneinander.
 
 > ### Was der Lauf vom 22.09. ergeben hat
 >
@@ -60,7 +60,7 @@ steckt.
 > | 1 — `Q_ht/tot` | **0.700 … 0.772** mit Fluss | 🔴 **Die Hypothese aus 1a ist widerlegt** — der Monitor draint **nicht** die ganze Erzeugung |
 > | 1 — `Q_ht/jr1` | **2.286 … 2.566** | 🟡 nahe „beide Platten", aber **nicht konstant** — siehe unten |
 > | 1 — `tot/jr1` | **2.99 … 3.44** | die Zelle erzeugt **gut das Dreifache** einer Rolle |
-> | 4 — `U(V̇)` | **abgestürzt** | offen, der Wiederholungslauf holt es |
+> | 4 — `U(V̇)` | **50.3 / 228.7 / 326.4** W/m²K | 🟢 je Flusslevel auf **1.3–2.1 %** zusammen — aber gegen die *falsche* Bezugstemperatur, siehe 1e |
 >
 > **Der Befund, der den Plan ändert:** `Q_ht/jr1` **hängt vom Flusslevel ab** —
 > 2.286 / 2.302 / 2.304 bei V̇ = 0.0013 gegen 2.488 / 2.566 bei 0.0026, und
@@ -184,14 +184,27 @@ Energie wird **gespeichert**, nicht abtransportiert.
 
 Und die Zahlen bestätigen es:
 
-| | `U` [W/m²K] |
-|---|---|
-| mit Fluss (V̇ = 30) | ~1130 |
-| ohne Fluss | ~50 |
+| | `U` [W/m²K] | 22.09. korrigiert |
+|---|---|---|
+| mit Fluss (V̇ = 30) | ~~~1130~~ | **326** gegen `T_in`; gegen `T_mittel` höher, **der Lauf misst es** |
+| ohne Fluss | ~50 | **50.3** — bestätigt |
 
-Faktor **~23**. Stehendes Flüssigkühlmittel bei O(50) und Zwangskonvektion in
-einer Kühlplatte bei O(1000) sind beide lehrbuchplausibel. **Das ist eine
-Bestätigung der Messkette, kein Fehler.**
+~~Faktor **~23**.~~ ⚠ **Zurückgezogen am 22.09., siehe 1e.** Die 1130 war nicht
+gemessen, sondern die Folge einer anderen Bezugstemperatur: `T_in` fehlte, das
+Werkzeug fiel auf `T_out` zurück. Konsistent gerechnet ist der Faktor
+**4.5× … 7.6×**, nicht 23.
+
+**Die Aussage von 1b bleibt trotzdem stehen** — und darauf kam es an:
+stehendes Flüssigkühlmittel bei O(50) und Zwangskonvektion in einer Kühlplatte
+deutlich darüber sind beide lehrbuchplausibel. **Das ist eine Bestätigung der
+Messkette, kein Fehler.** Was fällt, ist nur das „O(1000)": für einen
+*Gesamtdurchgang* inklusive der 1.9 mm Festkörper sind O(200…500) das
+Erwartbare, und die korrigierte Zahl ist damit die plausiblere.
+
+> ⚠ Für V̇ = 15 ist `U(T_mittel) ≈ 381` belastbar — die Wandüberhöhung
+> `dT_wand ≈ 8.92 K` lässt sich aus der 09.09.-Zahl zurückrechnen und trifft
+> sie auf drei Stellen. Für V̇ = 30 gibt es **keinen solchen Anker**; dort
+> steht keine Schätzung, sondern der Lauf.
 
 ### Was daraus folgt, ist ein Modellbefund
 
@@ -264,6 +277,82 @@ es erst, wenn `total_w` in **Stufe 2** mit in den Cache geht.
 Flusslevel auf einer Kurve, ist der flussabhängige Teil erklärt; was dann an
 konstantem Faktor übrig bleibt, ist die Konvention. Vorher ist jede Korrektur
 an `Q` oder `A` geraten.
+
+## 1e. `U` hing an der Bezugstemperatur — und die war falsch gewählt
+
+Abschnitt 4 hat geliefert, wonach gefragt war:
+
+| V̇ [l/min] | ṁ | OPs | `U(T_in)` [W/m²K] | Spanne |
+|---|---|---|---|---|
+| 0 | 0 | OP07, OP14 | 50.83 / 49.78 | **2.1 %** |
+| 15 | 0.0013 | OP01–OP03 | 229.25 / 226.64 / 230.31 | **1.6 %** |
+| 30 | 0.0026 | OP04, OP05 | 324.37 / 328.48 | **1.3 %** |
+
+**Je Flusslevel liegen die OPs auf 1.3–2.1 % zusammen**, obwohl sie sich in
+C-Rate, SOC und Starttemperatur unterscheiden. `U` hängt also **am Fluss und
+an sonst nichts** — das ist der Teil des Tores, der hält.
+
+### Aber der Absolutwert steht gegen die falsche Temperatur
+
+`physics.UCurve` schreibt die Kalibrierung selbst vor:
+
+```
+U(t) = Q_dot(t) / (A * (T2_mittel(t) - T_fluid_mittel(t)))
+```
+
+**`T_fluid_mittel`** — und das passt zu `WallModel._advective`, das entlang +y
+marschiert und dabei von `T_in` bis `T_out` läuft. Das Werkzeug rechnet gegen
+**`T_in`**, also gegen den kältesten Punkt des Marsches. Das Fluid erwärmt sich
+um `dT_fluid` = 7.11 K (V̇ = 15) bzw. 4.12 K (V̇ = 30) — bei einer
+Wandüberhöhung von grob 9 K ist das **kein Detail, sondern der halbe Nenner**.
+
+| Bezug | `U` | |
+|---|---|---|
+| `T_in` | 229.25 | **untere** Schranke — was heute dasteht |
+| `T_mittel` | ~381 | **das, was `UCurve` will** — Schätzung, der Lauf misst es |
+| `T_out` | ~1129 | **obere** Schranke |
+
+> ### Und damit ist die `~1130` vom 09.09. erklärt
+>
+> Am 09.09. fand das Werkzeug die `T_in`-Spalte nicht (`nan` in Abschnitt 2)
+> und fiel in Abschnitt 4 auf **`T_out`** zurück. Nachgerechnet: mit
+> `dT_fluid = 7.108` und `U(T_in) = 229.25` ergibt der `T_out`-Bezug
+> **1128.5** — die `~1130` aus der Stand-Tabelle, auf drei Stellen.
+>
+> **Die Zahl war also kein Messergebnis, sondern die Bezugstemperatur.** Und
+> der Faktor hängt nur von `dT_fluid / dT_wand` ab, nicht von `Q` oder `A` —
+> er ist aus dem Lauf ablesbar und nicht angenommen.
+
+⚠ **Damit ist auch „Faktor ~23" aus 1b hinfällig.** Er verglich 1130
+(`T_out`-Bezug, mit Fluss) gegen 50 (`T_in`-Bezug, ohne Fluss) — zwei
+verschiedene Maßstäbe. Konsistent gerechnet sind es **4.5× gegen `T_in`** bzw.
+grob **7.6× gegen `T_mittel`**. Die *Aussage* von 1b bleibt: stehendes Fluid
+trägt deutlich weniger als strömendes, und beide Größenordnungen sind
+plausibel. Was fällt, ist das „O(1000) in einer Kühlplatte" — als
+**Gesamtdurchgang inklusive der 1.9 mm Festkörper** sind O(200…400) das
+Erwartbare, und die korrigierte Zahl ist damit die plausiblere.
+
+### Was das Tor jetzt wirklich sagt
+
+| Teilfrage | Stand |
+|---|---|
+| hängt `U` nur von V̇ ab? | 🟢 **ja** — 1.3–2.1 % Streuung je Level über verschiedene Treiber |
+| ist der Absolutwert belastbar? | 🟡 **erst nach dem Lauf gegen `T_mittel`** |
+| liegt `U(V̇)` auf *einer Kurve*? | 🟡 **noch nicht geprüft** — siehe unten |
+
+⚠ **„Drei Flusslevel" sind für die Kurvenform nur zwei.** V̇ = 0 ist nach 1b
+ein **anderer Mechanismus** — stehendes Fluid lädt seine Wärmekapazität, das
+ist der Modus `capacity`, nicht Konvektion. Für die Advektionsform bleiben
+**zwei** Stützstellen, und durch zwei Punkte geht jedes Zweiparametergesetz
+exakt. Gemessen ist `U ∝ ṁ^0.51` zwischen 15 und 30 l/min (326.4 / 228.7 =
+1.427); das liegt unter dem turbulenten 0.8, was zu einem in `U` steckenden
+**Serienwiderstand** passt — die 1.9 mm sind laut `UCurve` ausdrücklich drin.
+Aber das ist eine Lesart, kein Beleg.
+
+**Entschieden wird das an OP16** (V̇ = 90). Es ist ein **Test**-OP: Gegenprobe,
+nie Stützstelle — die Regel steht oben und gilt unverändert. `UCurve` klemmt
+außerhalb der Stützstellen und zählt in `clamped_calls` mit, statt zu
+extrapolieren. Das ist die richtige Vorsicht, solange die Form ungeprüft ist.
 
 **Blockiert nichts mehr:** `data_raw/` liegt vor.
 
@@ -561,6 +650,9 @@ Damit der Umfang nicht wandert:
 | **22.09.** | **Stufe 1, zweiter Lauf.** Fluidbilanz **1.030 … 1.062** → `ghost_hi` steht. `Q_ht/tot = 0.700 … 0.772`, **nicht ≈ 1** — die Hypothese aus 1a ist widerlegt. `tot/jr1 = 2.99 … 3.44` belegt **O17** |
 | **22.09.** | **`Q_ht/jr1` ist keine Konstante** — 2.29 bei V̇ = 0.0013 gegen 2.53 bei 0.0026. Eine Bezugsfläche kann nicht flussabhängig sein, also ist das Tor „Q halbieren oder A verdoppeln" falsch gestellt. Siehe 1d |
 | **22.09.** | **`balance_check.py` Abschnitt 4 abgestürzt und repariert:** das Skript las die Zeitachse von zwei der fünf CSVs und legte den Rest stillschweigend darauf. In Abschnitt 2 hat numpy das still gebroadcastet — richtige Zahl, falscher Grund |
+| **22.09.** | **`U` je Flusslevel gemessen:** 50.3 / 228.7 / 326.4 W/m²K, je Level **1.3–2.1 %** Streuung über OPs mit verschiedener C-Rate, SOC und Starttemperatur. `U` hängt am Fluss und an sonst nichts |
+| **22.09.** | **Die `~1130` vom 09.09. ist zurückgezogen.** Sie war der `T_out`-Bezug, in den das Werkzeug fiel, weil es `T_in` nicht fand — nachgerechnet ergibt er 1128.5 aus `U(T_in) = 229.25` und `dT_fluid = 7.108`. Damit fällt auch „Faktor ~23" aus 1b. Siehe 1e |
+| **22.09.** | **Die Bezugstemperatur ist der größere Hebel als die Halbmodellfrage:** `U` gegen `T_in` / `T_mittel` / `T_out` steht wie 1 : 1.7 : 4.9. `UCurve` verlangt `T_mittel`, das Werkzeug rechnete gegen `T_in` — beide Schranken stehen jetzt nebeneinander in der Tabelle |
 | **22.09.** | Beide fallenden Tests repariert: die float32-Schranke im gepaddeten Rollout (1.2e-6 gegen 1e-6, hielt zufällig) und **`torch.equal` im float64-Vergleich** — Bitgleichheit zwischen zwei Batchgrößen ist durch nichts garantiert und war nicht portabel (lokal grün, auf dem Runner rot). Jetzt beide gegen eine relative Schranke `1e-12` |
 
 ## Stand
@@ -576,8 +668,11 @@ Damit der Umfang nicht wandert:
 | 1 | `tot/jr1` | **2.99 … 3.44** — ⅓ bis 40 % der Erzeugung liegt außerhalb der Wickel. **O17 belegt** | **22.09.** |
 | 1 | Fluidbilanz-Verhältnis | ✅ **1.030 … 1.062** — 🟢 `ghost_hi` steht. `T_in` aus `Input Signale.csv` | **22.09.** |
 | 1 | Wandanteil bei ṁ = 0 | **≈ 0.27** — physikalisch richtig (Fluidkapazität), Kriterium war falsch | 09.09. |
-| 1 | `U` mit Fluss / ohne | **~1130 / ~50 W/m²K**, Faktor ~23 — vorläufig, Faktor 2 aus 1a offen | 09.09. |
-| 1 | `U(V̇)` auf einer Kurve? | *offen* — Abschnitt 4 stürzte am 22.09. ab (Zeitachsen), Werkzeug repariert, Lauf steht aus | |
+| 1 | ~~`U` mit Fluss / ohne, Faktor ~23~~ | ~~**~1130 / ~50**~~ — **zurückgezogen 22.09.**: die 1130 war der `T_out`-Bezug, nachgerechnet 1128.5. Siehe 1e | 09.09. |
+| 1 | `U(T_in)` je Flusslevel | **50.3 / 228.7 / 326.4 W/m²K** — je Level **1.3–2.1 %** Streuung über verschiedene Treiber | **22.09.** |
+| 1 | `U` hängt nur von V̇ ab? | 🟢 **ja** — das ist der Teil des Tores, der hält | **22.09.** |
+| 1 | `U(T_mittel)`, wie `UCurve` es will | *offen* — grob 1.7 × `U(T_in)`, der Lauf misst es. Siehe 1e | |
+| 1 | `U(V̇)` auf einer Kurve? | 🟡 **nicht prüfbar mit diesen Daten** — V̇ = 0 ist ein anderer Mechanismus (1b), es bleiben **zwei** Stützstellen, und durch zwei Punkte geht jedes Zweiparametergesetz. Gemessen `U ∝ ṁ^0.51`. Entschieden wird es an OP16, als **Gegenprobe** | **22.09.** |
 | 2 | Reports unverändert | | |
 | — | Reshape aus Koordinaten ableitbar und umkehrbar | **ja**, 0.198094368 × 0.104431991 m | 14.09. / korrigiert 22.09. |
 | — | `xyz` über alle siebzehn Cache-OPs identisch | **ja, bitgleich**, gleiche Reihenfolge | 22.09. |
