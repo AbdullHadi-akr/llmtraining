@@ -54,7 +54,45 @@ Every row below cites the file(s) that own its fact.
 | `xyz` | `np.ndarray` | `(n_sensors, 3)` | float32 | m | 3D coordinates of each sensor grid point | `data/grid.py` → `read_coordinates()` |
 | `layer` | `np.ndarray` | `(n_sensors,)` | str or int | — | Layer label for each sensor (e.g., `"cc"`, `"g"`, `"jr1c"` for Cell Center, Gehäusewand, JR1 Center) | `data/grid.py` → `read_coordinates()` |
 | `sensor_id` | `np.ndarray` | `(n_sensors,)` | int | — | Unique ID for each sensor within its layer | `data/grid.py` → `read_coordinates()` |
-| `fluid_props` | `np.ndarray` | `(1, 3)` | float32 | — | Fluid property row (typically density, specific heat, thermal conductivity) from `*_Fluidstoffwerte.csv` | `data/raw_readers.py` → `read_fluidstoffwerte()` |
+| `fluid_props` | `np.ndarray` | `(1, k)` | float32 | — | Fluid property row from `*_Fluidstoffwerte.csv`. **Since v3 read by column name**, so the order is `fluid_props_names`, not a guess. ⚠ The v2 text here said "typically density, specific heat, thermal conductivity" — **that was wrong**: the export is Conductivity, Density, Specific Heat | `data/raw_readers.py` → `read_fluidstoffwerte()` |
+| `fluid_props_names` | `tuple[str, ...]` | `(k,)` | — | — | Column names of `fluid_props`, same order. `("conductivity", "density", "cp_fluid")` on a v3 build; **empty on a v2 bundle, and then the meaning is unknown and must not be assumed**. `("unbenannt_0", …)` if no named column matched and the positional fallback ran | `data/raw_readers.py` → `read_fluidstoffwerte()` |
+
+---
+
+### Wall Path (Schema v3) — each series on **its own** time axis
+
+`L_wall` is the only loss term with a *measured* target, and these are the two
+quantities it needs. See `GridCNN/FAHRPLAN.md`, Stufe 2.
+
+| Field | Type | Shape | Dtype | Unit | Meaning | Source |
+|-------|------|-------|-------|------|---------|--------|
+| `wall_ts` | `dict[str, tuple[np.ndarray, np.ndarray]]` | per key: `(n_k,)`, `(n_k,)` | float32 | s, see below | `{name: (time, values)}`. **Empty on a v2 bundle** — that means "not rebuilt yet", not zero | `data/assemble.py` → `read_heat_transfer()`, `read_temperaturen()` |
+| `wall_ts["q_solid_to_fluid"]` | — | `(n_ht,)` | float32 | W | Heat flow solid → fluid, from `*_Heat Transfer.csv` column `Heat Transfer: solid to fluid Monitor (W)` | `data/raw_readers.py` → `read_heat_transfer()` |
+| `wall_ts["fluid_out_temp"]` | — | `(n_tm,)` | float32 | °C | Fluid outlet temperature, from `*_Temperaturen.csv` column `Tmfavg_fluid_out Monitor (C)` | `data/raw_readers.py` → `read_temperaturen()` |
+
+> ⚠ **`n_ht`, `n_tm` and `n_slow` are not the same number.** Every raw CSV
+> brings its own `Physical Time (s)` column. Treating them as one axis is what
+> made `GridCNN/tools/balance_check.py` fail on 22.09. with
+> `fp and xp are not of the same length` — after the same assumption had
+> passed *silently* at another call site, where NumPy broadcast a length-1
+> value over a length-N array and produced a right-looking number for the
+> wrong reason.
+>
+> The bundle therefore **stores the axis next to the values and never
+> equalises them.** `meta["wall_ts_axes"]` records, per series, `n`, `t0`,
+> `t1` and `gleich_t_slow`. Whoever needs the series on another axis
+> interpolates — visibly, at the point of use.
+
+#### What was *not* added, and why
+
+Checked on 22.09. before touching the schema — these three were already in the
+bundle, and adding them again would have been duplication:
+
+| Quantity | Already lives in |
+|---|---|
+| `mdot` | canonical channel `fluid_mass_flow` → `sim_config_scalar` or `sim_config_ts` |
+| `cp_fluid` | `fluid_props`, now findable by name via `fluid_props_names` |
+| `total_w` | `q_source[:, 2]` — the contract row above already says so |
 
 ---
 

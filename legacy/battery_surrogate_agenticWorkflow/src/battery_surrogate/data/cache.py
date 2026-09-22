@@ -144,10 +144,17 @@ def _bundle_to_npz_payload(bundle: OpBundle) -> dict[str, Any]:
         ),
         "sim_config_ts_names_json": np.asarray(json.dumps(list(bundle.sim_config_ts.keys()))),
         "meta_json": np.asarray(json.dumps(bundle.meta, sort_keys=True)),
+        # Schema v3. Eigene Praefixe, damit ein v2-Leser sie schlicht ignoriert
+        # -- np.load liefert ein Namensverzeichnis, kein festes Tupel.
+        "wall_ts_names_json": np.asarray(json.dumps(list(bundle.wall_ts.keys()))),
+        "fluid_props_names_json": np.asarray(json.dumps(list(bundle.fluid_props_names))),
     }
     for name, (times, values) in bundle.sim_config_ts.items():
         payload[f"sim_config_ts_{name}_t"] = np.asarray(times, dtype=np.float32)
         payload[f"sim_config_ts_{name}_v"] = np.asarray(values, dtype=np.float32)
+    for name, (times, values) in bundle.wall_ts.items():
+        payload[f"wall_ts_{name}_t"] = np.asarray(times, dtype=np.float32)
+        payload[f"wall_ts_{name}_v"] = np.asarray(values, dtype=np.float32)
     return payload
 
 
@@ -201,6 +208,24 @@ def load_bundle(path: Path) -> OpBundle:
             np.asarray(arrays[f"sim_config_ts_{name}_t"], dtype=np.float32),
             np.asarray(arrays[f"sim_config_ts_{name}_v"], dtype=np.float32),
         )
+
+    # Schema v3, rueckwaertskompatibel: ein v2-Bundle hat diese Schluessel
+    # nicht. Es laedt dann mit leerem wall_ts, und das heisst genau
+    # "noch nicht neu gebaut" -- kein Fehler, aber auch keine stille Null.
+    wall_names = (
+        list(json.loads(str(arrays["wall_ts_names_json"].item())))
+        if "wall_ts_names_json" in arrays else []
+    )
+    wall_ts: dict[str, tuple[np.ndarray, np.ndarray]] = {}
+    for name in wall_names:
+        wall_ts[name] = (
+            np.asarray(arrays[f"wall_ts_{name}_t"], dtype=np.float32),
+            np.asarray(arrays[f"wall_ts_{name}_v"], dtype=np.float32),
+        )
+    fluid_props_names = tuple(
+        json.loads(str(arrays["fluid_props_names_json"].item()))
+        if "fluid_props_names_json" in arrays else []
+    )
     return OpBundle(
         op_id=str(arrays["op_id"].item()),
         schema_version=int(arrays["schema_version"].item()),
@@ -221,6 +246,8 @@ def load_bundle(path: Path) -> OpBundle:
         sim_config_scalar_names=scalar_names,
         sim_config_ts=sim_config_ts,
         meta=meta,
+        wall_ts=wall_ts,
+        fluid_props_names=fluid_props_names,
     )
 
 

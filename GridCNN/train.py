@@ -535,9 +535,11 @@ def build_argparser() -> argparse.ArgumentParser:
                         "Festhalten wird als [SATURATED] gemeldet.")
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--seeds", type=int, default=1,
-                   help="Ein Seed ist keine Streuung. Die Seed-Streuung liegt "
-                        "bei 0.518 / 0.882 C -- ein Unterschied unter ~1 C ist "
-                        "mit drei Seeds nicht lesbar.")
+                   help="NOCH KEINE SCHLEIFE -- heute nur eine Warnschwelle. "
+                        "Ein Seed ist keine Streuung: sie liegt bei 0.518 / "
+                        "0.882 C, auf OP06 bis 1.63 C. Wer hier 3 tippt, "
+                        "bekommt trotzdem EINEN Lauf; die echte Schleife "
+                        "kommt mit dem Ladepfad (FAHRPLAN, 'Was fehlt')")
     return p
 
 
@@ -605,6 +607,14 @@ def main(argv: list | None = None) -> int:
         print("!! --seeds < 3. Ein Seed ist keine Streuung: die gemessene "
               "Seed-Streuung ist 0.518 / 0.882 C, auf OP06 bis 1.63 C. Ein "
               "Vergleich zweier Konfigurationen braucht eine Seed-Schleife.",
+              file=sys.stderr)
+    elif args.seeds > 1:
+        # Sonst hielte man drei Seeds in der Hand und haette einen Lauf. Die
+        # Schleife kommt mit dem Ladepfad; bis dahin sagt der Flag die
+        # Wahrheit, statt sie zu suggerieren.
+        print(f"!! --seeds {args.seeds} ist heute nur eine Absichtserklaerung: "
+              f"train.py dreht KEINE Seed-Schleife und rechnet einen Lauf mit "
+              f"--seed {args.seed}. Siehe FAHRPLAN, 'Was fehlt'.",
               file=sys.stderr)
     if not args.cache.exists():
         print(f"!! Kein Cache unter {args.cache}. Auf der Rechenmaschine "

@@ -12,8 +12,11 @@
 !README_*.md
 !ARCHITECTURE.md
 
-# Keep the session handover notes tracked
+# Keep the session handover notes tracked. Auch als .md: die Notiz vom 22.09.
+# traegt Tabellen und Verweise, und .txt dafuer zu nehmen waere Formatpflege
+# gegen eine Zeile Allowlist.
 !UEBERGABE_*.txt
+!UEBERGABE_*.md
 
 # Keep training reports tracked
 !TRAININGS_BERICHT_*.md
@@ -41,6 +44,13 @@
 # Keep the PINNmodulusTwo server setup files tracked (config + deps)
 !PINNmodulusTwo/config.yaml
 !PINNmodulusTwo/requirements-gpu.txt
+
+# Same for the MPS systemd unit. README_GPU_SERVER.md 6.4 says to 'sudo cp' it
+# into /etc/systemd/system/, and until 22.09. the allowlist above made that
+# impossible: the instruction pointed at a file this repo could not carry, so it
+# ran into the void. Vergessener MPS kostet Faktor 2.52, lautlos -- die Unit
+# gehoert also versioniert und nicht in eine Zwischenablage.
+!PINNmodulusTwo/deploy/nvidia-mps.service
 
 # Same for the profile extension (its config.yaml IS the benchmark configuration)
 !PINNmodulusTwoExtProfiles/config.yaml
