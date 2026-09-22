@@ -145,6 +145,18 @@ Sonst misst B eine Instabilität und nennt sie eine Architekturaussage.
 
 ## 4. Offene Fragen, die ich nicht selbst entscheiden kann
 
+> **✅ Alle vier sind am 22.09., abends, entschieden.** Die Begründungen stehen
+> als Tabelle im Kopf von [`GridCNN/FAHRPLAN.md`](GridCNN/FAHRPLAN.md). Kurz:
+> (1) das Budget war ein erster Schuss — konstant gehört `inner_steps × k`;
+> (2) **ja**, das Experiment darf sich ändern — Clipping, LR-Plan und TBPTT
+> sind *Protokoll* und gelten dann für A, B, C und D gleich; (3) `--clamp 50`
+> war **geerbt**, die Vorgabe ist jetzt `auto` aus den Labels; (4) die
+> CFL-Gabelung wird **nicht jetzt** entschieden, weil Arm A sie nicht braucht
+> und der POC die Zahl erst liefert, mit der sie eine Rechnung wird.
+>
+> Die Fragen bleiben unverändert stehen — sie sind der Grund, warum die
+> Entscheidungen so ausgefallen sind.
+
 1. **Budget.** Sind 60 Epochen × 100 `inner_steps` gesetzt, oder war das ein
    erster Schuss? Davon hängt ab, ob Stufe II überhaupt Zeit hat zu wirken.
 2. **Darf sich das Experiment ändern?** Clipping und LR-Plan sind Eingriffe.
