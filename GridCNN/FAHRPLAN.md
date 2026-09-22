@@ -33,24 +33,35 @@ Der Plan ist eine **Leiter mit Toren**, keine gerade Linie. **Ein rotes Tor
 
 ---
 
-## ▶ Das Nächste: `U` gegen die **mittlere** Fluidtemperatur, dann Stufe 2
+## ▶ Das Nächste: **Stufe 2, der Cache-Umbau** — Stufe 1 ist durch
 
-**Zwei Läufe am 22.09.** (`10_bilanz.txt`, `11_bilanz.txt`; sieben
-Konstant-Treiber-Trainings-OPs, drei Flusslevel). Abschnitt 1–3 sind durch,
-Abschnitt 4 stürzte erst ab und läuft seit der Zeitachsen-Reparatur — und die
-Spalte `T_fluid`, die dabei dazukam, hat sofort einen Fehler aufgedeckt, der
-größer ist als die Halbmodellfrage. Deshalb noch ein Lauf:
+**Drei Läufe am 22.09.** (`10`/`11`/`12_bilanz.txt`; sieben
+Konstant-Treiber-Trainings-OPs, drei Flusslevel). **Stufe 1 ist damit
+abgeschlossen** — `U(V̇)` ist kalibriert, gegen die Bezugstemperatur, die
+`physics.UCurve` selbst vorschreibt:
 
-```bash
-cd ~/llmtraining            # nicht der Windows-Pfad; python3 aus modulus_env
-git fetch origin claude/nifty-faraday-wupjv2
-git checkout claude/nifty-faraday-wupjv2
-python3 GridCNN/tools/balance_check.py 2>&1 | tee 12_bilanz.txt
-```
+| V̇ [l/min] | ṁ [kg/s] | **`U(T_mittel)`** [W/m²K] | Streuung |
+|---|---|---|---|
+| 0 | 0 | **50.4** | 2.10 % |
+| 15 | 0.0013 | **421.0** | 1.38 % |
+| 30 | 0.0026 | **501.7** | 1.09 % |
 
-Abschnitt 1–3 kommen dabei unverändert wieder — nachgerechnet, der reparierte
-Pfad gibt in Abschnitt 2 denselben Wert wie der alte. Neu ist in Abschnitt 4
-`U` gegen **drei** Bezugstemperaturen nebeneinander.
+**Das sind genau die drei trainierten Flusslevel** — also genau die
+Stützstellen, die `UCurve` braucht. Sie interpoliert linear dazwischen und
+klemmt außerhalb. **Null freie Parameter, und keine Funktionsform nötig.**
+
+> **Der Wandterm ist damit kalibrierbar.** Das war der Engpass in
+> „Was fehlt"; er ist weg. Was noch fehlt, ist der Weg der vier Größen *in den
+> Cache* — und das ist Stufe 2.
+
+**Stufe 2** schreibt `q_solid_to_fluid`, `fluid_out_temp`, `cp_fluid`, `mdot`
+— und `total_w`, weil O17 sonst nie messbar wird — in `generate_cache.py` und
+`opbundle_contract.md`, hebt `schema_version` und baut **alle siebzehn** OPs
+neu (10–30 min). `generate_cache.py` ohne Argumente baut nur OP05–OP07; die
+Liste gehört ausgeschrieben, **OP19 eingeschlossen**.
+
+**Tor:** `profile_report`, `coverage_report` und `energy_balance_report`
+liefern exakt dieselben Zahlen wie vorher.
 
 > ### Was der Lauf vom 22.09. ergeben hat
 >
@@ -60,7 +71,7 @@ Pfad gibt in Abschnitt 2 denselben Wert wie der alte. Neu ist in Abschnitt 4
 > | 1 — `Q_ht/tot` | **0.700 … 0.772** mit Fluss | 🔴 **Die Hypothese aus 1a ist widerlegt** — der Monitor draint **nicht** die ganze Erzeugung |
 > | 1 — `Q_ht/jr1` | **2.286 … 2.566** | 🟡 nahe „beide Platten", aber **nicht konstant** — siehe unten |
 > | 1 — `tot/jr1` | **2.99 … 3.44** | die Zelle erzeugt **gut das Dreifache** einer Rolle |
-> | 4 — `U(V̇)` | **50.3 / 228.7 / 326.4** W/m²K | 🟢 je Flusslevel auf **1.3–2.1 %** zusammen — aber gegen die *falsche* Bezugstemperatur, siehe 1e |
+> | 4 — `U(V̇)` | **50.4 / 421.0 / 501.7** W/m²K gegen `T_mittel` | 🟢 je Flusslevel auf **1.1–2.1 %** zusammen. Siehe 1e |
 >
 > **Der Befund, der den Plan ändert:** `Q_ht/jr1` **hängt vom Flusslevel ab** —
 > 2.286 / 2.302 / 2.304 bei V̇ = 0.0013 gegen 2.488 / 2.566 bei 0.0026, und
@@ -129,7 +140,7 @@ Zeitspalte.
 | Stufe | was | Dauer | Tor |
 |---|---|---|---|
 | **0** | Rangtest | ✅ **erledigt — ROT, überstimmt** | 4 Moden. Folge: 16 × 3 statt 64 × 4 |
-| **1** | Bilanz-Gegenprobe | 🟡 **teilweise**, zweiter Lauf offen | geht die Wärmebilanz auf? |
+| **1** | Bilanz-Gegenprobe | ✅ **erledigt 22.09.** | Fluidbilanz 🟢, `U(V̇)` kalibriert, `Q_ht/jr1` als flussabhängig entlarvt |
 | **2** | vier Größen in den Cache | 30 min | Reports weiter grün? |
 | **3** | **Physik ohne Netz** — der explizite Löser | ✅ **gebaut**, läuft adiabat | schlägt reine Physik die trivialen Vorhersager? |
 | **4** | **der CNN**, Ein-Schritt-Training | ✅ **gebaut**, Ladepfad offen | schlägt er Stufe 3? |
@@ -147,7 +158,7 @@ Zeitspalte.
 
 ---
 
-# Stufe 1 — Geht die Bilanz auf? 🟡
+# Stufe 1 — Geht die Bilanz auf? ✅ **abgeschlossen 22.09.**
 
 **Gebaut:** [`tools/balance_check.py`](tools/balance_check.py). Erster Lauf am
 09.09., Zahlen in der Stand-Tabelle. Drei Befunde:
@@ -306,22 +317,47 @@ marschiert und dabei von `T_in` bis `T_out` läuft. Das Werkzeug rechnet gegen
 um `dT_fluid` = 7.11 K (V̇ = 15) bzw. 4.12 K (V̇ = 30) — bei einer
 Wandüberhöhung von grob 9 K ist das **kein Detail, sondern der halbe Nenner**.
 
-| Bezug | `U` | |
+| Bezug (OP01) | `U` | |
 |---|---|---|
-| `T_in` | 229.25 | **untere** Schranke — was heute dasteht |
-| `T_mittel` | ~381 | **das, was `UCurve` will** — Schätzung, der Lauf misst es |
-| `T_out` | ~1129 | **obere** Schranke |
+| `T_in` | 229.25 | **untere** Schranke |
+| `T_mittel` | **421.66** | **das, was `UCurve` will** — gemessen |
+| `T_out` | **−8684** | **unbrauchbar**, siehe unten |
+
+### Gemessen, alle drei nebeneinander
+
+| V̇ | ṁ | `U(T_in)` | **`U(T_mittel)`** | `U(T_out)` | `dT_fluid` |
+|---|---|---|---|---|---|
+| 0 | 0 | 50.83 / 49.78 | **50.91 / 49.85** | 50.98 / 49.92 | 0.37 / 0.47 |
+| 15 | 0.0013 | 229.25 / 226.64 / 230.31 | **421.66 / 417.71 / 423.52** | −8684 / +21933 / −12729 | 7.11 / 8.15 / 6.69 |
+| 30 | 0.0026 | 324.37 / 328.48 | **498.92 / 504.40** | 1129.94 / 1132.60 | 4.12 / 3.47 |
+
+**`U(T_mittel)` streut je Level um 1.09 / 1.38 / 2.10 %** — genauso eng wie
+`U(T_in)`. Die Bezugstemperatur verschiebt den Wert, sie verrauscht ihn nicht.
+
+> ### ⚠ `U(T_out)` ist keine obere Schranke, sondern unbrauchbar
+>
+> Bei V̇ = 15 kommen **−8684, +21933, −12729** heraus. `Tw` ist ein
+> **Flächenmittel** der Wand, `T_out` das **heiße Ende** des Kanals — die
+> Differenz wechselt das Vorzeichen, und der Mittelwert von `q/(A·dT)` läuft
+> weg. Es werden die falschen Paare verglichen, nicht bloß die falsche Seite.
+>
+> **Bei V̇ = 30 wechselt sie nicht** und liefert brave 1129.94 / 1132.60.
+> Die Default-OPs vom 09.09. waren **OP04, OP05, OP07, OP14** — also genau
+> die zwei Fluss-OPs, bei denen der Fehler *plausibel aussieht*. Deshalb kam
+> damals „~1130" heraus und nicht offensichtlicher Unsinn.
 
 > ### Und damit ist die `~1130` vom 09.09. erklärt
 >
 > Am 09.09. fand das Werkzeug die `T_in`-Spalte nicht (`nan` in Abschnitt 2)
-> und fiel in Abschnitt 4 auf **`T_out`** zurück. Nachgerechnet: mit
-> `dT_fluid = 7.108` und `U(T_in) = 229.25` ergibt der `T_out`-Bezug
-> **1128.5** — die `~1130` aus der Stand-Tabelle, auf drei Stellen.
+> und fiel in Abschnitt 4 auf **`T_out`** zurück. Das steht jetzt nicht mehr
+> als Rekonstruktion da, sondern **als Zahl in derselben Tabelle**:
 >
-> **Die Zahl war also kein Messergebnis, sondern die Bezugstemperatur.** Und
-> der Faktor hängt nur von `dT_fluid / dT_wand` ab, nicht von `Q` oder `A` —
-> er ist aus dem Lauf ablesbar und nicht angenommen.
+> | | gemessen `U(T_out)` | Stand-Tabelle 09.09. |
+> |---|---|---|
+> | OP04 / OP05 | **1129.94 / 1132.60** | „~1130" |
+> | OP07 / OP14 | **50.98 / 49.92** | „~50" |
+>
+> **Die Zahl war kein Messergebnis, sondern die Bezugstemperatur.**
 
 ⚠ **Damit ist auch „Faktor ~23" aus 1b hinfällig.** Er verglich 1130
 (`T_out`-Bezug, mit Fluss) gegen 50 (`T_in`-Bezug, ohne Fluss) — zwei
@@ -336,23 +372,58 @@ Erwartbare, und die korrigierte Zahl ist damit die plausiblere.
 
 | Teilfrage | Stand |
 |---|---|
-| hängt `U` nur von V̇ ab? | 🟢 **ja** — 1.3–2.1 % Streuung je Level über verschiedene Treiber |
-| ist der Absolutwert belastbar? | 🟡 **erst nach dem Lauf gegen `T_mittel`** |
-| liegt `U(V̇)` auf *einer Kurve*? | 🟡 **noch nicht geprüft** — siehe unten |
+| hängt `U` nur von V̇ ab? | 🟢 **ja** — 1.1–2.1 % Streuung je Level über OPs mit verschiedener C-Rate, SOC, Starttemperatur |
+| ist der Absolutwert belastbar? | 🟢 **ja** — gegen `T_mittel`, wie `UCurve` es vorschreibt |
+| **reicht das für den Wandterm?** | 🟢 **ja** — die drei Level *sind* die Stützstellen. `UCurve` interpoliert und klemmt, **null freie Parameter** |
+| liegt `U(V̇)` auf *einer Kurve*? | 🟡 **nicht entscheidbar** — siehe unten. **Blockiert aber nichts** |
 
-⚠ **„Drei Flusslevel" sind für die Kurvenform nur zwei.** V̇ = 0 ist nach 1b
-ein **anderer Mechanismus** — stehendes Fluid lädt seine Wärmekapazität, das
-ist der Modus `capacity`, nicht Konvektion. Für die Advektionsform bleiben
-**zwei** Stützstellen, und durch zwei Punkte geht jedes Zweiparametergesetz
-exakt. Gemessen ist `U ∝ ṁ^0.51` zwischen 15 und 30 l/min (326.4 / 228.7 =
-1.427); das liegt unter dem turbulenten 0.8, was zu einem in `U` steckenden
-**Serienwiderstand** passt — die 1.9 mm sind laut `UCurve` ausdrücklich drin.
-Aber das ist eine Lesart, kein Beleg.
+⚠ **„Drei Flusslevel" sind für die Kurven*form* nur zwei.** V̇ = 0 ist nach 1b
+ein **anderer Mechanismus** — stehendes Fluid lädt seine Wärmekapazität, Modus
+`capacity`, nicht Konvektion. Für die Advektionsform bleiben **zwei**
+Stützstellen, und durch zwei Punkte geht jedes Zweiparametergesetz exakt.
 
-**Entschieden wird das an OP16** (V̇ = 90). Es ist ein **Test**-OP: Gegenprobe,
-nie Stützstelle — die Regel steht oben und gilt unverändert. `UCurve` klemmt
-außerhalb der Stützstellen und zählt in `clamped_calls` mit, statt zu
-extrapolieren. Das ist die richtige Vorsicht, solange die Form ungeprüft ist.
+**Das ist aber kein Hindernis**, weil die Form gar nicht gebraucht wird: jeder
+Trainings-OP fährt eines der drei Level, und dort steht der gemessene Wert.
+Die Form wird erst außerhalb gebraucht — und außerhalb klemmt `UCurve`
+ausdrücklich und zählt in `clamped_calls` mit.
+
+### Was die zwei Punkte hergeben — und was nicht
+
+Gemessen: `U(30)/U(15) = 501.7 / 421.0 = 1.1917`, also **`U ∝ ṁ^0.253`**.
+Deutlich unter dem turbulenten 0.8 — passend zu einem **Serienwiderstand**,
+denn die 1.9 mm Festkörper stecken laut `UCurve` ausdrücklich in `U`. Setzt
+man `1/U = R_s + C·ṁ^{-0.8}` an, liefern die zwei Punkte
+`U(ṁ→∞) ≈ 677 W/m²K`; `R_s` entspräche 1.9 mm bei **λ ≈ 1.29 W/mK** — also
+kein Metall, sondern eher Kontakt oder Spalt.
+
+> ⚠ **Zwei Punkte, zwei Parameter: das ist eine Interpolation, kein Test.**
+> Der Exponent 0.8 ist angesetzt, nicht gemessen. `R_s` und die 677 sind
+> Folgen dieser Annahme und dürfen nicht als Messwerte zitiert werden.
+
+**Entschieden wird es an OP16** (V̇ = 90, ṁ ≈ 0.0078) — und der Test ist
+scharf:
+
+| Lesart | Vorhersage `U` bei OP16 |
+|---|---|
+| reines Potenzgesetz `ṁ^0.253` | **662** |
+| Serienwiderstand mit `ṁ^{-0.8}` | **591** |
+
+**12 % auseinander gegen 1.1–1.4 % Streuung je Level.** Die Gegenprobe
+trennt die beiden also sauber. OP16 bleibt **Test**-OP: Gegenprobe, nie
+Stützstelle.
+
+### Nebenbefund: `A = 0.0206 m²` ist die Wandfläche des Gitters selbst
+
+Nachgerechnet aus der am 22.09. gemessenen Geometrie:
+`0.198094368 × 0.104431991 = 0.0206874 m²`. Die im Werkzeug benutzte `0.0206`
+liegt **0.42 % darunter**. Also ist `A` keine geratene Größe, sondern genau
+die y × z-Fläche, durch die das Modell kühlt — und damit zu `UCurve`
+konsistent, weil Kalibrierung und Wandterm dieselbe Fläche benutzen.
+
+> Die 0.42 % liegen **unter der Streuung je Flusslevel** (1.1–2.1 %), ein
+> neuer Lauf lohnt dafür nicht. Aber die Zahl gehört nachgezogen, wenn
+> `balance_check.py` das nächste Mal ohnehin läuft — es ist derselbe
+> Konstantentyp, der am 22.09. schon bei der Spannweite falsch war.
 
 **Blockiert nichts mehr:** `data_raw/` liegt vor.
 
@@ -653,6 +724,10 @@ Damit der Umfang nicht wandert:
 | **22.09.** | **`U` je Flusslevel gemessen:** 50.3 / 228.7 / 326.4 W/m²K, je Level **1.3–2.1 %** Streuung über OPs mit verschiedener C-Rate, SOC und Starttemperatur. `U` hängt am Fluss und an sonst nichts |
 | **22.09.** | **Die `~1130` vom 09.09. ist zurückgezogen.** Sie war der `T_out`-Bezug, in den das Werkzeug fiel, weil es `T_in` nicht fand — nachgerechnet ergibt er 1128.5 aus `U(T_in) = 229.25` und `dT_fluid = 7.108`. Damit fällt auch „Faktor ~23" aus 1b. Siehe 1e |
 | **22.09.** | **Die Bezugstemperatur ist der größere Hebel als die Halbmodellfrage:** `U` gegen `T_in` / `T_mittel` / `T_out` steht wie 1 : 1.7 : 4.9. `UCurve` verlangt `T_mittel`, das Werkzeug rechnete gegen `T_in` — beide Schranken stehen jetzt nebeneinander in der Tabelle |
+| **22.09.** | **Stufe 1 abgeschlossen. `U(T_mittel)` = 50.4 / 421.0 / 501.7 W/m²K** für V̇ = 0 / 15 / 30, Streuung 2.10 / 1.38 / 1.09 %. Das sind genau die Stützstellen, die `UCurve` braucht — **der Wandterm ist kalibrierbar, null freie Parameter** |
+| **22.09.** | **`U(T_out)` ist unbrauchbar, nicht nur eine obere Schranke:** −8684 / +21933 / −12729 bei V̇ = 15. `Tw` ist ein Flächenmittel, `T_out` das heiße Kanalende — die Differenz wechselt das Vorzeichen. Bei V̇ = 30 wechselt sie *nicht*, und die Default-OPs vom 09.09. waren genau diese zwei. Deshalb sah der Fehler damals wie eine Messung aus |
+| **22.09.** | **Die Kurvenform bleibt offen und blockiert nichts.** Zwei Konvektionspunkte, `U ∝ ṁ^0.253`. OP16 trennt Potenzgesetz (662) von Serienwiderstand (591) — 12 % gegen 1.1–1.4 % Streuung, also eine scharfe Gegenprobe |
+| **22.09.** | **`A = 0.0206 m²` ist die y × z-Fläche des Gitters selbst** — gemessen 0.0206874, benutzt 0.0206, 0.42 % darunter. Unter der Streuung, aber nachzuziehen |
 | **22.09.** | Beide fallenden Tests repariert: die float32-Schranke im gepaddeten Rollout (1.2e-6 gegen 1e-6, hielt zufällig) und **`torch.equal` im float64-Vergleich** — Bitgleichheit zwischen zwei Batchgrößen ist durch nichts garantiert und war nicht portabel (lokal grün, auf dem Runner rot). Jetzt beide gegen eine relative Schranke `1e-12` |
 
 ## Stand
@@ -671,8 +746,11 @@ Damit der Umfang nicht wandert:
 | 1 | ~~`U` mit Fluss / ohne, Faktor ~23~~ | ~~**~1130 / ~50**~~ — **zurückgezogen 22.09.**: die 1130 war der `T_out`-Bezug, nachgerechnet 1128.5. Siehe 1e | 09.09. |
 | 1 | `U(T_in)` je Flusslevel | **50.3 / 228.7 / 326.4 W/m²K** — je Level **1.3–2.1 %** Streuung über verschiedene Treiber | **22.09.** |
 | 1 | `U` hängt nur von V̇ ab? | 🟢 **ja** — das ist der Teil des Tores, der hält | **22.09.** |
-| 1 | `U(T_mittel)`, wie `UCurve` es will | *offen* — grob 1.7 × `U(T_in)`, der Lauf misst es. Siehe 1e | |
-| 1 | `U(V̇)` auf einer Kurve? | 🟡 **nicht prüfbar mit diesen Daten** — V̇ = 0 ist ein anderer Mechanismus (1b), es bleiben **zwei** Stützstellen, und durch zwei Punkte geht jedes Zweiparametergesetz. Gemessen `U ∝ ṁ^0.51`. Entschieden wird es an OP16, als **Gegenprobe** | **22.09.** |
+| 1 | **`U(T_mittel)`, wie `UCurve` es will** | ✅ **50.4 / 421.0 / 501.7 W/m²K** für V̇ = 0 / 15 / 30, Streuung 2.10 / 1.38 / 1.09 % | **22.09.** |
+| 1 | `U(T_out)` | **unbrauchbar** — Vorzeichenwechsel, −8684 … +21933 bei V̇ = 15. Bei V̇ = 30 *nicht*, daher die brave „~1130" vom 09.09. | **22.09.** |
+| 1 | **Wandterm kalibrierbar?** | 🟢 **ja** — die drei trainierten Level *sind* die Stützstellen von `UCurve`, null freie Parameter | **22.09.** |
+| — | `A` gegen die gemessene Geometrie | `0.198094368 × 0.104431991 = 0.0206874 m²`; benutzt wird 0.0206, **0.42 % darunter** | **22.09.** |
+| 1 | `U(V̇)`-Kurven*form* | 🟡 **nicht entscheidbar, blockiert aber nichts** — zwei Konvektionspunkte, `U ∝ ṁ^0.253`. OP16 trennt Potenzgesetz (662) von Serienwiderstand (591): **12 %** gegen 1.1–1.4 % Streuung | **22.09.** |
 | 2 | Reports unverändert | | |
 | — | Reshape aus Koordinaten ableitbar und umkehrbar | **ja**, 0.198094368 × 0.104431991 m | 14.09. / korrigiert 22.09. |
 | — | `xyz` über alle siebzehn Cache-OPs identisch | **ja, bitgleich**, gleiche Reihenfolge | 22.09. |
@@ -772,7 +850,8 @@ abgefangen, und tote Kanäle werden **gemeldet** statt still zu bleiben.
 > aufrufen. Und `derive_layout` gehört mit `bundle.xn` (float64) × `L_ref`
 > gefüttert, **nicht** mit `op.xn`: der ist float32 und halbiert die Reserve der
 > Äquidistanzprüfung (4e-7 gemessen gegen `rtol` 1e-6).
-| **Wandterm benutzbar** | `U(V̇)` kalibrieren | **Stufe 2**: `q_solid_to_fluid`, `mdot`, `cp_fluid`, `fluid_out_temp` fehlen im Bündel |
+| ~~**Wandterm benutzbar**~~ | ~~`U(V̇)` kalibrieren~~ | ✅ **erledigt 22.09.** — `U(T_mittel)` = 50.4 / 421.0 / 501.7 W/m²K für V̇ = 0 / 15 / 30, die drei trainierten Level. Siehe 1e |
+| **Wandterm im Training** | die vier Größen aus dem Bündel ziehen | **Stufe 2**: `q_solid_to_fluid`, `mdot`, `cp_fluid`, `fluid_out_temp` fehlen im Cache — `U` ist kalibriert, der *Weg dorthin* fehlt |
 | **Physik-Latte** | Stufe 3 mit echter Wand | Wandterm |
 | **`L_wall`** | der einzige Verlustterm mit gemessenem Ziel | Wandterm |
 | **`C_fluid`** | Wärmekapazität des Kühlmittels im Kanal, für den Kapazitätsmodus | liegt nicht vor — **nicht raten** |

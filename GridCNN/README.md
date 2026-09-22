@@ -60,7 +60,7 @@ Unterbau in Ordnung.
 | | blockiert durch |
 |---|---|
 | `train.py` mit echten Daten | der **Ladepfad** an `PINNmodulusTwo/data.py` fehlt, und der `data_cache` liegt nicht im Repo |
-| der **Wandterm** (Kühlung) | `U(V̇)` ist nicht kalibrierbar: `q_solid_to_fluid`, `mdot`, `cp_fluid`, `fluid_out_temp` fehlen im Bündel → **Stufe 2** im Fahrplan |
+| der **Wandterm** (Kühlung) | `U(V̇)` ist **seit dem 22.09. kalibriert** (50.4 / 421.0 / 501.7 W/m²K); es fehlt der Weg in den Cache: `q_solid_to_fluid`, `mdot`, `cp_fluid`, `fluid_out_temp` → **Stufe 2** im Fahrplan |
 | die **Physik-Latte** | braucht den Wandterm |
 | `benchmark.py` Stufe 1 und 3 | brauchen den `data_cache` |
 
@@ -72,15 +72,12 @@ darf nicht als Physik-Latte zitiert werden.**
 
 ## Was als Nächstes zu tun ist, in dieser Reihenfolge
 
-1. **`balance_check.py` ein drittes Mal** — Minuten, nur numpy, braucht die
-   Rohdaten. Abschnitt 1–3 sind am 22.09. durch: `Q_ht/tot = 0.700 … 0.772`
-   (**nicht** ≈ 1, die Hypothese aus 1a ist widerlegt), Fluidbilanz
-   **1.030 … 1.062** → `ghost_hi` steht, `tot/jr1 ≈ 3.2` belegt **O17**.
-   Abschnitt 4 liefert `U` = 50.3 / 228.7 / 326.4 W/m²K, je Flusslevel auf
-   **1.3–2.1 %** zusammen — aber gegen `T_in` statt gegen die **mittlere**
-   Fluidtemperatur, die `physics.UCurve` vorschreibt. Das verschiebt den
-   Absolutwert um grob 1.7×, und es erklärt die `~1130` vom 09.09. als
-   `T_out`-Bezug. Kommando im [`FAHRPLAN.md`](FAHRPLAN.md) ganz oben.
+1. ✅ **Stufe 1 ist am 22.09. abgeschlossen.** Fluidbilanz **1.030 … 1.062**
+   → `ghost_hi` steht; `Q_ht/tot = 0.700 … 0.772`, **nicht** ≈ 1, die
+   Hypothese aus 1a ist widerlegt; `tot/jr1 ≈ 3.2` belegt **O17**; und
+   **`U(T_mittel)` = 50.4 / 421.0 / 501.7 W/m²K** für V̇ = 0 / 15 / 30, je
+   Level auf 1.1–2.1 % zusammen. Das sind genau die Stützstellen von
+   `physics.UCurve` — **der Wandterm ist kalibriert, null freie Parameter.**
 2. **Stufe 2, der Cache-Umbau** — vier Spalten mitschreiben, alle siebzehn OPs
    neu bauen (30 min). Danach ist der Wandterm kalibrierbar.
 3. **Den Ladepfad in `train.py` anschließen** und Konfiguration **A** fahren.
