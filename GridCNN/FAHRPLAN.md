@@ -33,11 +33,102 @@ Der Plan ist eine **Leiter mit Toren**, keine gerade Linie. **Ein rotes Tor
 
 ---
 
-## ▶ Das Nächste: **der POC — unterbietet der CNN die Latte überhaupt?**
+## ▶ Das Nächste: **A auf voller Auflösung bestätigen**
 
-> **Ein Befehl, rund 30 Minuten, eine Antwort.** Er steht unten. Er misst
-> **Arm A und nur Arm A** — und er beantwortet die einzige Frage, die im
-> Moment zählt: *ist der CNN rettbar?*
+> ## 🟢 22.09., abends — der POC trägt: **der CNN ist rettbar**
+>
+> | | berichtet | Latte | Güte | Seed-Streuung |
+> |---|---|---|---|---|
+> | **OP06** | **6.571 °C** | 10.7995 | **0.61x** | 0.38 °C |
+> | **OP09** | **5.813 °C** | 7.7663 | **0.75x** | 0.87 °C |
+>
+> **3/3 Seeds unter der Latte auf beiden OPs**, Streuung **unter** der
+> Lesbarkeitsschwelle von ~1 °C. Von 27.11 ± 22.26 °C am Vormittag auf
+> 6.57 ± 0.38 °C. Die Diagnose war richtig: es lag an der Schleife
+> (`--tbptt`), nicht am Netz.
+>
+> Die trivialen Latten stimmen mit `PINNmodulusTwo/FAHRPLAN.md:1244` auf drei
+> bis vier Nachkommastellen überein — der Ladepfad baut dieselbe Haltemenge,
+> und der Vergleich gegen den PINN (6.270 / 3.585, **ein** Seed, mit
+> Randterm) steht: **auf OP06 gleichauf, auf OP09 zurück.**
+>
+> ⚠ **Der Lauf lief bei `--subsample 10`** (1445 Schritte), nicht bei 2
+> (~8040). Das ist die leichtere Aufgabe. Voller Bericht in
+> **[`TRAININGS_BERICHT_2026-09-22_KonfigA_POC.md`](../TRAININGS_BERICHT_2026-09-22_KonfigA_POC.md)**,
+> Übergabe in **[`UEBERGABE_2026-09-22_ABEND.md`](../UEBERGABE_2026-09-22_ABEND.md)**.
+
+> ## 🔴 Und der Befund, der alles andere überlagert: **O13 ist zurück**
+>
+> Der Plot
+> **[`15_konfigA_OP06_fehler_ueber_zeit.png`](laeufe/15_konfigA_OP06_fehler_ueber_zeit.png)**
+> zeigt den Fehler über die Trajektorie statt als Mittelwert:
+>
+> | t [s] | 131 | 394 | 788 | 919 | 1181 | 1444 |
+> |---|---|---|---|---|---|---|
+> | **MAE [°C]** | 9.8 | **1.1** | 7.8 | 3.7 | 8.9 | **15.0** |
+>
+> **Bei 394 s ist das Modell auf dem ~1 K-Ziel. Am Ende liegt es bei 15 °C**,
+> und der *kleinste* Fehler über alle 363 Punkte beträgt dort noch 11.5 °C —
+> das ganze Feld liegt daneben. Ein **Pegelfehler**, keine Streuung.
+>
+> `model.py` hat genau das vorhergesagt: die Delta-Form trägt den Level
+> **ohne Leck**, und der dissipative Diffusionskern sollte es liefern.
+> **Arm A hat ihn nicht.** Damit ist Arm B nicht der nächste Listenpunkt,
+> sondern die Behandlung für die beobachtete Krankheit.
+>
+> **Seit dem 22.09., abends, misst `train.py` das selbst**: sechs Abschnitte,
+> MAE und vorzeichenbehafteter Bias je Abschnitt, plus
+> `drift = MAE(letzter Abschnitt)/MAE(gesamt)`. Ab 1.5 meldet der Lauf O13.
+
+### Schritt 1 — volle Auflösung, ~45 min
+
+Nur `--subsample` und `--epochs` ändern sich. Die Lags leiten sich bei
+`--subsample 2` automatisch wieder auf 5/20 ab.
+
+```bash
+python3 GridCNN/train.py --no-physics --seeds 3 --epochs 60 \
+    --subsample 2 --inner-steps 25 --tbptt-start 4 --tbptt 16 \
+    --val-every 2 --device cuda --cache data_cache \
+    2>&1 | tee 16_konfigA_voll.txt
+```
+
+Worauf zu schauen ist: hält die Güte < 1.0 bei fünffachem Horizont? Was sagt
+`drift`? Und vor allem — **was sagt der Bias?** Negativ zum Ende heißt, das
+Modell wird zu kalt; positiv, zu warm. Das ist neu und es entscheidet, wo man
+ansetzt.
+
+Geht es schief: Frühphase instabil → `--tbptt-start 8`; val-Kurve schwankt →
+EMA. Beides begründet, aber **eins nach dem anderen**.
+
+### Schritt 2 — CFL entscheiden (eine Rechnung, kein Lauf)
+
+110× über der Schranke bei `--subsample 2`, 551× bei 10. Für A egal, für
+B/C/D ein Blocker. Zuerst zu prüfen: sind die Materialdaten echt? Ein
+synthetisches `material_properties/` macht das Problem viel steifer, als es
+ist — die `[CFL]`-Zeile sagt das selbst.
+
+### Schritt 3 — Arm B, der Physik-POC
+
+Gated auf Schritt 2. Die Frage ist präzise: **holt der dissipative
+Diffusionskern den Pegel zurück?** Messbar an `drift` und `bias`, nicht am
+Mittelwert.
+
+### Parallel, weil Code und kein Lauf: den Wandterm verdrahten
+
+`_wall_ghost` wirft weiterhin — **der genannte Grund war abgestanden.**
+Stufe 2 ist durch, `U(V̇)` kalibriert, `physics.UCurve` und
+`physics.WallModel.ghost` gebaut und getestet. Was wirklich fehlt:
+
+1. `op_tensoren` füllt `OPTensors.q_wall_meas` nie → `wall_loss` kann nicht
+   laufen.
+2. `WallModel.ghost` braucht `t_in` und `mdot` **je Zeitschritt**; beide
+   liegen seit Stufe 2 im Bündel, sind aber nicht in `OPTensors` übernommen.
+
+---
+
+### Was vorher galt: **der POC — unterbietet der CNN die Latte überhaupt?**
+
+> **Erledigt am 22.09., abends.** Er trägt, siehe oben.
 
 ### Die vier offenen Fragen aus Abschnitt 4 des Berichts — entschieden
 
