@@ -33,7 +33,36 @@ Der Plan ist eine **Leiter mit Toren**, keine gerade Linie. **Ein rotes Tor
 
 ---
 
-## ▶ Das Nächste: **Konfiguration A fahren** — Stufe 1 und 2 sind durch
+## ▶ Das Nächste: **A wiederholen, nachdem die Messung repariert ist**
+
+> ## 🔴 22.09., abends — A ist gelaufen und ist **kein Ergebnis**
+>
+> | | Seed 0 | Seed 1 | Seed 2 | Mittel ± σ |
+> |---|---|---|---|---|
+> | val-MAE OP06 | 51.95 | 20.43 | **8.95** | **27.11 ± 22.26 °C** |
+> | val-MAE OP09 | 51.45 | 15.48 | **8.03** | **24.99 ± 23.22 °C** |
+>
+> **Die Streuung ist der Befund, nicht der Mittelwert.** 22 °C gegen eine
+> Lesbarkeitsschwelle von ~1 °C — dieser Lauf kann **nichts ranken**. Und der
+> beste Seed unterbietet die triviale Latte nicht: „sage überall den
+> Trainingsmittelwert" liegt bei ~7.7 °C, Seed 2 bei 8.03 / 8.95.
+>
+> Ursache ist der Bruch zwischen Training und Messung: **ein Schritt trainiert,
+> ~8040 gemessen.** Bis zu **99.8 %** aller OP-Zeitschritte lagen an `--clamp`.
+> Volle Analyse in **[`TRAININGS_BERICHT_2026-09-22_KonfigA.md`](../TRAININGS_BERICHT_2026-09-22_KonfigA.md)**,
+> die Epochenzeile erklärt **[`README_DIAGNOSTIK.md`](README_DIAGNOSTIK.md)**.
+>
+> **Stufe I ist am selben Abend gebaut** (Messung, ohne das Experiment
+> anzufassen): val-MAE je `--val-every` Epochen mit `model_best.pt`, Sättigung
+> als Anteil, und die trivialen Latten vor jedem Lauf. Damit ist A zu
+> wiederholen — **vorher ist keine Modelländerung bewertbar.**
+>
+> ```bash
+> python3 GridCNN/train.py --no-physics --seeds 3 --epochs 60 \
+>     --device cuda --cache data_cache 2>&1 | tee 15_konfigA_v2.txt
+> ```
+
+### Was vorher galt: Konfiguration A fahren — Stufe 1 und 2 sind durch
 
 > **Stand 22.09., abends.** Stufe 1 abgeschlossen (`U(V̇)` kalibriert), Stufe 2
 > **durch mit grünem Tor** (17/17 OPs auf Schema v3, die drei Reports
@@ -782,6 +811,10 @@ Damit der Umfang nicht wandert:
 | **22.09.** | **Die Gitterabbildung ist punktweise geprüft**, nicht angenommen: alle 363 Punkte, für `tn_seq` *und* für den 3×3-Tensor `fo` — der trägt seine Matrixachsen hinten und stünde bei naivem `to_field` auf dem Kopf |
 | **22.09.** | **`--seeds` dreht jetzt eine Schleife.** Vorher war es eine Warnschwelle: wer `--seeds 3` tippte, bekam **einen** Lauf. Jede Wiederholung schreibt in ihr eigenes `--artifacts-dir`, und die Zusammenfassung nennt Mittel **und** `std(ddof=1)` |
 | **22.09.** | **CFL wird vor dem Lauf ausgerechnet, nicht danach gerätselt.** Auf dem synthetischen Fixture liegt der Schritt selbst bei `subsample 1` **53×** über der Schranke (1.9 ms gegen die echten 0.241 s) — die Ersatz-Materialdaten machen das Problem viel steifer, als es ist. Arm A ist davon unberührt, B/C/D laufen dort weg. **Auf der Rechenmaschine mit echten Materialdaten ist das eine andere Zahl** |
+| **22.09.** | 🔴 **Konfiguration A gelaufen — und es ist kein Ergebnis.** val-MAE **27.11 ± 22.26 °C** (OP06) über drei Seeds, bester gegen schlechtesten **Faktor 5.8**. Die Schwelle liegt bei ~1 °C. Der beste Seed unterbietet die Mittelwert-Vorhersage (~7.7 °C) **nicht** |
+| **22.09.** | **Die Ursache ist der Horizont, nicht das Netz:** ein Schritt trainiert, ~8040 frei laufend gemessen. Bis **99.8 %** aller OP-Zeitschritte an `--clamp` (= ±480 °C bei `T_sigma` 9.602). Eine Sättigungsphase vergiftet die nächste Epoche, weil die Historie aus dem eingefrorenen Rollout kommt |
+| **22.09.** | **`data` sagt das Ergebnis nicht vorher:** Seed 0 endet bei 0.332 → 51.95 °C, Seed 2 bei 0.305 → 8.95 °C. Derselbe Verlust, Faktor 5.8 |
+| **22.09.** | **Stufe I gebaut — Messung repariert, Experiment unberührt:** val-MAE je `--val-every` Epochen statt nur am Schluss (der FAHRPLAN verbot „die letzte Zeile ablesen" schon für den PINN), `model_best.pt`, Sättigung als **Anteil** (`88248/88400 = 99.8 %`), und **triviale Latten** vor jedem Lauf |
 
 ## Stand
 

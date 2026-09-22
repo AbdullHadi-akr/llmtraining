@@ -18,6 +18,11 @@
 !UEBERGABE_*.txt
 !UEBERGABE_*.md
 
+# Keep the raw run logs tracked. Ein Bericht ohne den Lauf, auf den er sich
+# beruft, ist eine Behauptung: die Rohausgabe ist klein, reiner Text und die
+# einzige Stelle, an der die Epochenzeilen nachlesbar bleiben.
+!GridCNN/laeufe/*.txt
+
 # Keep training reports tracked
 !TRAININGS_BERICHT_*.md
 !**/TRAININGS_BERICHT_*.md
