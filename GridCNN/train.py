@@ -149,6 +149,7 @@ class EpochStats:
     phys: float = float("nan")
     wall: float = float("nan")
     saturated: int = 0
+    saturated_max: int = 0      # B x (n_max - 1) -- ohne das ist saturated unlesbar
     spread_space: float = 0.0
     spread_time: float = 0.0
     n_ops: int = 0
@@ -160,7 +161,14 @@ class EpochStats:
         s = (f"ep {epoch:>4d} | data {self.data:.5g} | phys {p} | wall {w} "
              f"| Streuung Ort {self.spread_space:.3f} Zeit {self.spread_time:.3f}")
         if self.saturated:
-            s += f" | [SATURATED] {self.saturated}"
+            # Als Anteil, nicht als nackte Zahl: "88248" ist ohne die
+            # Obergrenze nicht zu lesen, und genau daran ist der Lauf vom
+            # 22.09. fast vorbeigegangen. Siehe README_DIAGNOSTIK.md.
+            if self.saturated_max:
+                s += (f" | [SATURATED] {self.saturated}/{self.saturated_max}"
+                      f" = {100.0 * self.saturated / self.saturated_max:.1f}%")
+            else:
+                s += f" | [SATURATED] {self.saturated}"
         return s
 
 
@@ -445,6 +453,8 @@ def train_epoch(net: M.GridCNN, batch: OPBatch, statics: M.StaticMaps,
     alle, sat = rollout_batched(net, batch, statics, lag1=lag1, lag2=lag2,
                                 clamp=clamp)
     st.saturated = sat
+    # Dieselbe Rechnung wie in rollout_batched: B OPs x (n_max - 1) Schritte.
+    st.saturated_max = len(ops) * max(batch.n_max - 1, 0)
 
     for i, op in enumerate(ops):
         traj = alle[:op.n_t, i]          # nur der eigene, gueltige Teil
@@ -632,6 +642,33 @@ def lade_datensatz(args, device):
 
 
 @torch.no_grad()
+def triviale_latten(ops: list, T_sigma: float) -> dict:
+    """Was man ohne jedes Modell erreicht. Die Latte unter der Latte.
+
+    Ohne sie ist "8.95 C" nicht einzuordnen, und genau daran ist der Lauf vom
+    22.09. fast vorbeigegangen: der beste Seed lag auf dem Niveau von
+    "sage ueberall den Trainingsmittelwert".
+
+    * ``mittelwert``  -- im z-normierten Raum ist der Trainingsmittelwert
+      exakt 0, die MAE also ``mean|tn| * T_sigma``.
+    * ``persistenz``  -- ``T(t) = T(0)``, die Anfangsbedingung eingefroren.
+      Fuer ein traeges thermisches System ist das eine ERNSTHAFTE Latte, kein
+      Strohmann.
+
+    Ein Modell, das eine der beiden nicht schlaegt, hat nichts gelernt.
+    """
+    out = {}
+    for op in ops:
+        out[op.op_id] = {
+            "mittelwert": float(op.tn_seq.abs().mean().item() * T_sigma),
+            "persistenz": float(
+                (op.tn_seq - op.tn_ic.unsqueeze(0)).abs().mean().item()
+                * T_sigma),
+        }
+    return out
+
+
+@torch.no_grad()
 def val_mae(net: M.GridCNN, ops: list, statics: M.StaticMaps, *,
             lag1: int, lag2: int, clamp: float, T_sigma: float) -> dict:
     """Freilaufende MAE je Halte-OP, in Grad Celsius.
@@ -670,30 +707,64 @@ def fahre_einen_lauf(args, seed: int, device, daten, out_dir: Path) -> dict:
     opt = torch.optim.Adam(net.parameters(), lr=args.lr)
     batch = stack_ops(train)
     verlauf = []
+    bestes = {"epoch": -1, "mittel": float("inf"), "mae": {}}
+
     for epoch in range(1, args.epochs + 1):
         st = train_epoch(net, batch, statics, opt,
                          inner_steps=args.inner_steps, batch_t=args.batch_t,
                          lag1=args.lag1, lag2=args.lag2, w_data=args.w_data,
                          w_phys=args.w_phys, w_wall=args.w_wall,
                          clamp=args.clamp, rng=rng)
-        print(f"[seed {seed}] {st.line(epoch)}", flush=True)
-        verlauf.append({"epoch": epoch, "data": st.data, "phys": st.phys,
-                        "wall": st.wall, "saturated": st.saturated,
-                        "spread_space": st.spread_space,
-                        "spread_time": st.spread_time})
+        zeile = {"epoch": epoch, "data": st.data, "phys": st.phys,
+                 "wall": st.wall, "saturated": st.saturated,
+                 "saturated_max": st.saturated_max,
+                 "spread_space": st.spread_space,
+                 "spread_time": st.spread_time}
 
-    mae = val_mae(net, val, statics, lag1=args.lag1, lag2=args.lag2,
-                  clamp=args.clamp, T_sigma=bundle.T_sigma)
-    for op_id, v in sorted(mae.items()):
-        print(f"[seed {seed}] val-MAE {op_id}: {v:.4f} C")
+        # Die val-MAE MITSCHREIBEN, nicht nur am Ende einmal nehmen. Am
+        # 22.09. wurde Epoche 60 abgelesen, und das ist eine Lotterie: Seed 0
+        # endete mit demselben data-Verlust wie Seed 2 und einer 5.8x
+        # schlechteren val-MAE. Der FAHRPLAN verbietet das fuer den PINN
+        # ausdruecklich ("Nie die letzte Zeile eines Laufs ablesen").
+        #
+        # Ein Rollout ueber die Haltemenge kostet, deshalb nicht jede Epoche.
+        faellig = (epoch % max(1, args.val_every) == 0
+                   or epoch == args.epochs or epoch == 1)
+        if faellig:
+            mae = val_mae(net, val, statics, lag1=args.lag1, lag2=args.lag2,
+                          clamp=args.clamp, T_sigma=bundle.T_sigma)
+            zeile["val_mae_C"] = mae
+            mittel = float(np.mean(list(mae.values())))
+            marke = ""
+            if mittel < bestes["mittel"]:
+                bestes = {"epoch": epoch, "mittel": mittel, "mae": mae}
+                torch.save(net.state_dict(), out_dir / "model_best.pt")
+                marke = "  <- bestes bisher"
+            print(f"[seed {seed}] {st.line(epoch)}", flush=True)
+            print(f"[seed {seed}]      val-MAE "
+                  + "  ".join(f"{k} {v:.4f}" for k, v in sorted(mae.items()))
+                  + f"  (Mittel {mittel:.4f} C){marke}", flush=True)
+        else:
+            print(f"[seed {seed}] {st.line(epoch)}", flush=True)
+        verlauf.append(zeile)
+
+    letzte = val_mae(net, val, statics, lag1=args.lag1, lag2=args.lag2,
+                     clamp=args.clamp, T_sigma=bundle.T_sigma)
+    print(f"[seed {seed}] ENDE   ep {args.epochs}: "
+          + "  ".join(f"{k} {v:.4f}" for k, v in sorted(letzte.items())))
+    print(f"[seed {seed}] BESTES ep {bestes['epoch']}: "
+          + "  ".join(f"{k} {v:.4f}" for k, v in sorted(bestes["mae"].items())))
 
     torch.save(net.state_dict(), out_dir / "model.pt")
     (out_dir / "history.json").write_text(json.dumps(verlauf, indent=2))
     (out_dir / "metrics.json").write_text(json.dumps(
         {"seed": seed, "konfiguration": konfigurationsname(args),
-         "parameter": n_par, "val_mae_C": mae,
-         "epochs": args.epochs}, indent=2))
-    return mae
+         "parameter": n_par, "epochs": args.epochs,
+         "val_mae_C_letzte": letzte,
+         "val_mae_C_bestes": bestes["mae"],
+         "bestes_epoch": bestes["epoch"]}, indent=2))
+    # Berichtet wird das BESTE, nicht das letzte. Beides steht in metrics.json.
+    return bestes["mae"] if bestes["epoch"] > 0 else letzte
 
 
 def build_argparser() -> argparse.ArgumentParser:
@@ -723,6 +794,11 @@ def build_argparser() -> argparse.ArgumentParser:
                         "ein eigenes Verzeichnis -- ohne das schreiben "
                         "gleichzeitige Laeufe in dieselbe model.pt, und das "
                         "scheitert nicht, es mischt")
+    p.add_argument("--val-every", type=int, default=5,
+                   help="val-MAE alle N Epochen messen (Epoche 1 und die "
+                        "letzte immer). Berichtet wird das BESTE, nicht das "
+                        "letzte: der FAHRPLAN verbietet 'die letzte Zeile "
+                        "ablesen', und am 22.09. war genau das eine Lotterie")
     p.add_argument("--epochs", type=int, default=60)
     p.add_argument("--inner-steps", type=int, default=100,
                    help="Updates je OP und Epoche auf der eingefrorenen "
@@ -873,7 +949,17 @@ def main(argv: list | None = None) -> int:
     # Einmal laden, ueber alle Seeds hinweg. Die Daten haengen nicht am Seed,
     # und sie je Seed neu zu bauen kostet Minuten und aendert nichts.
     daten = lade_datensatz(args, device)
-    bundle = daten[0]
+    bundle, _train, _val = daten[0], daten[1], daten[2]
+
+    # Die Latte unter der Latte, VOR dem ersten Lauf. Ein Modell, das sie
+    # nicht schlaegt, hat nichts gelernt -- und ohne sie ist keine val-MAE
+    # einzuordnen.
+    latten = triviale_latten(_val, bundle.T_sigma)
+    print("[latten] was OHNE Modell erreichbar ist (val-MAE in C):")
+    for op_id, v in sorted(latten.items()):
+        print(f"           {op_id}: Mittelwert-Vorhersage {v['mittelwert']:.4f}"
+              f"   Persistenz T(t)=T(0) {v['persistenz']:.4f}")
+    print("           Wer die nicht unterbietet, hat nichts gelernt.")
 
     wurzel = args.artifacts_dir / konfigurationsname(args).split()[0]
     alle: dict[str, list] = {}
@@ -887,6 +973,8 @@ def main(argv: list | None = None) -> int:
     print(f"{konfigurationsname(args)}  --  {args.seeds} Seed(s), "
           f"{args.epochs} Epochen")
     for op_id, werte in sorted(alle.items()):
+        lat = latten.get(op_id, {})
+        beste_latte = min(lat.values()) if lat else float("inf")
         a = np.asarray(werte)
         # ddof=1: die Streuung EINER Stichprobe, nicht der Grundgesamtheit.
         # Bei drei Seeds ist der Unterschied 22 %, und die Zahl wird gegen
@@ -894,6 +982,13 @@ def main(argv: list | None = None) -> int:
         sd = float(a.std(ddof=1)) if a.size > 1 else float("nan")
         print(f"  val-MAE {op_id}: {a.mean():.4f} +- {sd:.4f} C   "
               f"({', '.join(f'{v:.4f}' for v in werte)})")
+        if lat:
+            wie_viele = int((a < beste_latte).sum())
+            print(f"      triviale Latte {beste_latte:.4f} C "
+                  f"(Mittelwert {lat['mittelwert']:.4f} / Persistenz "
+                  f"{lat['persistenz']:.4f}) -- "
+                  f"{wie_viele}/{a.size} Seed(s) unterbieten sie"
+                  + ("" if wie_viele else "  ⚠ KEINER"))
     if args.seeds < 3:
         print("  ⚠ unter drei Seeds ist das +- keine Streuung, sondern Zierde.")
     zus = wurzel / "zusammenfassung.json"
@@ -901,6 +996,7 @@ def main(argv: list | None = None) -> int:
         {"konfiguration": konfigurationsname(args), "seeds": args.seeds,
          "epochs": args.epochs, "ops": list(args.ops),
          "val_ops": list(args.val_ops), "val_mae_C": alle,
+         "triviale_latten_C": latten,
          "T_sigma": float(bundle.T_sigma)}, indent=2))
     print(f"  -> {zus}")
     return 0
