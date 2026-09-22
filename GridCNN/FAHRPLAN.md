@@ -33,7 +33,66 @@ Der Plan ist eine **Leiter mit Toren**, keine gerade Linie. **Ein rotes Tor
 
 ---
 
-## ▶ Das Nächste: **A wiederholen, nachdem die Messung repariert ist**
+## ▶ Das Nächste: **der POC — unterbietet der CNN die Latte überhaupt?**
+
+> **Ein Befehl, rund 30 Minuten, eine Antwort.** Er steht unten. Er misst
+> **Arm A und nur Arm A** — und er beantwortet die einzige Frage, die im
+> Moment zählt: *ist der CNN rettbar?*
+
+### Die vier offenen Fragen aus Abschnitt 4 des Berichts — entschieden
+
+| | Frage | Entscheidung |
+|---|---|---|
+| **1** | Budget: 60 × 100 gesetzt? | **Nein, erster Schuss.** Was konstant gehört, ist `inner_steps × k`, nicht `inner_steps`: mit einem Fenster von `k` kostet ein Update `k` Schritte. Der POC fährt 40 × 25 bei `k` bis 16 — viermal die Arbeit vom 22.09., bei sechzehnfachem Horizont |
+| **2** | Darf sich das Experiment ändern? | **Ja.** Clipping, LR-Plan und TBPTT sind **Protokoll**, keine Experimentvariablen: sie beschreiben, *wie* trainiert wird, nicht *was* verglichen wird. Einmal festgelegt, dann identisch für A, B, C und D. Der Einwand „dann ist A die Latte, und die ist unbrauchbar" trägt nicht — A wie am 22.09. **ist** keine Latte und kann darum auch keine verlieren. Der alte Pfad bleibt exakt reproduzierbar: `--tbptt 1 --clip-grad 0 --lr-plan konstant --clamp 50 --lag1 5 --lag2 20` |
+| **3** | `--clamp 50` — gewählt oder geerbt? | **Geerbt**, aus `PINNmodulusTwo`. Bei ±480 °C fängt er nichts ab, was noch zu retten wäre. Die Vorgabe ist jetzt `auto`: das Dreifache der größten Auslenkung in den Labels, aus den Daten gerechnet und in °C gedruckt |
+| **4** | CFL für B/C/D — kleineres oder größeres `subsample`? | **Noch nicht zu entscheiden, und das ist die Entscheidung.** Arm A ist `--no-physics`, dort gibt es keine CFL-Schranke; der POC braucht die Antwort also nicht. Umgekehrt liefert er den Eingang für sie: erst wenn bekannt ist, wie viel Horizont das Netz überhaupt trägt, ist die Gabelung eine Rechnung statt eines Ratens. ⚠ **Festhalten:** `--subsample 10` *verschärft* CFL für B/C/D auf rund **550×**. Der POC-Befehl unten ist deshalb **kein** Vorgriff auf B |
+
+### Was dafür gebaut wurde (22.09., abends)
+
+| Stufe | | |
+|---|---|---|
+| **I — Messung** | val-MAE je `--val-every` Epochen, `model_best.pt`, Sättigung als **Anteil**, triviale Latten **vor** jedem Lauf und **in jeder val-Zeile** (`0.79x Latte`) | ändert das Experiment nicht |
+| **I+ — Berichtsregel** | berichtet wird der **Median über das letzte Drittel** der Messpunkte. Nicht das Beste: das wäre auf der Haltemenge ausgewählt, und die Haltemenge ist hier die ganze Messung. Bestes und letztes stehen als Diagnose daneben | ändert das Experiment nicht |
+| **II — Stabilität** | `--clip-grad 1.0`, `--lr-plan cosine`, `--clamp auto`, Verwerfen nicht-endlicher Updates, Gradientennorm im Log | Protokoll (Frage 2) |
+| **5 — der Bruch selbst** | **`--tbptt`**: truncated BPTT. Das Fenster rollt **mit** Gradient und frisst sich selbst; ab Schritt 1 ist der Anker die eigene Vorhersage. Das schließt die Lücke „ein Schritt trainiert, ~8040 gemessen" | Protokoll (Frage 2) |
+| **Tempo** | Lags aus **Sekunden** statt Schritten (5/20 bei `--subsample 2` unverändert), val-Rollout gebatcht, Wanduhr je Epoche | ändert das Experiment nicht |
+
+### Der Befehl
+
+```bash
+{ python3 GridCNN/train.py --no-physics --seeds 1 --epochs 3 \
+      --subsample 10 --inner-steps 4 --tbptt-start 2 --tbptt 8 \
+      --val-every 1 --device cuda --cache data_cache \
+      --artifacts-dir /tmp/poc_smoke \
+  && python3 GridCNN/train.py --no-physics --seeds 3 --epochs 40 \
+      --subsample 10 --inner-steps 25 --tbptt-start 4 --tbptt 16 \
+      --val-every 2 --device cuda --cache data_cache ; } \
+  2>&1 | tee 15_konfigA_poc.txt
+```
+
+Der erste Lauf ist ein Rauchtest von rund einer Minute: stürzt der Ladepfad
+bei `--subsample 10` ab, fällt das auf, bevor eine halbe Stunde verbrannt ist.
+Der zweite ist der POC. **`--subsample 10` braucht keinen Cache-Rebuild** —
+die `.npz` halten die volle Rohauflösung, `subsample_time` wirkt erst beim
+Laden.
+
+### Was der POC beweist — und was nicht
+
+| | |
+|---|---|
+| ✅ **Beweist** | ob der CNN in Arm A die trivialen Latten (Mittelwert **und** Persistenz) über einen freilaufenden Rollout von ~1608 Schritten unterbietet, und ob die Seed-Streuung unter die Lesbarkeitsschwelle von ~1 °C fällt. Beides liest das `[verdikt]` am Ende vor |
+| ❌ **Beweist nicht** | die volle Auflösung (`--subsample 2`, ~8040 Schritte). Ein kürzerer Horizont ist **leichter**, ein Erfolg hier ist also die schwächere Aussage — ein **Misserfolg** hier ist dafür die starke |
+| ❌ **Beweist nicht** | irgendetwas über B, C oder D. Arm A ist adiabat und ohne Physik: eine **Ablation, keine Latte**, und `--subsample 10` verschärft CFL (Frage 4) |
+
+**Trägt der POC**, ist derselbe Befehl mit `--subsample 2 --epochs 60` die
+Bestätigung auf voller Auflösung, und *danach* ist A die Latte für B.
+**Trägt er nicht**, ist der nächste Hebel `--ema-decay` (hat im Basisprojekt
+O15 repariert) und dann die Netzgröße — nicht ein weiterer Lauf desselben.
+
+---
+
+### Was vorher galt: **A wiederholen, nachdem die Messung repariert ist**
 
 > ## 🔴 22.09., abends — A ist gelaufen und ist **kein Ergebnis**
 >
@@ -54,13 +113,14 @@ Der Plan ist eine **Leiter mit Toren**, keine gerade Linie. **Ein rotes Tor
 >
 > **Stufe I ist am selben Abend gebaut** (Messung, ohne das Experiment
 > anzufassen): val-MAE je `--val-every` Epochen mit `model_best.pt`, Sättigung
-> als Anteil, und die trivialen Latten vor jedem Lauf. Damit ist A zu
-> wiederholen — **vorher ist keine Modelländerung bewertbar.**
+> als Anteil, und die trivialen Latten vor jedem Lauf.
 >
-> ```bash
-> python3 GridCNN/train.py --no-physics --seeds 3 --epochs 60 \
->     --device cuda --cache data_cache 2>&1 | tee 15_konfigA_v2.txt
-> ```
+> **Überholt noch am selben Abend.** Eine reine Wiederholung von A hätte die
+> Messung repariert und die Ursache stehen lassen: der Bruch zwischen „ein
+> Schritt trainiert" und „~8040 gemessen" liegt nicht in der Messung, sondern
+> in der Schleife. Ein zweiter Lauf desselben Protokolls hätte dieselbe
+> 22-°C-Streuung sauberer berichtet — und wäre wieder kein Ergebnis gewesen.
+> Stattdessen läuft der POC oben, mit Stufe 5 und II im Protokoll.
 
 ### Was vorher galt: Konfiguration A fahren — Stufe 1 und 2 sind durch
 
