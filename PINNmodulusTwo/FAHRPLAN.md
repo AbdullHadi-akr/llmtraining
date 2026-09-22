@@ -106,6 +106,64 @@
 > `--device cuda` **hinter** das `--`; `--ema-decay 0.5` repariert O15. Gemessen:
 > ~2 h je Lauf bei `-j 3`, also `ceil(Läufe/3)` × 2 h. Nie die letzte Zeile eines
 > Laufs ablesen — `analyse_history.py`, Median über die letzten Epochen.
+>
+> ### Die Maschine trägt mehr als einen Lauf — und MPS ist dabei die halbe Miete
+>
+> **Was dasteht:** eine **g4dn.2xlarge** — Tesla **T4** (15.6 GiB, sm_75), 8 vCPU
+> davon 4 physisch. CUDA **MPS** (Multi-Process Service) ist darauf voll
+> unterstützt, und wie viel er trägt, ist **gemessen**, nicht geschätzt
+> ([`README_GPU_SERVER.md` §6.4](README_GPU_SERVER.md), Lauf vom 10.09., 4 × `--epochs 6`):
+>
+> | | Wanduhr, 4 Läufe | Faktor |
+> |---|---|---|
+> | `-j 1`, seriell | 596.2 s | — |
+> | `-j 4` **ohne** MPS | 407.4 s | 1.46× |
+> | `-j 4` **mit** MPS | **161.7 s** | **3.69×** |
+>
+> **MPS allein bringt 2.52×**, 92 % Effizienz — vier gleichzeitige Läufe kosten
+> fast so viel wie einer. Und er wirkt genau dort, wo dieses Projekt seine Zeit
+> verliert: der **Rollout** wurde ohne ihn 3.35× langsamer (14.8 → 49.6 s), der
+> Innenteil nur 1.25×. Der Rollout sind ~50 *winzige* Kernel je Schritt
+> (363 × 128), und winzige Kernel aus vier CUDA-Kontexten arbeitet der Treiber
+> zeitscheibenweise ab statt nebeneinander.
+>
+> **Warum das ab O18 zählt und nicht erst später.** Die Latte ist ~1 °C
+> Seed-Streuung, also braucht **jeder** Arm drei Seeds — drei Läufe, bevor
+> irgendetwas ablesbar ist. Und nach O18/O16 wird `w_phys`/`w_bc` erst zu einer
+> sinnvollen Achse, das heißt die Zahl der Läufe wächst multiplikativ. Bei ~2 h
+> je Lauf ist die Wanduhr `ceil(Läufe / j)` × 2 h: ein Sechs-Läufe-Sweep ist mit
+> `-j 4` + MPS **ein Nachmittag statt zwei Tage**. Die Parallelität ist damit
+> kein Komfort, sondern das ganze Messbudget.
+>
+> ⚠ **Zwei Fallen, beide lautlos.**
+> 1. Der Daemon **stirbt beim Reboot**. Ohne ihn verschenkt man Faktor 2.5, und
+>    nichts in der Trainingsausgabe sagt, dass er fehlt — `sweep.py`
+>    (`warn_if_no_mps`) warnt seit dem 14.09. von sich aus, bricht aber nicht ab.
+>    Prüfen: `pgrep -x nvidia-cuda-mps` (**nicht** `…-control`: `/proc/<pid>/comm`
+>    schneidet bei 15 Zeichen ab).
+>
+>    ⚠ §6.4 („MPS dauerhaft machen") sagt
+>    `sudo cp PINNmodulusTwo/deploy/nvidia-mps.service …` — **diese Datei liegt
+>    nicht im Repo** und kann dort auch nicht liegen: die `.gitignore` ignoriert
+>    alles und lässt per Whitelist nur `.py`/`.md` und eine Handvoll Namen
+>    durch, `.service` ist nicht darunter. Bis das geklärt ist, bleibt es beim
+>    Einzeiler `nvidia-cuda-mps-control -d` nach jedem Neustart.
+> 2. **MPS ist nicht Parallelität.** MPS gehört *immer* an, er kostet auch einen
+>    Einzellauf nichts. Parallel wird nur, was über `-j` an `sweep.py` läuft —
+>    ein einzelner `train.py` ist **ein** Prozess, und die ~7000
+>    Rollout-Schritte je Epoche hängen voneinander ab.
+>
+> `-j 4` ist die Vorgabe (mit MPS ist die CPU die Grenze, nicht die Karte, und
+> die Box hat vier physische Kerne). `-j 3` oben ist trotzdem richtig: bei
+> 9 Läufen ist `ceil(9/4) = ceil(9/3) = 3`, also **exakt gleich schnell** —
+> `sweep.py` weist selbst darauf hin.
+>
+> **Offen, als eigene Achse für später:** Speicher ist hier nicht die Grenze
+> (10.09. gemessen: **0.11 GB von 15.6**, Faktor 100 Luft). Größere Batches
+> kosten fast nichts und machen den Gradienten je Schritt leiser — aber das ist
+> eine **Sweep-Achse**, keine Nebenbei-Änderung, und sie gehört **hinter** O18:
+> solange das Residuum die falsche Gleichung misst, verbessert ein leiserer
+> Gradient nur, wie sauber der falsche Term minimiert wird.
 
 ---
 
