@@ -148,6 +148,40 @@ CP_FLUID = ("Specific Heat Monitor (J/kg-K)", "Specific Heat (J/kg-K)")
 MDOT = ("Fluid Mass Flow Monitor (kg/s)",)
 
 
+def als_konstante(a: np.ndarray) -> float | None:
+    """Konstanter Treiber -> Skalar; sonst ``None``.
+
+    Die Konstant-Treiber-OPs exportieren ihre Sollwerte als eine Zeile oder als
+    eine Reihe aus lauter gleichen Werten. Ein Skalar traegt **keine**
+    Zeitachse, und genau das ist der Punkt: er gilt ueberall und muss nirgends
+    interpoliert werden.
+    """
+    e = a[np.isfinite(a)]
+    if e.size == 0:
+        return None
+    spann = float(e.max() - e.min())
+    mitte = float(e.mean())
+    return mitte if spann <= 1e-9 * max(1.0, abs(mitte)) else None
+
+
+def auf_achse(werte, eigene_achse, ziel):
+    """Eine Groesse auf eine fremde Zeitachse legen.
+
+    ⚠ Jede der fuenf CSVs bringt ihre **eigene** Zeitachse mit, und sie sind
+    nicht gleich lang. Bis zum 22.09. hat dieses Skript an mehreren Stellen
+    stillschweigend angenommen, alles liege auf der Achse von
+    *_Heat Source.csv* -- in Abschnitt 4 ist es daran gefallen
+    (``fp and xp are not of the same length``), in Abschnitt 2 hat es
+    stattdessen still gebroadcastet. Deshalb wird hier nichts mehr angenommen:
+    wer eine Reihe umlegen will, muss ihre Achse nennen.
+    """
+    if np.ndim(werte) == 0:
+        return np.full(np.shape(ziel), float(werte))
+    if eigene_achse is None:
+        raise ValueError("Reihe ohne Zeitachse laesst sich nicht umlegen")
+    return np.interp(ziel, eigene_achse, werte)
+
+
 def repo_root() -> Path:
     return Path(__file__).resolve().parents[2]
 
@@ -305,14 +339,37 @@ def main() -> None:
 
         t_q = pick(ht, TIME, "Zeitachse", files["heat_transfer"])
         q = pick(ht, Q_WALL, "Waermestrom solid->fluid", files["heat_transfer"])
+        # Die Temperaturen haben ihre eigene Achse -- sie ist NICHT die von
+        # *_Heat Source.csv, und t_out wurde bisher so behandelt.
+        t_tm = pick(tm, TIME, "Zeitachse", files["temperaturen"])
         t_out = pick(tm, T_OUT, "Fluid-Auslasstemperatur", files["temperaturen"])
         t_in = pick(tm, T_IN, "Fluid-Einlasstemperatur", files["temperaturen"],
                     required=False)
         t_in_src = "Temperaturen.csv"
+        t_in_ax = t_tm
         if t_in is None:
             t_in = pick(ins, T_IN_SCALAR, "Fluid-Einlasstemperatur",
                         files["input"], required=False)
             t_in_src = "Input Signale.csv" if t_in is not None else "FEHLT"
+            # *_Input Signale.csv fuehrt Sollwerte, keine Zeitreihe -- und
+            # keine Zeitspalte. Ein konstanter Wert braucht auch keine; ein
+            # veraenderlicher ohne Achse ist nicht verwertbar, und das wird
+            # gesagt statt geraten.
+            t_in_ax = pick(ins, TIME, "Zeitachse", files["input"],
+                           required=False)
+            if t_in is not None and t_in_ax is None:
+                k = als_konstante(t_in)
+                if k is None:
+                    sys.exit(
+                        f"\n[{op}] Die Einlasstemperatur aus "
+                        f"{files['input'].name} ist nicht konstant, und die "
+                        "Datei hat keine Zeitspalte.\n"
+                        "  Ohne Achse laesst sie sich nicht auf die anderen "
+                        "Reihen legen -- hier wird nicht geraten.\n"
+                        "  Mit --list-columns nachsehen, wie die Zeitspalte "
+                        "dort heisst, und in TIME nachtragen."
+                    )
+                t_in, t_in_src = k, f"{t_in_src} (konstant)"
         cp = pick(fl, CP_FLUID, "Cp_fluid", files["fluid"])
         mdot = pick(ins, MDOT, "Massenstrom", files["input"])
 
@@ -320,8 +377,8 @@ def main() -> None:
         m_v = float(np.nanmean(mdot))
 
         rows.append(dict(op=op, t=t, jr1=jr1, jr2=jr2, tot=tot, t_q=t_q, q=q,
-                         t_out=t_out, t_in=t_in, t_in_src=t_in_src,
-                         cp=cp_v, mdot=m_v))
+                         t_tm=t_tm, t_out=t_out, t_in=t_in, t_in_ax=t_in_ax,
+                         t_in_src=t_in_src, cp=cp_v, mdot=m_v))
 
     if args.list_columns or not rows:
         return
@@ -378,7 +435,8 @@ def main() -> None:
             continue
         dt_calc = float(np.nanmean(q)) / (r["mdot"] * r["cp"])
         if r["t_in"] is not None:
-            dt_meas = float(np.nanmean(r["t_out"] - r["t_in"]))
+            t_in = auf_achse(r["t_in"], r["t_in_ax"], r["t_tm"])
+            dt_meas = float(np.nanmean(r["t_out"] - t_in))
         else:
             dt_meas = np.nan
         print(f"{r['op']:<6} {r['mdot']:>9.4g} {r['cp']:>9.4g} "
@@ -418,20 +476,27 @@ def main() -> None:
     print("   VORLAEUFIG, solange Punkt 1 offen ist: zaehlt der Monitor beide")
     print("   Platten, ist U hier um Faktor 2 zu hoch. Robust ist das VERHAELTNIS")
     print("   zwischen den Flusslevels, nicht der Absolutwert.")
-    print(f"{'OP':<6} {'V_dot':>7} {'mdot':>9} {'U [W/m2K]':>12}")
+    print(f"{'OP':<6} {'V_dot':>7} {'mdot':>9} {'U [W/m2K]':>12}  "
+          f"{'T_fluid':<12}")
     any_wall = False
     for r in rows:
         Tw, tw = wall_temp_from_cache(r["op"])
         if Tw is None:
             continue
         any_wall = True
-        q = np.interp(tw, r["t_q"], r["q"])
-        tf = np.interp(tw, r["t"] if r["t_in"] is None else r["t"],
-                       r["t_out"] if r["t_in"] is None else r["t_in"])
+        q = auf_achse(r["q"], r["t_q"], tw)
+        # Einlass, wenn es ihn gibt, sonst Auslass -- und es steht in der
+        # Tabelle, welcher es war: U haengt daran, und dT_fluid ist hier
+        # 3.5 ... 8.7 K gross.
+        if r["t_in"] is not None:
+            tf, tf_src = auf_achse(r["t_in"], r["t_in_ax"], tw), "T_in"
+        else:
+            tf, tf_src = auf_achse(r["t_out"], r["t_tm"], tw), "T_out"
         dT = Tw - tf
         ok = np.abs(dT) > 1e-6
         h = np.nanmean(q[ok] / (args.area * dT[ok])) if ok.any() else np.nan
-        print(f"{r['op']:<6} {'':>7} {r['mdot']:>9.4g} {h:>12.2f}")
+        print(f"{r['op']:<6} {'':>7} {r['mdot']:>9.4g} {h:>12.2f}  "
+              f"{tf_src:<12}")
     if not any_wall:
         print("   uebersprungen -- kein data_cache gefunden (braucht T an der Wand)")
     else:
