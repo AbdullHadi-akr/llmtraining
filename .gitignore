@@ -12,8 +12,11 @@
 !README_*.md
 !ARCHITECTURE.md
 
-# Keep the session handover notes tracked
+# Keep the session handover notes tracked. Auch als .md: die Notiz vom 22.09.
+# traegt Tabellen und Verweise, und .txt dafuer zu nehmen waere Formatpflege
+# gegen eine Zeile Allowlist.
 !UEBERGABE_*.txt
+!UEBERGABE_*.md
 
 # Keep training reports tracked
 !TRAININGS_BERICHT_*.md
