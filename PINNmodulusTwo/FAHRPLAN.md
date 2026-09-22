@@ -142,12 +142,15 @@
 >    Prüfen: `pgrep -x nvidia-cuda-mps` (**nicht** `…-control`: `/proc/<pid>/comm`
 >    schneidet bei 15 Zeichen ab).
 >
->    ⚠ §6.4 („MPS dauerhaft machen") sagt
->    `sudo cp PINNmodulusTwo/deploy/nvidia-mps.service …` — **diese Datei liegt
->    nicht im Repo** und kann dort auch nicht liegen: die `.gitignore` ignoriert
->    alles und lässt per Whitelist nur `.py`/`.md` und eine Handvoll Namen
->    durch, `.service` ist nicht darunter. Bis das geklärt ist, bleibt es beim
->    Einzeiler `nvidia-cuda-mps-control -d` nach jedem Neustart.
+>    ✅ **22.09. repariert.** §6.4 („MPS dauerhaft machen") sagte
+>    `sudo cp PINNmodulusTwo/deploy/nvidia-mps.service …`, und **diese Datei gab
+>    es nicht** — die `.gitignore` ignoriert per `*` alles und liess per
+>    Allowlist nur `.py`/`.md` und eine Handvoll Namen durch, `.service` war
+>    nicht darunter. Die Anweisung stand da und lief ins Leere. Jetzt liegt die
+>    Unit im Repo (eine Zeile Allowlist), der `sudo cp` funktioniert wie
+>    geschrieben, und danach überlebt MPS jeden Reboot. **Das ist der Weg —
+>    der Einzeiler `nvidia-cuda-mps-control -d` ist nur noch der Notnagel für
+>    eine Maschine ohne root.**
 > 2. **MPS ist nicht Parallelität.** MPS gehört *immer* an, er kostet auch einen
 >    Einzellauf nichts. Parallel wird nur, was über `-j` an `sweep.py` läuft —
 >    ein einzelner `train.py` ist **ein** Prozess, und die ~7000

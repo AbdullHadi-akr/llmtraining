@@ -231,7 +231,8 @@ Korrektur als Kasten in `PINNmodulusTwo/FAHRPLAN.md`.
 | | |
 |---|---|
 | `A = 0.0206` gegen gemessene `0.0206874` | 0.42 %, unter der Streuung. Nachziehen, wenn `balance_check.py` ohnehin läuft |
-| `deploy/nvidia-mps.service` existiert nicht | `README_GPU_SERVER.md` §6.4 lässt ein `sudo cp` ins Leere laufen |
+| ~~`deploy/nvidia-mps.service` existiert nicht~~ | ✅ **erledigt 22.09.** — Unit liegt im Repo, `.gitignore` um eine Zeile ergänzt, §6.4 funktioniert wie geschrieben. MPS überlebt jetzt den Reboot |
+| `GridCNN` kann nicht parallel | kein `sweep.py`, keine Artefakt-Trennung, `--seeds` dreht keine Schleife. Zwölf Ablationsläufe bleiben seriell, bis der Ladepfad steht. Siehe `GridCNN/FAHRPLAN.md`, Kasten bei der Ablation |
 | Die Legacy-Suite ist rot | `legacy/.../tests`, `PYTHONPATH=src`: **11 failed / 55 passed / 9 skipped** — **vor** dieser Sitzung genauso, per `git stash` nachgeprüft. Läuft in keiner CI-Stufe |
 | `q_source` wird mit `keep` aus `t_fast` indiziert | `data.py:421`. `q_source` liegt auf `t_slow`. Funktioniert nur, solange beide Achsen gleich lang sind — geprüft wird es nicht. Dieselbe Klasse wie 3.1 |
 | OP16 als `U(V̇)`-Gegenprobe | 662 gegen 591, 12 % — die Messung steht aus |

@@ -626,13 +626,34 @@ sudo systemctl enable --now nvidia-mps
 systemctl status nvidia-mps          # "active (running)"
 ```
 
+> **Die Unit liegt seit dem 22.09. wirklich im Repo.** Bis dahin zeigte das
+> `sudo cp` oben ins Leere: `.gitignore` ignoriert per `*` alles und liess nur
+> `.py`/`.md` und eine Handvoll Namen durch, `.service` war nicht dabei. Die
+> Anweisung stand also da und konnte nicht funktionieren. Repariert mit einer
+> Zeile Allowlist (`!PINNmodulusTwo/deploy/nvidia-mps.service`) und der Datei
+> selbst.
+
 Danach ist MPS nach jedem Boot da. Pruefen laesst es sich jederzeit mit
 
 ```bash
+systemctl is-active nvidia-mps                    # "active"
 ls /tmp/nvidia-mps/control && pgrep -x nvidia-cuda-mps
 ```
 
 und `sweep.py` sagt es in Zeile 4 seiner Ausgabe ohnehin von selbst.
+
+**`pgrep -x`, nicht `-f`.** Mit `-f` matcht die pruefende Shell ihr eigenes
+Suchmuster und jede Maschine sieht aus, als haette sie MPS. Ein falsches
+„alles gut" ist schlimmer als keine Pruefung -- es ist genau der stille Faktor
+2.5, den die Pruefung fangen soll. `sweep.py:209` macht es deshalb mit `-x`,
+also gegen den exakten Prozess**namen**.
+
+> **`CUDA_MPS_PIPE_DIRECTORY` nicht verlegen.** `mps_is_running()`
+> (`sweep.py:209`) sucht die Kontroll-Pipe unter dieser Variable und liest sie
+> aus **seiner eigenen** Umgebung, Vorgabe `/tmp/nvidia-mps`. Ein `Environment=`
+> in der Unit gilt nur fuer den Daemon, nicht fuer deine Shell. Ein abweichender
+> Pfad heisst also: MPS laeuft, und die Pruefung meldet trotzdem „kein MPS".
+> Wer ihn wirklich verlegt, setzt ihn in **beiden** Umgebungen.
 
 **MPS schadet kleinen Laeufen nicht.** Es gibt keinen Grund, ihn fuer einen
 einzelnen `train.py`-Aufruf abzuschalten — er kostet dort nichts und ist bei der

@@ -45,6 +45,13 @@
 !PINNmodulusTwo/config.yaml
 !PINNmodulusTwo/requirements-gpu.txt
 
+# Same for the MPS systemd unit. README_GPU_SERVER.md 6.4 says to 'sudo cp' it
+# into /etc/systemd/system/, and until 22.09. the allowlist above made that
+# impossible: the instruction pointed at a file this repo could not carry, so it
+# ran into the void. Vergessener MPS kostet Faktor 2.52, lautlos -- die Unit
+# gehoert also versioniert und nicht in eine Zwischenablage.
+!PINNmodulusTwo/deploy/nvidia-mps.service
+
 # Same for the profile extension (its config.yaml IS the benchmark configuration)
 !PINNmodulusTwoExtProfiles/config.yaml
 

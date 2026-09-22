@@ -558,6 +558,34 @@ Drei Konfigurationen, die sich in genau einer Sache unterscheiden:
 A → B ändert die Architektur bei gleichem Verlust, B → C den Verlust bei
 gleicher Architektur. Jede Differenz ist einem einzigen Eingriff zuzuordnen.
 
+> ### ⚠ Parallel läuft hier **noch nichts** — und das ist eine Bremse, keine Fußnote
+>
+> Vier Arme × mindestens drei Seeds sind **zwölf Läufe**. Das ist genau die
+> Form, für die `PINNmodulusTwo/sweep.py` gebaut wurde und dort **3.69× mit
+> MPS** bringt. Für `GridCNN` steht davon nichts bereit, aus drei Gründen, die
+> alle zuerst wegmüssen:
+>
+> 1. **`GridCNN` hat kein `sweep.py`**, und `PINNmodulusTwo/sweep.py` kann hier
+>    nicht einspringen: `TRAIN_PY = THIS_DIR / "train.py"` zeigt fest auf den
+>    PINN.
+> 2. **Keine Artefakt-Trennung.** `sweep.py` isoliert jeden Lauf über
+>    `--artifacts-dir` *und* `PINN_ART_DIR`. `GridCNN/train.py` hat **weder
+>    noch** — zwölf gleichzeitige Läufe schrieben in dieselben Dateien. Das
+>    scheitert nicht, es mischt.
+> 3. **`--seeds` dreht keine Schleife.** Es ist heute nur eine Warnschwelle
+>    (`if args.seeds < 3: print(...)`, `train.py:604`). Wer `--seeds 3` tippt,
+>    bekommt **einen** Lauf und glaubt, er habe drei — dieselbe Klasse stiller
+>    Zusage wie `xyz = raw[0]` und die Zeitachsen in `balance_check`.
+>
+> **Reihenfolge:** erst der Ladepfad (dann trainiert `train.py` überhaupt),
+> dann Artefakt-Trennung + echte Seed-Schleife, dann erst lohnt ein `-j`.
+> Vorher ist Parallelität hier Bauen auf Sand.
+>
+> **MPS gehört trotzdem an** — er kostet einen Einzellauf nichts und ist dann
+> schon da. Für den Cache-Rebuild ändert er allerdings **gar nichts**: der ist
+> pandas auf CSVs, also CPU und Platte. Dort hilft `generate_cache.py -j`,
+> nicht MPS.
+
 > ### Arm D — neu am 22.09., ✅ gebaut
 >
 > **Die Frage:** README §2b führt als Vorteil des CNN an, dass er Position
@@ -855,6 +883,8 @@ abgefangen, und tote Kanäle werden **gemeldet** statt still zu bleiben.
 | **Physik-Latte** | Stufe 3 mit echter Wand | Wandterm |
 | **`L_wall`** | der einzige Verlustterm mit gemessenem Ziel | Wandterm |
 | **`C_fluid`** | Wärmekapazität des Kühlmittels im Kanal, für den Kapazitätsmodus | liegt nicht vor — **nicht raten** |
+| **Artefakt-Trennung** | `--artifacts-dir` je Lauf, wie `PINNmodulusTwo/train.py` es hat | Ladepfad. Ohne sie ist kein paralleler Sweep möglich: zwölf Läufe schrieben in dieselben Dateien |
+| **Seed-Schleife** | `--seeds` dreht keine; heute nur Warnschwelle (`train.py:604`) | Ladepfad. Bis dahin **lügt der Flag nicht mehr**: die Hilfe sagt es seit dem 22.09. |
 
 ⚠ **Der Löser und das Training laufen heute adiabat.** Der Wandterm ist gebaut
 und getestet, aber ohne die vier Cache-Größen nicht kalibrierbar.

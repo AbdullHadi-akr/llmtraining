@@ -2,8 +2,9 @@
 """Build the .npz OP bundles PINNmodulusTwo trains on.
 
 Usage:
-    python3 PINNmodulusTwo/generate_cache.py --all          # ALLE SIEBZEHN
+    python3 PINNmodulusTwo/generate_cache.py --all           # ALLE SIEBZEHN
     python3 PINNmodulusTwo/generate_cache.py --all --check   # nur pruefen
+    python3 PINNmodulusTwo/generate_cache.py --all -j 4      # vier gleichzeitig
     python3 PINNmodulusTwo/generate_cache.py OP08 OP09       # einzelne OPs
 
 Writes to the top-level ``data_cache/``. The raw-CSV assembly still comes from
@@ -21,11 +22,35 @@ the legacy workflow -- this is the only place the active code depends on it.
     Dateien hat, die ``assemble_op`` braucht -- inklusive der zwei, die mit
     Schema v3 dazugekommen sind (``*_Heat Transfer.csv``,
     ``*_Temperaturen.csv``). Das dauert Sekunden.
+
+``-j``: die siebzehn OPs sind unabhaengig
+-------------------------------------------
+Jeder OP liest seine eigenen CSVs und schreibt seine eigene ``.npz``. Es gibt
+keinen gemeinsamen Zustand, also ist das der billigste Parallelismus im ganzen
+Projekt -- und anders als beim Training auch der wirksamste: das hier ist
+pandas, das CSVs parst, also CPU und Platte, nicht die GPU. ``-j`` ist damit
+**nicht** dasselbe wie das ``-j`` von ``sweep.py``: hier ist weder CUDA noch
+MPS im Spiel, MPS aendert an diesem Lauf nichts.
+
+**Die Vorgabe bleibt seriell (``-j 1``), mit Absicht.** Der Rebuild vom
+22.09. ist der Torlauf von Stufe 2: ``profile_report``, ``coverage_report``
+und ``energy_balance_report`` muessen danach exakt dieselben Zahlen liefern
+wie vorher. Ein Tor prueft man nicht und aendert gleichzeitig, wie gebaut
+wird. Wer ``-j`` setzt, bekommt dieselben Dateien -- die Bundles haengen
+nicht voneinander ab -- aber die Entscheidung gehoert getippt und nicht
+geerbt.
+
+⚠ ``-j`` kostet Arbeitsspeicher: jeder Prozess haelt ein **volles** Bundle,
+  bevor er es schreibt. Auf einer kleinen Box ist ``-j 2`` das Vernuenftige;
+  ``-j 0`` waehlt ``min(4, Kerne/2)``, wie ``sweep.py``.
 """
 
 import argparse
 import dataclasses
+import os
 import sys
+import traceback
+from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 
 # The raw-CSV assembly still lives in the legacy workflow; this is the one place
@@ -111,47 +136,98 @@ def _bericht_pruefung(op_ids) -> bool:
     return False
 
 
-def generate_cache_for_ops(op_ids):
-    """Generate .npz cache files for the given OP IDs."""
+def _baue_einen(op_id: str, output_dir: Path) -> tuple[str, bool, str]:
+    """Einen OP bauen und schreiben. Gibt ``(op_id, ok, Ausgabetext)`` zurueck.
+
+    Gibt den Text **zurueck**, statt ihn zu drucken, damit er unter ``-j`` am
+    Stueck herauskommt. Vier Prozesse, die gleichzeitig in dasselbe stdout
+    schreiben, verschraenken ihre Zeilen -- und ein halber Traceback zwischen
+    zwei fremden Zahlen ist genau die Ausgabe, die man nach zwanzig Minuten
+    nicht mehr lesen kann.
+    """
+    zeilen = [f"\n=== Processing {op_id} ==="]
+    try:
+        # Assemble the OP from raw CSVs
+        bundle = assemble_op(op_id)
+
+        # Compute cache key (bundle is frozen; use dataclasses.replace)
+        cache_key = compute_cache_key(op_id)
+        bundle = dataclasses.replace(bundle, cache_key=cache_key)
+
+        # Save to .npz
+        path = save_bundle(bundle, target_dir=output_dir)
+        zeilen += [
+            f"\u2713 Created: {path}",
+            f"  T shape: {bundle.T.shape}",
+            f"  xyz shape: {bundle.xyz.shape}",
+            f"  t_fast points: {len(bundle.t_fast)}",
+            f"  schema_version: {bundle.schema_version}",
+            # Schema v3: die zwei neuen Reihen mit IHRER Achse, und ob die
+            # Achse zufaellig t_slow ist. Nicht angleichen -- nur zeigen.
+            f"  fluid_props: "
+            f"{dict(zip(bundle.fluid_props_names, bundle.fluid_props[0]))}",
+        ]
+        achsen = bundle.meta.get("wall_ts_axes", {})
+        for name, (times, values) in sorted(bundle.wall_ts.items()):
+            info = achsen.get(name, {})
+            gleich = "= t_slow" if info.get("gleich_t_slow") else "EIGENE Achse"
+            zeilen.append(f"  wall_ts[{name}]: {values.shape[0]} Punkte, {gleich}"
+                          f"  (t_slow: {len(bundle.t_slow)})")
+        return op_id, True, "\n".join(zeilen)
+
+    except Exception as e:                        # noqa: BLE001 - absichtlich
+        zeilen.append(f"\u2717 Error processing {op_id}: {e}")
+        zeilen.append(traceback.format_exc())
+        return op_id, False, "\n".join(zeilen)
+
+
+def generate_cache_for_ops(op_ids, jobs: int = 1):
+    """Generate .npz cache files for the given OP IDs.
+
+    ``jobs=1`` baut seriell und druckt jeden OP, sobald er fertig ist -- bei
+    zehn bis dreissig Minuten Laufzeit will man sehen, dass es vorangeht.
+    ``jobs>1`` verteilt auf Prozesse; jeder Block wird vom Elternprozess am
+    Stueck gedruckt, sobald sein OP fertig ist.
+    """
     # Preferred location: shared and top-level, matching data._CACHE_CANDIDATES.
     output_dir = _PROJECT_ROOT / "data_cache"
     output_dir.mkdir(parents=True, exist_ok=True)
 
+    op_ids = list(op_ids)
+    jobs = max(1, min(int(jobs), len(op_ids)))
+
     gebaut, gescheitert = [], []
-    for op_id in op_ids:
-        print(f"\n=== Processing {op_id} ===")
-        try:
-            # Assemble the OP from raw CSVs
-            bundle = assemble_op(op_id)
 
-            # Compute cache key (bundle is frozen; use dataclasses.replace)
-            cache_key = compute_cache_key(op_id)
-            bundle = dataclasses.replace(bundle, cache_key=cache_key)
+    def verbuchen(op_id: str, ok: bool, text: str) -> None:
+        print(text, flush=True)
+        (gebaut if ok else gescheitert).append(op_id)
 
-            # Save to .npz
-            path = save_bundle(bundle, target_dir=output_dir)
-            print(f"✓ Created: {path}")
-            print(f"  T shape: {bundle.T.shape}")
-            print(f"  xyz shape: {bundle.xyz.shape}")
-            print(f"  t_fast points: {len(bundle.t_fast)}")
-            print(f"  schema_version: {bundle.schema_version}")
-            # Schema v3: die zwei neuen Reihen mit IHRER Achse, und ob die
-            # Achse zufaellig t_slow ist. Nicht angleichen -- nur zeigen.
-            print(f"  fluid_props: {dict(zip(bundle.fluid_props_names, bundle.fluid_props[0]))}")
-            achsen = bundle.meta.get("wall_ts_axes", {})
-            for name, (times, values) in sorted(bundle.wall_ts.items()):
-                info = achsen.get(name, {})
-                gleich = "= t_slow" if info.get("gleich_t_slow") else "EIGENE Achse"
-                print(f"  wall_ts[{name}]: {values.shape[0]} Punkte, {gleich}"
-                      f"  (t_slow: {len(bundle.t_slow)})")
-            gebaut.append(op_id)
+    n_ges = len(op_ids)
+    if jobs == 1:
+        for n, op_id in enumerate(op_ids, start=1):
+            # VOR dem Bau, nicht danach: ein OP kostet Minuten, und ein
+            # stummes Terminal ist bei zehn bis dreissig Minuten Laufzeit
+            # nicht von einem haengenden Prozess zu unterscheiden.
+            print(f"\n[{n}/{n_ges}] {op_id} ...", flush=True)
+            verbuchen(*_baue_einen(op_id, output_dir))
+    else:
+        print(f"-j {jobs}: {n_ges} OPs, {jobs} gleichzeitig. Die Bloecke kommen "
+              f"in der Reihenfolge, in der sie fertig werden.", flush=True)
+        # Prozesse, nicht Threads: assemble_op ist pandas und numpy, und ein
+        # eigener Interpreter je OP ist die einzige Trennung, die auch den
+        # Zustand der Legacy-Module auseinanderhaelt.
+        with ProcessPoolExecutor(max_workers=jobs) as pool:
+            futures = [pool.submit(_baue_einen, op_id, output_dir)
+                       for op_id in op_ids]
+            for n, fut in enumerate(futures, start=1):
+                print(f"\n[{n}/{n_ges}] fertig:", flush=True)
+                verbuchen(*fut.result())
 
-        except Exception as e:
-            print(f"✗ Error processing {op_id}: {e}")
-            import traceback
-            traceback.print_exc()
-            gescheitert.append(op_id)
-
+    # In OP-Reihenfolge, nicht in Fertigstellungsreihenfolge: die Zusammen-
+    # fassung soll zwischen -j 1 und -j 4 vergleichbar bleiben.
+    reihe = {op_id: n for n, op_id in enumerate(op_ids)}
+    gebaut.sort(key=reihe.get)
+    gescheitert.sort(key=reihe.get)
     return gebaut, gescheitert
 
 
@@ -164,6 +240,11 @@ def main() -> int:
                     help=f"alle {len(ALLE_OPS)} OPs: {' '.join(ALLE_OPS)}")
     ap.add_argument("--check", action="store_true",
                     help="nur pruefen, ob alle Dateien da sind -- baut nichts")
+    ap.add_argument("--jobs", "-j", type=int, default=1,
+                    help="OPs gleichzeitig. Vorgabe 1 (seriell), weil der "
+                         "Rebuild ein Torlauf ist. 0 = min(4, Kerne/2). Jeder "
+                         "Prozess haelt ein volles Bundle -- das kostet RAM, "
+                         "nicht GPU: MPS spielt hier keine Rolle")
     args = ap.parse_args()
 
     if args.all and args.ops:
@@ -187,7 +268,8 @@ def main() -> int:
         print("\n--check: es wurde nichts gebaut.")
         return 0
 
-    gebaut, gescheitert = generate_cache_for_ops(ops_to_process)
+    jobs = args.jobs or max(1, min(4, (os.cpu_count() or 2) // 2))
+    gebaut, gescheitert = generate_cache_for_ops(ops_to_process, jobs=jobs)
     print(f"\n{'='*60}")
     print(f"gebaut:      {len(gebaut)}/{len(ops_to_process)}  {' '.join(gebaut)}")
     if gescheitert:
