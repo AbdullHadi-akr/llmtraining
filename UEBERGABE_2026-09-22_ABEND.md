@@ -222,10 +222,18 @@ Der heutige Lauf ist deshalb **adiabat** — eine Ablation, keine Latte.
 * **Die Haltemenge sind zwei OPs.** Die ganze Messung hängt an zwei Zahlen.
   Es gibt drei Test-OPs (OP13, OP15, OP16), auf denen nie ausgewählt wurde —
   sie sind bisher **nie berichtet** worden. Nach Schritt 1 wäre das fällig.
-* **O14, die Envelope-Grenze.** `GridCNN/README.md:903` ordnet OP06s ~6.3 °C
-  als Datenproblem ein: „keine Kühlung bei mittlerer Starttemperatur" kommt im
-  Training nicht vor. Wenn das stimmt, ist der Rest auf OP06 **weder durch
-  Physik noch durch ein größeres Netz** zu holen.
+* **Die zwei Halte-OPs haben verschiedene Krankheiten**, und keine ist eine
+  Architekturfrage. **OP06** leidet an **O14**: bei `V̇ = 0` hört das Training
+  bei 10 °C auf, OP06 sitzt bei 25 °C — 15 K über dem wärmsten gesehenen
+  Nullfluss-Fall. **OP09** leidet an der **T0/T_fluid-Konfundierung**: in allen
+  elf Trainings-OPs ist `T0 = T_fluid`, das Modell kann „kalte Zelle" nicht von
+  „kaltem Kühlmittel" trennen — und OP09 ist genau der Fall, der das verlangt.
+  Beides sind Datenlücken: **weder Physik noch ein größeres Netz holt sie.**
+  Wer ist wer, welche Stufe, warum OP15 der speziellste ist und warum man die
+  Test-OPs **nicht** ins Training ziehen kann →
+  [`GridCNN/README_OPS_STECKBRIEF.md`](GridCNN/README_OPS_STECKBRIEF.md); das
+  Urteil über den Versuchsplan und die Bestellliste →
+  [`GridCNN/README_OPS.md`](GridCNN/README_OPS.md).
 * **Netzgröße.** 11 427 Parameter. Die Präsentation sah 64 × 4 vor
   (137 923). Als Sweep-Achse erreichbar, bisher unberührt.
 

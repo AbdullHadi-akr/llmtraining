@@ -205,9 +205,15 @@ eine Messung zu behaupten.
 3. **Der Wandterm ist nicht verdrahtet.** `q_wall_meas` bleibt `None`,
    `t_in`/`mdot` je Zeitschritt fehlen in `op_tensoren`. Beides liegt seit
    Stufe 2 im Bündel.
-4. **Die Haltemenge sind zwei OPs.** Es gibt drei Test-OPs (OP13, OP15,
-   OP16), auf denen nie ausgewählt wurde — sie sind bisher nie berichtet
-   worden.
+4. **Die Haltemenge sind zwei OPs**, und sie haben **verschiedene
+   Krankheiten**: OP06 eine Envelope-Lücke (O14, bei `V̇ = 0` hört das
+   Training bei 10 °C auf), OP09 die T0/T_fluid-Konfundierung. Eine
+   gemeinsame val-MAE verdeckt das. Steckbriefe, Stufen und das
+   Envelope-Gitter:
+   [`GridCNN/README_OPS_STECKBRIEF.md`](GridCNN/README_OPS_STECKBRIEF.md).
+   Es gibt drei Test-OPs (OP13, OP15, OP16), auf denen nie ausgewählt wurde —
+   sie sind bisher nie berichtet worden, und ins Training ziehen kann man sie
+   nicht, ohne die einzige Evidenz außerhalb des Envelopes zu verlieren.
 5. **Der Plot trägt keine Herkunft.** Welcher Seed, welche Epoche, bestes
    oder letztes Modell? Steht nirgends. Ab jetzt erledigt sich das von
    selbst, weil jeder Lauf sein eigenes Profil druckt.

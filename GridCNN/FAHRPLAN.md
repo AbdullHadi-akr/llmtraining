@@ -113,6 +113,22 @@ Gated auf Schritt 2. Die Frage ist präzise: **holt der dissipative
 Diffusionskern den Pegel zurück?** Messbar an `drift` und `bias`, nicht am
 Mittelwert.
 
+### Und was keiner dieser Schritte holt: die Datenlücken
+
+Bevor jemand Gewichte gegen eine Datenlücke tunt — die beiden Halte-OPs haben
+**verschiedene Krankheiten**, und keine davon ist eine Architekturfrage:
+
+| | leidet an | Behandlung |
+|---|---|---|
+| **OP06** | **O14**: bei `V̇ = 0` hört das Training bei 10 °C auf, OP06 sitzt bei 25 °C | ein neuer Trainings-OP bei `V̇ = 0`, `T0 = 25…30` |
+| **OP09** | **T0/T_fluid-Konfundierung**: in allen elf Trainings-OPs ist `T0 = T_fluid` | ein neuer Lauf mit `T0 = 25`, `T_fluid = 15` |
+
+Wer ist wer, welche Stufe, warum ist OP15 der speziellste von allen und warum
+kann man die Test-OPs **nicht** einfach ins Training ziehen — das steht im
+**[`README_OPS_STECKBRIEF.md`](README_OPS_STECKBRIEF.md)**. Das Urteil über den
+Versuchsplan und die Bestellliste stehen in
+[`README_OPS.md`](README_OPS.md).
+
 ### Parallel, weil Code und kein Lauf: den Wandterm verdrahten
 
 `_wall_ghost` wirft weiterhin — **der genannte Grund war abgestanden.**
