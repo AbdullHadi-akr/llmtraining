@@ -172,23 +172,44 @@ def preflight() -> None:
     )
 
 
+# Linux stores a process name in 16 bytes including the NUL (TASK_COMM_LEN), so
+# /proc/<pid>/comm -- and therefore ``pgrep -x``, which matches against it -- only
+# ever sees the first 15 characters. Both daemon names are longer than that:
+#
+#     nvidia-cuda-mps-control   23 chars  -> comm is "nvidia-cuda-mps"
+#     nvidia-cuda-mps-server    22 chars  -> comm is "nvidia-cuda-mps"
+#
+# ``pgrep -x nvidia-cuda-mps-control`` can therefore NEVER match; pgrep even says
+# so on stderr ("pattern that searches for process name longer than 15 characters
+# will result in zero matches"). Until 14.09. that was exactly what this function
+# asked for, which made the whole fallback dead code -- it worked only because the
+# pipe check above it happened to succeed first.
+_MPS_COMM = "nvidia-cuda-mps"
+
+
 def mps_is_running() -> bool:
-    """Is an MPS control daemon up? Best-effort, never raises."""
+    """Is an MPS control daemon up? Best-effort, never raises.
+
+    Two independent signals, because each one alone can lie:
+
+    * the control pipe under ``CUDA_MPS_PIPE_DIRECTORY`` -- this is what a client
+      actually connects to, so its absence is decisive. Its presence is not: the
+      directory outlives a daemon that died or was killed;
+    * a live process named :data:`_MPS_COMM`.
+
+    ``pgrep -x`` (exact process NAME) rather than ``-f`` (full command line): with
+    ``-f`` the shell running the check matches its own pattern and every machine
+    looks like it has MPS. A false "all good" is worse than no check at all -- it
+    is precisely the silent factor 2.5 this function exists to catch.
+    """
     pipe = Path(os.environ.get("CUDA_MPS_PIPE_DIRECTORY", "/tmp/nvidia-mps"))
     if (pipe / "control").exists():
         return True
-    # ``-x`` (exact process NAME), never ``-f`` (full command line): with -f the
-    # shell that runs the check matches its own pattern and every machine looks
-    # like it has MPS. A false "all good" here is worse than no check at all --
-    # it is precisely the silent factor 2.5 this function exists to catch.
-    for name in ("nvidia-cuda-mps-control", "nvidia-cuda-mps-server"):
-        try:
-            if subprocess.run(["pgrep", "-x", name],
-                              capture_output=True).returncode == 0:
-                return True
-        except OSError:
-            return False
-    return False
+    try:
+        return subprocess.run(["pgrep", "-x", _MPS_COMM],
+                              capture_output=True).returncode == 0
+    except OSError:
+        return False
 
 
 def warn_if_no_mps(jobs: int, passthrough: list[str]) -> None:
