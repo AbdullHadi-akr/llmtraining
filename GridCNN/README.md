@@ -72,9 +72,13 @@ darf nicht als Physik-Latte zitiert werden.**
 
 ## Was als Nächstes zu tun ist, in dieser Reihenfolge
 
-1. **`balance_check.py` ein zweites Mal laufen lassen** — Minuten, nur numpy,
-   braucht die Rohdaten. Klärt `Q_ht/tot` und ob `U(V̇)` über drei Flusslevel
-   auf einer Kurve liegt. Kommandos im [`FAHRPLAN.md`](FAHRPLAN.md) ganz oben.
+1. **`balance_check.py`, Abschnitt 4 nachholen** — Minuten, nur numpy, braucht
+   die Rohdaten. Der Lauf vom 22.09. ist in Abschnitt 1 bis 3 durch:
+   `Q_ht/tot = 0.700 … 0.772` (**nicht** ≈ 1, die Hypothese aus 1a ist
+   widerlegt), Fluidbilanz **1.030 … 1.062** → `ghost_hi` steht, und
+   `tot/jr1 ≈ 3.2` belegt **O17**. Abschnitt 4 — also `U(V̇)` — ist an den
+   Zeitachsen abgestürzt; das Werkzeug ist repariert, der Lauf steht aus.
+   Kommando im [`FAHRPLAN.md`](FAHRPLAN.md) ganz oben.
 2. **Stufe 2, der Cache-Umbau** — vier Spalten mitschreiben, alle siebzehn OPs
    neu bauen (30 min). Danach ist der Wandterm kalibrierbar.
 3. **Den Ladepfad in `train.py` anschließen** und Konfiguration **A** fahren.

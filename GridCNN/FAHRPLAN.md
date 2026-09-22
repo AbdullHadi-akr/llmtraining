@@ -33,21 +33,80 @@ Der Plan ist eine **Leiter mit Toren**, keine gerade Linie. **Ein rotes Tor
 
 ---
 
-## ▶ Das Nächste: `balance_check.py` ein zweites Mal
+## ▶ Das Nächste: Abschnitt 4 nachholen, dann Stufe 2
 
-Der erste Lauf hat drei Dinge geliefert, von denen **zwei einen zweiten Lauf
-brauchen** — an beiden war das Werkzeug schuld, nicht die Daten.
+**Der zweite Lauf ist am 22.09. gefahren** (`10_bilanz.txt`, sieben
+Konstant-Treiber-Trainings-OPs, drei Flusslevel). Abschnitt 1 bis 3 sind
+durch, **Abschnitt 4 ist abgestürzt** — also genau `U(V̇)`, die Frage, für die
+der Lauf gemacht wurde. Wieder das Werkzeug, wieder nicht die Daten; der Fehler
+ist repariert (siehe unten). Es fehlt nur der Wiederholungslauf:
 
 ```bash
-cd /mnt/c/Users/M0245635/batterysurrogatemodell
+cd ~/llmtraining            # nicht der Windows-Pfad; python3 aus modulus_env
 git checkout main && git pull
-
-# Erst einmal die Spaltennamen sehen -- "dT gemessen" kam als nan:
-python3 GridCNN/tools/balance_check.py --ops OP04 --list-columns 2>&1 | tee 09_spalten.txt
-
-# Dann der eigentliche Lauf, jetzt mit DREI Flusslevels statt einem:
-python3 GridCNN/tools/balance_check.py 2>&1 | tee 10_bilanz.txt
+python3 GridCNN/tools/balance_check.py 2>&1 | tee 11_bilanz.txt
 ```
+
+Abschnitt 1–3 kommen dabei unverändert wieder — nachgerechnet, der reparierte
+Pfad gibt in Abschnitt 2 denselben Wert wie der alte. Neu ist Abschnitt 4 und
+eine Spalte `T_fluid`, die mitschreibt, **welche** Fluidtemperatur in `dT`
+steckt.
+
+> ### Was der Lauf vom 22.09. ergeben hat
+>
+> | Abschnitt | | |
+> |---|---|---|
+> | 2 — Fluidbilanz | **1.030 … 1.062** | 🟢 **`ghost_hi` steht.** Kein Halbmodell-Faktor auf dem Fluidpfad. `T_in` kam aus `Input Signale.csv`, wie gebaut |
+> | 1 — `Q_ht/tot` | **0.700 … 0.772** mit Fluss | 🔴 **Die Hypothese aus 1a ist widerlegt** — der Monitor draint **nicht** die ganze Erzeugung |
+> | 1 — `Q_ht/jr1` | **2.286 … 2.566** | 🟡 nahe „beide Platten", aber **nicht konstant** — siehe unten |
+> | 1 — `tot/jr1` | **2.99 … 3.44** | die Zelle erzeugt **gut das Dreifache** einer Rolle |
+> | 4 — `U(V̇)` | **abgestürzt** | offen, der Wiederholungslauf holt es |
+>
+> **Der Befund, der den Plan ändert:** `Q_ht/jr1` **hängt vom Flusslevel ab** —
+> 2.286 / 2.302 / 2.304 bei V̇ = 0.0013 gegen 2.488 / 2.566 bei 0.0026, und
+> 0.334 / 0.336 ohne Fluss. **Ein Konventionsfaktor kann das nicht.** Eine
+> Bezugsfläche ist Geometrie; sie weiß nicht, wie schnell das Kühlmittel
+> fließt. Das Verhältnis ist also **keine Konstante, die man wegdividiert**,
+> sondern zu einem Teil Physik: mehr Kühlung ⇒ mehr abgeführter Anteil.
+>
+> Dasselbe an `Q_ht/tot`: 0.11 ohne Fluss → 0.72 → 0.76. Es **sättigt gegen
+> ~0.8, nicht gegen 1**. Im späten Fenster wird also immer noch gespeichert;
+> die Zelle ist nicht quasistationär, und der Wandmonitor kann die Erzeugung
+> gar nicht ausgleichen.
+>
+> **Was daraus für die Quelle folgt** — und das bleibt stehen, unabhängig vom
+> Faktor: bei `jr2/jr1 = 1.000` und `tot/jr1 ≈ 3.2` liegen rund
+> **ein Drittel bis 40 % der Gesamterzeugung außerhalb der beiden Wickel**
+> (Ableiter, Stromschienen, Kontaktwiderstände). Die Modellquelle `q_dot` deckt
+> nur JR1 ab. Das ist **O17 für `PINNmodulusTwo`** und es ist jetzt belegt,
+> nicht vermutet. Damit `energy_balance_report` es je messen kann, muss
+> `total_w` in **Stufe 2** mit in den Cache.
+>
+> ⚠ **Das Tor „Q halbieren oder A verdoppeln" greift so nicht mehr.** Es setzt
+> voraus, dass `Q_ht/jr1` eine Konstante ist. Ist es nicht. Die Trennung
+> zwischen Konvention und Physik hängt jetzt an Abschnitt 4: **liegt `U` über
+> die drei Flusslevel auf einer Kurve, ist der flussabhängige Teil erklärt**,
+> und was dann an konstantem Faktor übrig bleibt, ist die Konvention.
+
+### Was am Werkzeug diesmal kaputt war
+
+`np.interp(tw, r["t"], r["t_in"])` → `fp and xp are not of the same length`.
+Das Skript liest fünf CSVs je OP und hat die Zeitachse von **zwei** mitgelesen.
+`t_out` (aus `*_Temperaturen.csv`) und `t_in` (aus `*_Input Signale.csv`)
+wurden behandelt, als lägen sie auf der Achse von `*_Heat Source.csv`. `t_in`
+ist dort ein **Skalar** — die Datei führt Sollwerte und hat gar keine
+Zeitspalte.
+
+> **In Abschnitt 2 ist genau das nicht aufgefallen**, weil dort `t_out - t_in`
+> steht und numpy Länge 1 still auf Länge N broadcastet. Die Zahl war richtig,
+> aber aus dem falschen Grund — bei einer *nicht* konstanten Reihe wäre sie
+> still falsch gewesen. **Dieselbe Klasse wie `xyz = raw[0]` in `data.py`:**
+> eine Zusage, die stimmt, die aber niemand prüft.
+>
+> Repariert: `auf_achse()` verlangt, dass man die Achse einer Reihe nennt;
+> ein Skalar trägt keine und gilt überall; eine Reihe **ohne** Achse wird
+> abgelehnt statt geraten. `als_konstante()` prüft den Rückfallwert und bricht
+> ab, wenn er sich doch ändert.
 
 **Was am Werkzeug korrigiert ist:**
 
@@ -166,13 +225,45 @@ Weil OP04 **und** OP05 beide V̇ = 30 fahren. Behoben, siehe „Das Nächste".
 
 ## Das Tor, neu formuliert
 
-| Ergebnis | Folge |
-|---|---|
-| `Q_ht/tot ≈ 1` | 🟢 kein Konventionsfehler. Stattdessen **O17**: die Modellquelle ist unvollständig |
-| `Q_ht/jr1 ≈ 2`, `Q_ht/tot ≉ 1` | 🟡 beide Platten. **Entweder** `Q` halbieren **oder** `A` verdoppeln — nie beides |
-| Fluidbilanz-Verhältnis ≈ 1.0 | 🟢 `ghost_hi` steht |
-| `U` über drei Flusslevel auf einer Kurve | 🟢 `U(V̇)` wird feste Funktion, null freie Parameter |
-| ~~bei ṁ = 0 fließt Energie ab~~ | ~~🔴~~ **gestrichen** — war falsch, siehe 1b |
+| Ergebnis | Folge | gemessen 22.09. |
+|---|---|---|
+| `Q_ht/tot ≈ 1` | 🟢 kein Konventionsfehler. Stattdessen **O17**: die Modellquelle ist unvollständig | **nein** — 0.700 … 0.772 |
+| `Q_ht/jr1 ≈ 2`, `Q_ht/tot ≉ 1` | 🟡 beide Platten. **Entweder** `Q` halbieren **oder** `A` verdoppeln — nie beides | **2.286 … 2.566, flussabhängig** — siehe 1d |
+| Fluidbilanz-Verhältnis ≈ 1.0 | 🟢 `ghost_hi` steht | ✅ **1.030 … 1.062** |
+| `U` über drei Flusslevel auf einer Kurve | 🟢 `U(V̇)` wird feste Funktion, null freie Parameter | *offen* — Abschnitt 4 abgestürzt |
+| ~~bei ṁ = 0 fließt Energie ab~~ | ~~🔴~~ **gestrichen** — war falsch, siehe 1b | — |
+
+## 1d. `Q_ht/jr1` ist keine Konstante — und damit ist das Tor falsch gestellt
+
+Das war am 09.09. nicht sichtbar, weil beide Fluss-OPs dasselbe Level fuhren.
+Mit drei Leveln steht es da:
+
+| V̇ | OPs | `Q_ht/jr1` | `Q_ht/tot` |
+|---|---|---|---|
+| 0 | OP07, OP14 | 0.334 / 0.336 | 0.109 / 0.112 |
+| 0.0013 | OP01–OP03 | 2.286 / 2.302 / 2.304 | 0.709 / 0.739 / 0.700 |
+| 0.0026 | OP04, OP05 | 2.488 / 2.566 | 0.772 / 0.746 |
+
+**Eine Bezugsfläche weiß nicht, wie schnell das Kühlmittel fließt.** Ein
+Konventionsfaktor ist Geometrie und damit konstant; dieses Verhältnis ist es
+nicht. Also steckt Physik darin, und „Q halbieren oder A verdoppeln" —
+beides *konstante* Eingriffe — kann nicht die ganze Antwort sein.
+
+`Q_ht/tot` sättigt sichtbar gegen **~0.8, nicht gegen 1**: auch im späten
+Fenster wird noch gespeichert. Das Fenster ist quasistationär genug für einen
+Vergleich, aber die Zelle ist es nicht — der Wandmonitor *kann* die Erzeugung
+dort gar nicht ausgleichen.
+
+**Was trotzdem feststeht, unabhängig vom Faktor:** `jr2/jr1 = 1.000` und
+`tot/jr1 = 2.99 … 3.44`. Rund **ein Drittel bis 40 % der Gesamterzeugung liegt
+außerhalb der beiden Wickel** — und die Modellquelle `q_dot` deckt nur JR1 ab.
+Das ist **O17** für `PINNmodulusTwo`, jetzt belegt statt vermutet. Messbar wird
+es erst, wenn `total_w` in **Stufe 2** mit in den Cache geht.
+
+**Die Trennung hängt jetzt an Abschnitt 4.** Liegt `U` über die drei
+Flusslevel auf einer Kurve, ist der flussabhängige Teil erklärt; was dann an
+konstantem Faktor übrig bleibt, ist die Konvention. Vorher ist jede Korrektur
+an `Q` oder `A` geraten.
 
 **Blockiert nichts mehr:** `data_raw/` liegt vor.
 
@@ -467,6 +558,9 @@ Damit der Umfang nicht wandert:
 | **22.09.** | **Ablationsarm D gebaut** — `--no-coord-maps`, 42 statt 44 Kanäle, 11 139 Parameter. Sieben Tests, darunter einer, der die fünfzehn Materialkarten bitgleich festhält |
 | **22.09.** | **Die Gittergleichheit ist jetzt geprüft statt angenommen**: `data._assert_shared_geometry` fällt, wenn ein OP eine andere Punktreihenfolge hat. Test in beide Richtungen, mit reiner Zeilenvertauschung |
 | **22.09.** | PR #40 (Achse 1, O18, MPS-Prüfung) in diesen Branch hereingeholt — ein PR statt zwei |
+| **22.09.** | **Stufe 1, zweiter Lauf.** Fluidbilanz **1.030 … 1.062** → `ghost_hi` steht. `Q_ht/tot = 0.700 … 0.772`, **nicht ≈ 1** — die Hypothese aus 1a ist widerlegt. `tot/jr1 = 2.99 … 3.44` belegt **O17** |
+| **22.09.** | **`Q_ht/jr1` ist keine Konstante** — 2.29 bei V̇ = 0.0013 gegen 2.53 bei 0.0026. Eine Bezugsfläche kann nicht flussabhängig sein, also ist das Tor „Q halbieren oder A verdoppeln" falsch gestellt. Siehe 1d |
+| **22.09.** | **`balance_check.py` Abschnitt 4 abgestürzt und repariert:** das Skript las die Zeitachse von zwei der fünf CSVs und legte den Rest stillschweigend darauf. In Abschnitt 2 hat numpy das still gebroadcastet — richtige Zahl, falscher Grund |
 | **22.09.** | Beide fallenden Tests repariert: die float32-Schranke im gepaddeten Rollout (1.2e-6 gegen 1e-6, hielt zufällig) und **`torch.equal` im float64-Vergleich** — Bitgleichheit zwischen zwei Batchgrößen ist durch nichts garantiert und war nicht portabel (lokal grün, auf dem Runner rot). Jetzt beide gegen eine relative Schranke `1e-12` |
 
 ## Stand
@@ -477,12 +571,13 @@ Damit der Umfang nicht wandert:
 | 0 | **gepoolte Ortsstruktur** (90/99/99.9/99.99 %) | **1 / 2 / 4 / 6 Moden** | **09.09.** |
 | 0 | Tor | 🔴 **≤ 5 Moden** — überstimmt, Folge ist 16 × 3 | 09.09. |
 | 1 | `jr2/jr1` | **1.000** — zwei gleiche Wickel | 09.09. |
-| 1 | `Q_ht/jr1` spät, mit Fluss | **≈ 2.5** — weder 1 noch 2, siehe 1a | 09.09. |
-| 1 | `Q_ht/tot` | *offen* — Spalte erst jetzt im Werkzeug | |
-| 1 | Fluidbilanz-Verhältnis | **nan** — `T_in`-Spalte nicht gefunden, behoben | 09.09. |
+| 1 | `Q_ht/jr1` spät, mit Fluss | **2.286 … 2.566** — und **flussabhängig**, also kein Konventionsfaktor. Siehe 1d | **22.09.** |
+| 1 | `Q_ht/tot` | **0.700 … 0.772** mit Fluss, 0.11 ohne — **nicht ≈ 1**. Sättigt gegen ~0.8: es wird noch gespeichert | **22.09.** |
+| 1 | `tot/jr1` | **2.99 … 3.44** — ⅓ bis 40 % der Erzeugung liegt außerhalb der Wickel. **O17 belegt** | **22.09.** |
+| 1 | Fluidbilanz-Verhältnis | ✅ **1.030 … 1.062** — 🟢 `ghost_hi` steht. `T_in` aus `Input Signale.csv` | **22.09.** |
 | 1 | Wandanteil bei ṁ = 0 | **≈ 0.27** — physikalisch richtig (Fluidkapazität), Kriterium war falsch | 09.09. |
 | 1 | `U` mit Fluss / ohne | **~1130 / ~50 W/m²K**, Faktor ~23 — vorläufig, Faktor 2 aus 1a offen | 09.09. |
-| 1 | `U(V̇)` auf einer Kurve? | *offen* — erster Lauf hatte nur zwei Level | |
+| 1 | `U(V̇)` auf einer Kurve? | *offen* — Abschnitt 4 stürzte am 22.09. ab (Zeitachsen), Werkzeug repariert, Lauf steht aus | |
 | 2 | Reports unverändert | | |
 | — | Reshape aus Koordinaten ableitbar und umkehrbar | **ja**, 0.198094368 × 0.104431991 m | 14.09. / korrigiert 22.09. |
 | — | `xyz` über alle siebzehn Cache-OPs identisch | **ja, bitgleich**, gleiche Reihenfolge | 22.09. |
@@ -632,8 +727,10 @@ Anker und beide Lags müssen sehr wohl durchschlagen; und eine Störung der
 
 ## Die nächsten drei Schritte
 
-1. **`balance_check.py` ein zweites Mal** — Minuten, nur numpy. Klärt `Q_ht/tot`
-   und `U(V̇)` über drei Flusslevel.
+1. **`balance_check.py`, Abschnitt 4 nachholen** — Minuten, nur numpy. Der Lauf
+   vom 22.09. hat `Q_ht/tot` geklärt (0.700 … 0.772, **nicht** ≈ 1) und die
+   Fluidbilanz bestätigt (1.030 … 1.062); `U(V̇)` fehlt noch, weil Abschnitt 4
+   an den Zeitachsen abgestürzt ist. Werkzeug repariert, Lauf steht aus.
 2. **Stufe 2, der Cache-Umbau** — danach ist der Wandterm kalibrierbar, die
    Physik-Latte messbar und `L_wall` anschließbar.
 3. **Den Ladepfad in `train.py` anschließen** und Konfiguration **A** als ersten
