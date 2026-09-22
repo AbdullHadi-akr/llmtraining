@@ -4,7 +4,7 @@ Warum diese Datei zuerst kommt
 ------------------------------
 Der ganze Entwurf steht auf einer Behauptung: die 363 Punkte in ``data.OPData``
 bilden ein vollstaendiges ``3 x 11 x 11``-Tensorgitter, identisch ueber alle
-sechzehn Betriebspunkte. Diese Datei **leitet** den Reshape aus den Koordinaten
+siebzehn Betriebspunkte. Diese Datei **leitet** den Reshape aus den Koordinaten
 ab, statt ihn zu raten -- und faellt laut aus, wenn die Annahme nicht traegt.
 Ein stillschweigend verdrehtes Feld waere der teuerste Fehler des Projekts:
 er faellt erst drei Wochen spaeter als "das Netz konvergiert schlecht" auf.
@@ -32,7 +32,7 @@ y/z-Umfang            ``reflect``-Padding. ACHTUNG: das ruht auf einer
 ``reflect`` und nicht ``replicate``
 -----------------------------------
 Weil der Randknoten **auf** der Grenze liegt: das Raster spannt gemessen
-0.198089 x 0.104441 m, der legacy-PINN-README nennt fuer die Zellflaeche
+0.198094368 x 0.104431991 m, der legacy-PINN-README nennt fuer die Zellflaeche
 ``dy=0.198``, ``dz=0.104``. Kante auf Kante.
 
 * ``reflect`` spiegelt *um* den Randknoten, Geist := erster innerer Knoten.

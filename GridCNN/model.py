@@ -86,7 +86,7 @@ CH_IN = CH_STATE + CH_STATIC + CH_DRIVER   # 44
 class StaticMaps:
     """Die 17 ortsfesten Kanaele, einmal je Datensatz gebaut.
 
-    Konstant ueber Zeit **und** ueber alle sechzehn Betriebspunkte -- die
+    Konstant ueber Zeit **und** ueber alle siebzehn Betriebspunkte -- die
     Materialdaten haengen am Layer, nicht am OP. Einmal bauen, durchreichen.
     """
 

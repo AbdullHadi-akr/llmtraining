@@ -52,7 +52,7 @@ sie vorn und nicht am Ende.
 | Datum | 14.09. | — | 14.09. | — |
 
 **Kurzfassung des ersten Laufs.** Die Werkzeugkette trägt: der Reshape wird aus
-den Koordinaten abgeleitet und trifft die echte Geometrie (0.198089 × 0.104441 m,
+den Koordinaten abgeleitet und trifft die echte Geometrie (0.198094368 × 0.104431991 m,
 dx 10.786 / 11.114 mm), beide Randzusagen sind **exakt** null, und die
 Differenzensterne konvergieren (d²/dy², d²/dz² mit Ordnung 1.98; d²/dx² mit
 1.28 auf gestrecktem Gitter, was für den nicht-äquidistanten Dreipunktstern
@@ -78,7 +78,7 @@ Der Wandterm ist gebaut, aber nicht kalibrierbar: `U(V̇)` braucht
 liegen erst nach Stufe 2 im Cache. Bis dahin läuft der Löser **adiabat** — das
 ist eine Ablation, keine Latte, und der Benchmark weist es auch so aus.
 
-*Kosten:* 30 min Cache-Umbau plus Rebuild aller sechzehn OPs.
+*Kosten:* 30 min Cache-Umbau plus Rebuild aller siebzehn OPs.
 *Tor:* `profile_report`, `coverage_report` und `energy_balance_report` müssen
 exakt dieselben Zahlen liefern wie vorher.
 
@@ -171,6 +171,70 @@ Verworfen, weil der ROM gestrichen ist (Fahrplan, 15.09.). Bleibt mit
 Begründung stehen, wie es das Dokument für verworfene Routen vorschreibt — und
 weil sie die Messung ist, die man nachholt, wenn Stufe 4 den CNN nicht trägt.
 
+### R8 · Die zwei Koordinatenkarten — **offen, neu am 22.09.**
+
+README §2b begründet den CNN damit, dass er Position **nicht** auswendig lernen
+*kann* und räumliche Struktur deshalb über die Materialkarten begründen *muss*.
+[`model.py:193`](model.py) gibt ihm die Position trotzdem: zwei z-gescorte
+Koordinatenkarten (`y_map`, `z_map`) unter den 17 statischen Kanälen, mit dem
+Kommentar, ohne sie wäre *„jede Randzelle von jeder Mittelzelle
+ununterscheidbar"*. Beide Texte gehen von derselben Prämisse aus und ziehen den
+entgegengesetzten Schluss.
+
+Am 22.09. am Cache gemessen, was die Materialkarten stattdessen hergeben:
+
+| | |
+|---|---|
+| `region`, `rho`, `Cp` | je x-Ebene **konstant** — in der Ebene strukturlos |
+| `lam_xx/yy/zz` | variabel, aber **99 von 121 Punkten tragen einen Wert**; die Variation sitzt in zwei Zeilen am unteren y-Rand |
+| innerhalb dieses Bandes | **keine räumliche Ordnung** — `lam_xx` springt zwischen Nachbarn 5.18 … 6.31 |
+| Kontrast in der Ebene ÷ zwischen den Ebenen (nach z-Score) | **~1 : 12** |
+| Kanäle, die in der Ebene variieren | **17 von 44** — 9 Zustand, 6 `lam`, 2 Koordinaten |
+
+**Die Messung entscheidet die Frage nicht, sie schärft sie.** Was die
+Materialkarten in der Ebene hergeben, ist im Wesentlichen ein Randband — also
+fast dieselbe Information wie eine geschwellte y-Karte. Ob das Netz ohne die
+Koordinatenkarten auskommt, ist damit eine offene, messbare Frage und kein
+Entwurfsargument mehr.
+
+**Die Route:** ein vierter Ablationsarm **D** = B ohne `y_map`/`z_map`
+(`--no-coord-maps`), zwei Kanäle von 44, sonst identisch. A/B/C berühren die
+Frage nicht — alle drei tragen die Karten.
+
+* **D ≈ B** → der Ortsprior aus §2b ist echt, und der Absatz stimmt.
+* **D deutlich schlechter** → der CNN hat dieselbe Positionskrücke wie das MLP,
+  und §2b beschreibt einen Entwurf, den der Code nicht umsetzt.
+
+*Kosten:* ein Lauf je Seed, kein neuer Code außer dem Flag. Blockiert durch den
+Ladepfad wie A/B/C.
+
+> **Nebenbefund, klein aber gegen die eigene Doktrin:** `rho*Cp` ist auf Ebene 0
+> und 1 bitgleich, die beiden Kanäle sind nach dem z-Score identische
+> Konstanten. Der `dead`-Melder in `build_static_maps` prüft nur auf *global*
+> konstante Größen und sieht Duplikate nicht — obwohl der Modulkopf sagt: *„Ein
+> redundanter Kanal ist bei elf Trajektorien kein harmloser Kanal."*
+
+### R9 · 30 % der Gewichte sind in Schicht 1 flach — **offen, beziffert 22.09.**
+
+27 der 44 Eingangskanäle sind in der Ebene konstant (9 Materialkarten, 18
+gebroadcastete Treiber). Für einen solchen Kanal ist nach `reflect`-Padding nur
+die **Summe** der neun Kernelgewichte identifizierbar; die übrigen acht
+Richtungen sind flach im Verlust.
+
+| | |
+|---|---|
+| Schicht 1 (44 → 16, 3×3) | 6 352 Parameter |
+| davon auf konstanten Kanälen | 27 × 16 × 9 = 3 888 |
+| davon identifizierbar | 27 × 16 = 432 |
+| **flach** | **3 456 = 30.2 % aller 11 427** |
+| effektive Parameterzahl | **≈ 7 971** |
+
+Kein Fehler, aber es verschiebt Tor 0: die 11 427 überzeichnen die Kapazität um
+knapp ein Drittel. Gegen *„vier Moden reichen"* steht ein kleineres Modell, als
+die Zahl behauptet. Ob man daraus etwas macht — FiLM statt Broadcast für die
+Treiber wäre der naheliegende Weg —, ist eine eigene Sweep-Achse und
+ausdrücklich **nicht** Teil von Stufe 4.
+
 ---
 
 ## Was hier nicht hineingehört
@@ -191,6 +255,43 @@ weil sie die Messung ist, die man nachholt, wenn Stufe 4 den CNN nicht trägt.
 ## Lauf-Protokoll
 
 <!-- LAUF-PROTOKOLL -->
+
+### 2026-09-22 — Koordinaten und Materialverteilung, am Cache gemessen
+
+Kein `benchmark.py`-Lauf: die Zahlen kommen von der Maschine mit `data_cache/`
+(siebzehn OPs) und aus den drei Koordinaten-CSVs, die im Repo liegen.
+
+- `OK` **`xyz` über alle siebzehn OPs bitgleich**, gleiche Zeilenreihenfolge,
+  `layer` ebenso. `data.py:653` nahm die Geometrie bisher unbesehen aus
+  `raw[0]` — der Kommentar *„grid identical across OPs"* ist jetzt gemessen.
+  **Gilt nach dem Cache-Umbau von Stufe 2 wieder als ungeprüft.**
+- `OK` **Cache = Legacy-CSVs, exakt.** Spannweite 0.198094368 × 0.104431991 m,
+  `dy = 19.809437 mm`, `dz = 10.443199 mm`, x-Ebenen 0 / 10.785542 / 21.9 mm.
+- `FUND` **Die dokumentierte Spannweite war falsch**: 0.198089 × 0.104441 stand
+  an sieben Stellen und stammt aus keiner der beiden Quellen. Korrigiert.
+  Auf drei Stellen stimmte sie, die Zusage „Kante auf Kante" bleibt gültig.
+- `FUND` **Der Geometrie-Test war zirkulär.** `test_layout_trifft_die_echte_geometrie`
+  prüfte die Konstanten, aus denen `conftest.py` sein Gitter baut. Gegen die
+  echten Koordinaten wären alle vier Vergleiche gefallen (`dx` um 4.6e-7, die
+  Spannweiten um 5.4e-6 / 9.0e-6). Neu:
+  `test_layout_aus_den_echten_koordinaten` liest die CSVs direkt.
+- `WARN` **Äquidistanz hält nur bis float32.** Der Cache speichert `xyz` als
+  float32; die Abstände streuen dadurch um 4e-7 relativ. `grid._uniform` prüft
+  mit `rtol=1e-6`, Reserve **3.7×**. Über `OPData.xn` (nochmals float32, siehe
+  `data.py:604`) sinkt sie auf 2.5×, über die unskalierten `xn` auf 1.8×.
+  → Der Ladepfad soll `derive_layout` mit `bundle.xn` (float64) × `L_ref`
+  füttern, nicht mit `op.xn`.
+- `FUND` **Materialverteilung**: `region`/`rho`/`Cp` je x-Ebene konstant; `lam`
+  variabel, aber nur in zwei Zeilen am unteren y-Rand. Siehe **R8** und **R9**.
+- `OK` `lam_xz`/`lam_yz` sind global null — genau die zwei, die
+  `build_static_maps` von vornherein weglässt. `lam_xy` ist ungleich null
+  **genau auf JR1**, wie der Kommentar dort behauptet. Beides bestätigt.
+- `FUND` Eine float32-Schranke im gepaddeten Rollout-Test (`< 1e-6`) hielt
+  zufällig; der Schwestertest nennt ~8e-6 als normale float32-Abweichung.
+  Jetzt float64 **ohne Toleranz** — dort ist die Differenz exakt null, auch für
+  den gepaddeten OP.
+- **100 Tests grün** (99 + der neue Koordinatentest), 5.3 s, ohne GPU und ohne
+  `data_cache`.
 
 ### 2026-09-14 11:25 UTC — teilweise
 

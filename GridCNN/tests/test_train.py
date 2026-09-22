@@ -400,7 +400,7 @@ def _op_dtype(layout, dtype, seed, n_t=40):
         tn_ic=torch.randn(nx, ny, nz, dtype=dtype), qsrc=q, fo=fo,
         config=torch.randn(n_t, 7, dtype=dtype),
         forcing=torch.randn(n_t, 11, dtype=dtype),
-        dtn=0.01, split_t=30, n_t=n_t)
+        dtn=0.01, split_t=min(30, n_t - 1), n_t=n_t)
 
 
 def test_verschieden_lange_ops_lassen_sich_stapeln(net, op, statics):
@@ -414,13 +414,44 @@ def test_verschieden_lange_ops_lassen_sich_stapeln(net, op, statics):
     assert torch.equal(b.config[1, -1], kurz.config[24])
 
 
-def test_der_kurze_op_rollt_trotzdem_richtig(net, op, statics):
-    """Auffuellen darf den gueltigen Teil des kurzen OP nicht veraendern."""
-    kurz = _op_wie(op, 3, n_t=25)
+def test_der_kurze_op_rollt_trotzdem_richtig(layout, net, op, statics):
+    """Auffuellen darf den gueltigen Teil des kurzen OP nicht veraendern.
+
+    Geprueft wird wie beim Schwestertest oben: **float64, ohne Toleranz**, und
+    daneben die float32-Groessenordnung.
+
+    ⚠ Bis zum 22.09. stand hier nur ein float32-Vergleich gegen ``< 1e-6``.
+    Diese Schranke widersprach dem Test daneben, der ~8e-6 als die normale
+    float32-Abweichung ausweist -- sie hielt bei 1.2e-6 rein zufaellig. Als in
+    ``conftest.py`` ``dy``/``dz`` auf die gemessenen Werte korrigiert wurden,
+    stieg die Abweichung auf 1.9e-6 und der Test fiel, obwohl sich am Verhalten
+    nichts geaendert hatte. Eine Schranke, die auf eine Korrektur in der
+    fuenften Stelle der Gitterweite reagiert, misst Rundung und nicht Padding.
+
+    In float64 ist die Differenz **exakt null**, auch fuer den gepaddeten OP.
+    """
+    d = torch.float64
+    torch.manual_seed(0)
+    netz = M.GridCNN(layout).to(d)
+    with torch.no_grad():
+        netz.correction.head.weight.normal_(0.0, 0.05)
+    stat64 = _statics_dtype(layout, d)
+    lang64 = _op_dtype(layout, d, 0)
+    kurz64 = _op_dtype(layout, d, 3, n_t=25)
     kw = dict(lag1=5, lag2=20)
-    allein = T.rollout(net, kurz, statics, **kw)[0]
-    zusammen, _ = T.rollout_batched(net, T.stack_ops([op, kurz]), statics, **kw)
-    assert float((zusammen[:25, 1] - allein).abs().max()) < 1e-6
+
+    allein = T.rollout(netz, kurz64, stat64, **kw)[0]
+    zusammen, _ = T.rollout_batched(
+        netz, T.stack_ops([lang64, kurz64]), stat64, **kw)
+    assert torch.equal(zusammen[:25, 1], allein)
+
+    # Die Gegenprobe in float32: gross genug, um sie zu bemerken, aber im
+    # Rundungsrauschen -- dieselbe Schranke wie beim Schwestertest.
+    kurz32 = _op_wie(op, 3, n_t=25)
+    allein32 = T.rollout(net, kurz32, statics, **kw)[0]
+    zus32, _ = T.rollout_batched(net, T.stack_ops([op, kurz32]), statics, **kw)
+    abw = float((zus32[:25, 1] - allein32).abs().max())
+    assert abw < 1e-4, f"float32-Abweichung {abw} ist zu gross fuer Rundung"
 
 
 def test_verschiedene_zeitschritte_fallen_laut_aus(op):

@@ -9,6 +9,9 @@ nicht in die Kanaele zu legen, waere weg.
 
 from __future__ import annotations
 
+import csv
+from pathlib import Path
+
 import numpy as np
 import pytest
 import torch
@@ -27,13 +30,59 @@ def test_layout_trifft_die_echte_geometrie(layout):
     # Die 3 % Unterschied in x sind der Grund fuer die nicht-aequidistante
     # Zweite-Ableitungs-Formel in physics.py. Faellt der Test, ist entweder das
     # Gitter ein anderes oder die Formel unnoetig -- beides will man wissen.
-    np.testing.assert_allclose(layout.dx, [0.010786, 0.011114], atol=1e-9)
+    np.testing.assert_allclose(layout.dx, [0.010785542, 0.011114458], atol=1e-9)
     assert abs(layout.dx[1] / layout.dx[0] - 1.0) > 0.02
 
     # Kante auf Kante: das Raster spannt die Zellflaeche, nicht irgendetwas
     # darin. Der legacy-README nennt dy=0.198, dz=0.104.
-    assert layout.yu[-1] - layout.yu[0] == pytest.approx(0.198089, abs=1e-6)
-    assert layout.zu[-1] - layout.zu[0] == pytest.approx(0.104441, abs=1e-6)
+    #
+    # ⚠ Dieser Test allein beweist das NICHT -- er prueft Konstanten, aus denen
+    # die Fixture ihr Gitter baut, und kann deshalb nicht fallen. Bis zum 22.09.
+    # standen hier 0.198089 / 0.104441, und niemand hat es gemerkt. Der Beweis
+    # steht in ``test_layout_aus_den_echten_koordinaten`` darunter.
+    assert layout.yu[-1] - layout.yu[0] == pytest.approx(0.198094368, abs=1e-6)
+    assert layout.zu[-1] - layout.zu[0] == pytest.approx(0.104431991, abs=1e-6)
+
+
+def test_layout_aus_den_echten_koordinaten():
+    """Der Reshape gegen die ECHTEN Koordinaten, nicht gegen die Fixture.
+
+    Der Test darueber prueft die Fixture gegen sich selbst. Dieser hier liest
+    die drei CSVs, die im Repo liegen, und ist damit die einzige Stelle, an der
+    die Geometrie ueberhaupt falsifizierbar ist. Er braucht keinen
+    ``data_cache`` -- die Dateien sind Repo-Inhalt und in ``git`` verfolgt.
+
+    Gemessen am 22.09.: die Cache-Koordinaten aller siebzehn OPs sind mit diesen
+    CSVs identisch, der Cache traegt sie also unveraendert weiter.
+    """
+    coords = (Path(__file__).resolve().parents[2]
+              / "legacy" / "battery_surrogate_agenticWorkflow" / "coordinates")
+    punkte = []
+    for name in ("Cell Center", "JR1 Center", "Gehäusewand"):
+        datei = coords / f"Coordinates - Grid {name}.csv"
+        if not datei.exists():
+            raise AssertionError(
+                f"{datei} fehlt. Sie ist in git verfolgt und die einzige "
+                f"Quelle, gegen die die Geometrie pruefbar ist -- ohne sie "
+                f"prueft die Fixture nur sich selbst."
+            )
+        with datei.open(encoding="utf-8-sig") as fh:
+            reader = csv.reader(fh)
+            next(reader)
+            punkte += [tuple(float(v) for v in zeile[:3])
+                       for zeile in reader if zeile]
+
+    layout = gridmod.derive_layout(np.asarray(punkte, dtype=np.float64))
+
+    assert layout.shape == (3, NY, NZ)
+    assert layout.n_points == 363
+    np.testing.assert_allclose(layout.xu, X_PLANES, atol=1e-9)
+    np.testing.assert_allclose(layout.dx, [0.010785542, 0.011114458], atol=1e-9)
+    # Dieselben Zahlen wie oben -- aber hier gemessen statt gesetzt.
+    assert layout.yu[-1] - layout.yu[0] == pytest.approx(0.198094368, abs=1e-8)
+    assert layout.zu[-1] - layout.zu[0] == pytest.approx(0.104431991, abs=1e-8)
+    assert layout.dy == pytest.approx(DY, rel=1e-6)
+    assert layout.dz == pytest.approx(DZ, rel=1e-6)
 
 
 def test_luecken_im_raster_fallen_auf():
