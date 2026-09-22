@@ -37,6 +37,52 @@ INPUTSIGNALE_COLUMN_ALIASES: dict[str, str] = {
     "Solid Initial Temperature Monitor": "solid_initial_temp",
 }
 
+# --- Schema v3: der Wandpfad -------------------------------------------------
+# Die Namen sind nicht geraten. Sie stammen aus GridCNN/tools/balance_check.py,
+# das am 22.09. gegen die echten Exporte aller sieben Konstant-Treiber-OPs
+# gelaufen ist -- dieselben Kandidatenlisten, dieselbe Reihenfolge. Jeder
+# Eintrag hat dort getroffen; die zweite Variante ist der Export ohne
+# "Monitor" im Namen.
+#
+# WARUM sie in den Cache muessen: ohne q_solid_to_fluid und fluid_out_temp ist
+# der Wandterm nicht an die gemessene Waerme anschliessbar -- L_wall ist der
+# einzige Verlustterm mit einem gemessenen Ziel. Siehe GridCNN/FAHRPLAN.md,
+# Stufe 2.
+TIME_COLUMN: tuple[str, ...] = ("Physical Time (s)",)
+
+HEAT_TRANSFER_COLUMNS: dict[str, tuple[str, ...]] = {
+    "q_solid_to_fluid": (
+        "Heat Transfer: solid to fluid Monitor (W)",
+        "Heat Transfer: solid to fluid (W)",
+    ),
+}
+
+TEMPERATUREN_COLUMNS: dict[str, tuple[str, ...]] = {
+    "fluid_out_temp": (
+        "Tmfavg_fluid_out Monitor (C)",
+        "Tmfavg_fluid_out (C)",
+    ),
+}
+
+# ``*_Fluidstoffwerte.csv`` wurde bis v2 POSITIONELL gelesen -- die ersten drei
+# numerischen Spalten, und der Vertrag riet ihre Bedeutung ("typically density,
+# specific heat, thermal conductivity"). Gemessen am 22.09. stehen sie in der
+# Reihenfolge Conductivity, Density, Specific Heat; die Vermutung war also
+# falsch. Ab v3 werden die Spalten benannt mitgeschrieben, damit niemand mehr
+# raten muss, welche Zahl welche ist.
+FLUID_PROP_COLUMNS: dict[str, tuple[str, ...]] = {
+    "conductivity": (
+        "Conductivity Monitor (W/m-K)", "Conductivity (W/m-K)",
+    ),
+    "density": (
+        "Density Monitor (kg/m^3)", "Density (kg/m^3)",
+    ),
+    "cp_fluid": (
+        "Specific Heat Monitor (J/kg-K)", "Specific Heat (J/kg-K)",
+    ),
+}
+
+
 PROFILE_CHANNELS: tuple[str, ...] = (
     "cell_current",
     "fluid_inlet_temp",

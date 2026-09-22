@@ -10,6 +10,15 @@ import numpy as np
 import pytest
 
 from battery_surrogate.data.assemble import assemble_op
+
+
+def _erwartete_schema_version() -> int:
+    """Die Version, die build.yaml ansagt -- die einzige Quelle dafuer."""
+    import yaml
+    from battery_surrogate.data.paths import build_config_path
+
+    return int(yaml.safe_load(
+        build_config_path().read_text(encoding="utf-8"))["schema_version"])
 from battery_surrogate.data.cache import (
     compute_cache_key,
     load_bundle,
@@ -64,7 +73,18 @@ class TestOP01Assembly:
 
         bundle = assemble_op("OP01")
         assert bundle.op_id == "OP01"
-        assert bundle.schema_version == 2
+        # Die Version kommt aus build.yaml und wird dort gehoben (v3 am 22.09.
+        # fuer den Wandpfad). Sie hier festzunageln hiesse, den Test bei jedem
+        # Schema-Bump zu brechen -- gegen build.yaml zu pruefen ist dieselbe
+        # Zusage, nur ohne die Wartung.
+        assert bundle.schema_version == _erwartete_schema_version()
+        # Ab v3 traegt das Bundle den Wandpfad. Ohne ihn ist L_wall nicht
+        # anschliessbar; siehe GridCNN/FAHRPLAN.md, Stufe 2.
+        if bundle.schema_version >= 3:
+            assert set(bundle.wall_ts) >= {"q_solid_to_fluid", "fluid_out_temp"}
+            assert bundle.fluid_props_names, "v3 liest fluid_props benannt"
+            for name, (times, values) in bundle.wall_ts.items():
+                assert times.shape == values.shape, name
         assert len(bundle.t_fast) > 0
         assert bundle.T.shape[0] == len(bundle.t_fast), "T time dimension matches t_fast"
         assert bundle.T.shape[1] == len(bundle.xyz), "T sensor dimension matches xyz"
