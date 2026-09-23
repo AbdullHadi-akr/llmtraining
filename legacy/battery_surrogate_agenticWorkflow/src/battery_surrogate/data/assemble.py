@@ -25,9 +25,11 @@ from .raw_readers import (
     read_batemo_fmu1,
     read_fluidstoffwerte,
     read_heat_source,
+    read_heat_transfer,
     read_inputsignale,
     read_module_test_data,
     read_t_grid,
+    read_temperaturen,
     read_time_series_input,
 )
 from .time_axes import as_float32_axis, is_strictly_increasing
@@ -95,10 +97,22 @@ def assemble_op(op_id: str, root: Path | None = None) -> OpBundle:
     xyz, layer, sensor_id = read_coordinates()
     fmu1 = read_batemo_fmu1(_single_glob(op_dir, "*_Batemo FMU1.csv"), encoding=encoding)
     heat_source = read_heat_source(_single_glob(op_dir, "*_Heat Source.csv"), encoding=encoding)
-    fluid_props = read_fluidstoffwerte(
+    fluid_props, fluid_props_names = read_fluidstoffwerte(
         _single_glob(op_dir, "*_Fluidstoffwerte.csv"),
         encoding=encoding,
     )
+
+    # --- Schema v3: der Wandpfad ---------------------------------------------
+    # q_solid_to_fluid und fluid_out_temp sind die zwei Groessen, ohne die der
+    # Wandterm nicht an die gemessene Waerme anschliessbar ist (GridCNN
+    # FAHRPLAN, Stufe 2). mdot steckt schon als Kanal "fluid_mass_flow" in
+    # sim_config, cp_fluid in fluid_props, total_w in q_source[:, 2] -- diese
+    # drei mussten NICHT dazu, das ist am 22.09. nachgesehen worden.
+    wall_ts: dict[str, tuple[np.ndarray, np.ndarray]] = {}
+    wall_ts.update(read_heat_transfer(
+        _single_glob(op_dir, "*_Heat Transfer.csv"), encoding=encoding))
+    wall_ts.update(read_temperaturen(
+        _single_glob(op_dir, "*_Temperaturen.csv"), encoding=encoding))
 
     t_fast = as_float32_axis(fmu1["physical_time_s"].to_numpy())
     t_slow = as_float32_axis(heat_source["physical_time_s"].to_numpy())
@@ -248,6 +262,23 @@ def assemble_op(op_id: str, root: Path | None = None) -> OpBundle:
         "c_rate": resolved_c_rate,
         "source_file_hashes": {},
         "schema_version": schema_version,
+        # Welche Reihe auf welcher Achse liegt, und ob diese Achse mit t_slow
+        # zusammenfaellt. NICHT angleichen -- nur festhalten. Wer die Reihen
+        # zusammenbringt, soll das sichtbar tun.
+        "wall_ts_names": sorted(wall_ts),
+        "wall_ts_axes": {
+            name: {
+                "n": int(times.shape[0]),
+                "t0": float(times[0]) if times.size else None,
+                "t1": float(times[-1]) if times.size else None,
+                "gleich_t_slow": bool(
+                    times.shape == t_slow.shape
+                    and np.array_equal(times.astype(np.float32), t_slow)
+                ),
+            }
+            for name, (times, _values) in sorted(wall_ts.items())
+        },
+        "fluid_props_names": list(fluid_props_names),
     }
 
     accounted = set(scalar_names) | set(sim_config_ts) | set(derived)
@@ -271,6 +302,8 @@ def assemble_op(op_id: str, root: Path | None = None) -> OpBundle:
         layer=layer,
         sensor_id=sensor_id,
         fluid_props=fluid_props,
+        fluid_props_names=fluid_props_names,
+        wall_ts=wall_ts,
         sim_config_scalar=np.asarray(scalar_values, dtype=np.float32),
         sim_config_scalar_names=tuple(scalar_names),
         sim_config_ts=sim_config_ts,

@@ -1,0 +1,277 @@
+!! --seeds < 3. Ein Seed ist keine Streuung: die gemessene Seed-Streuung ist 0.518 / 0.882 C, auf OP06 bis 1.63 C. Ein Vergleich zweier Konfigurationen braucht eine Seed-Schleife.
+[device] cuda:0 Tesla T4  14.6 GiB  sm_75  torch=2.6.0+cu124 cuda=12.4
+[t4] cudnn.benchmark an (feste Eingangsformen). TF32 NICHT gesetzt: das ist Ampere und neuer, die T4 ist Turing (sm_75).
+[konfiguration] A (Blackbox, ohne Physik in der Architektur)
+[protokoll] k=2->8 clip=1 lr=0.001/cosine inner=4x32 subsample=10
+[lags] lag1=1 (1 s), lag2=4 (4 s) bei dt=1 s [aus der Zeit]
+[modell] 17 statische Karten -> 44 Eingangskanaele, width=16 blocks=3
+[wand] AUS -- dieser Lauf ist adiabat. Das ist eine ABLATION, keine Latte, und darf auch nicht als eine zitiert werden (FAHRPLAN, 'Was fehlt').
+[daten] 11 Trainings-OPs, 2 Halte-OPs, subsample=10 -> dt_n=0.000623053, 2.7s
+[gitter] 3 x 11 x 11 = 363 Punkte
+[normierung] T_mu=32.99 T_sigma=9.605 C L_ref=0.0768039 m T_span_ref=1605 s
+!! [CFL] dt_n=0.000623053 (1 s) liegt 551.3x UEBER der expliziten Schranke dt_max_n=1.13012e-06 (0.001814 s).
+   Laeuft der Rollout weg, ist DAS die erste Erklaerung -- nicht das Netz. Kleineres --subsample, oder pruefen, ob die Materialdaten echt sind: ein synthetisches material_properties/ macht das Problem viel steifer, als es ist. Arm A (--no-physics) ist davon nicht betroffen.
+[latten] was OHNE Modell erreichbar ist (val-MAE in C):
+           OP06: Mittelwert-Vorhersage 10.7995   Persistenz T(t)=T(0) 16.6699   -> Latte 10.7995
+           OP09: Mittelwert-Vorhersage 7.7663   Persistenz T(t)=T(0) 18.5408   -> Latte 7.7663
+           Wer die nicht unterbietet, hat nichts gelernt.
+[clamp] auto = ceil(3 x max|tn|=3.435) = 11  (±106 C um T_mu; die Labels reichen bis ±33.0 C)
+
+[seed 0] 11427 Parameter -> /tmp/poc_smoke/A/seed0
+[seed 0] ep    1 | k   2 | data 2.0782 | phys   --   | wall   --   | Streuung Ort 0.000 Zeit 0.000 | |g| 0.331 | 1.8s
+[seed 0]      val-MAE OP06 52.8775 (4.90x Latte ⚠)  OP09 52.3598 (6.74x Latte ⚠)  (Mittel 52.6187 C)  <- bestes bisher
+[seed 0] ep    2 | k   8 | data 35.459 | phys   --   | wall   --   | Streuung Ort 1.119 Zeit 2.463 | |g| 7.81 | 1.7s
+[seed 0]      val-MAE OP06 15.5219 (1.44x Latte ⚠)  OP09 9.8176 (1.26x Latte ⚠)  (Mittel 12.6698 C)  <- bestes bisher
+[seed 0] ep    3 | k   8 | data 1.2844 | phys   --   | wall   --   | Streuung Ort 3.004 Zeit 0.756 | |g| 2.68 | 1.7s
+[seed 0]      val-MAE OP06 39.6392 (3.67x Latte ⚠)  OP09 31.7000 (4.08x Latte ⚠)  (Mittel 35.6696 C)
+[seed 0] BERICHTET (Median ueber die letzten 1 von 3 Messpunkten): OP06 39.6392 (3.67x Latte ⚠)  OP09 31.7000 (4.08x Latte ⚠)
+[seed 0]   bestes  ep 2: OP06 15.5219  OP09 9.8176   <- auf der Haltemenge ausgewaehlt, also optimistisch
+[seed 0]   letztes ep 3: OP06 39.6392  OP09 31.7000   <- eine Lotterie, nicht ablesen (FAHRPLAN)
+
+======================================================================
+A (Blackbox, ohne Physik in der Architektur)  --  1 Seed(s), 3 Epochen
+Protokoll: k=2->8 clip=1 lr=0.001/cosine inner=4x32 subsample=10
+Berichtet ist je Seed der Median ueber das letzte Drittel der Messpunkte.
+  val-MAE OP06: 39.6392 +- nan C   (39.6392)
+      triviale Latte 10.7995 C (Mittelwert 10.7995 / Persistenz 16.6699) -- 0/1 Seed(s) unterbieten sie  ⚠ KEINER
+  val-MAE OP09: 31.7000 +- nan C   (31.7000)
+      triviale Latte 7.7663 C (Mittelwert 7.7663 / Persistenz 18.5408) -- 0/1 Seed(s) unterbieten sie  ⚠ KEINER
+
+----------------------------------------------------------------------
+[verdikt] Guete = val-MAE / beste triviale Latte. < 1.00 heisst gelernt.
+          OP06  3.67x   0/1 Seed(s) unter der Latte   Seed-Streuung nan C
+          OP09  4.08x   0/1 Seed(s) unter der Latte   Seed-Streuung nan C
+          ERGEBNIS, aber ein negatives: mindestens ein OP liegt auf oder ueber der Latte. Dort hat das Modell nichts gelernt, was ueber Raten hinausgeht -- und die Streuung ist lesbar, der Befund also echt.
+  ⚠ unter drei Seeds ist das +- keine Streuung, sondern Zierde.
+  -> /tmp/poc_smoke/A/zusammenfassung.json
+[device] cuda:0 Tesla T4  14.6 GiB  sm_75  torch=2.6.0+cu124 cuda=12.4
+[t4] cudnn.benchmark an (feste Eingangsformen). TF32 NICHT gesetzt: das ist Ampere und neuer, die T4 ist Turing (sm_75).
+[konfiguration] A (Blackbox, ohne Physik in der Architektur)
+[protokoll] k=4->16 clip=1 lr=0.001/cosine inner=25x32 subsample=10
+[lags] lag1=1 (1 s), lag2=4 (4 s) bei dt=1 s [aus der Zeit]
+[modell] 17 statische Karten -> 44 Eingangskanaele, width=16 blocks=3
+[wand] AUS -- dieser Lauf ist adiabat. Das ist eine ABLATION, keine Latte, und darf auch nicht als eine zitiert werden (FAHRPLAN, 'Was fehlt').
+[daten] 11 Trainings-OPs, 2 Halte-OPs, subsample=10 -> dt_n=0.000623053, 2.7s
+[gitter] 3 x 11 x 11 = 363 Punkte
+[normierung] T_mu=32.99 T_sigma=9.605 C L_ref=0.0768039 m T_span_ref=1605 s
+!! [CFL] dt_n=0.000623053 (1 s) liegt 551.3x UEBER der expliziten Schranke dt_max_n=1.13012e-06 (0.001814 s).
+   Laeuft der Rollout weg, ist DAS die erste Erklaerung -- nicht das Netz. Kleineres --subsample, oder pruefen, ob die Materialdaten echt sind: ein synthetisches material_properties/ macht das Problem viel steifer, als es ist. Arm A (--no-physics) ist davon nicht betroffen.
+[latten] was OHNE Modell erreichbar ist (val-MAE in C):
+           OP06: Mittelwert-Vorhersage 10.7995   Persistenz T(t)=T(0) 16.6699   -> Latte 10.7995
+           OP09: Mittelwert-Vorhersage 7.7663   Persistenz T(t)=T(0) 18.5408   -> Latte 7.7663
+           Wer die nicht unterbietet, hat nichts gelernt.
+[clamp] auto = ceil(3 x max|tn|=3.435) = 11  (±106 C um T_mu; die Labels reichen bis ±33.0 C)
+
+[seed 0] 11427 Parameter -> GridCNN/artifacts/A/seed0
+[seed 0] ep    1 | k   4 | data 0.68176 | phys   --   | wall   --   | Streuung Ort 0.000 Zeit 0.000 | |g| 0.904 | 3.7s
+[seed 0]      val-MAE OP06 7.3895 (0.68x Latte)  OP09 8.5144 (1.10x Latte ⚠)  (Mittel 7.9519 C)  <- bestes bisher
+[seed 0] ep    2 | k   4 | data 0.71699 | phys   --   | wall   --   | Streuung Ort 1.582 Zeit 1.027 | |g| 0.983 | 3.2s
+[seed 0]      val-MAE OP06 88.8841 (8.23x Latte ⚠)  OP09 84.5702 (10.89x Latte ⚠)  (Mittel 86.7272 C)
+[seed 0] ep    3 | k   5 | data 10.649 | phys   --   | wall   --   | Streuung Ort 34.964 Zeit 4.396 | |g| 10.9 | 3.6s | [SATURATED] 7628/17655 = 43.2%
+[seed 0] ep    4 | k   5 | data 19.119 | phys   --   | wall   --   | Streuung Ort 16.448 Zeit 1.378 | |g| 0.206 | 3.5s | [SATURATED] 4671/17655 = 26.5%
+[seed 0]      val-MAE OP06 12.9808 (1.20x Latte ⚠)  OP09 14.8574 (1.91x Latte ⚠)  (Mittel 13.9191 C)
+[seed 0] ep    5 | k   5 | data 1.2417 | phys   --   | wall   --   | Streuung Ort 3.774 Zeit 0.663 | |g| 1.09 | 3.5s
+[seed 0] ep    6 | k   6 | data 12.924 | phys   --   | wall   --   | Streuung Ort 39.107 Zeit 3.222 | |g| 13.9 | 4.0s | [SATURATED] 16970/17655 = 96.1%
+[seed 0]      val-MAE OP06 8.8018 (0.82x Latte)  OP09 11.7698 (1.52x Latte ⚠)  (Mittel 10.2858 C)
+[seed 0] ep    7 | k   6 | data 2.4312 | phys   --   | wall   --   | Streuung Ort 3.616 Zeit 0.866 | |g| 0.0511 | 4.0s
+[seed 0] ep    8 | k   7 | data 0.53193 | phys   --   | wall   --   | Streuung Ort 2.962 Zeit 0.565 | |g| 0.672 | 4.4s
+[seed 0]      val-MAE OP06 15.7506 (1.46x Latte ⚠)  OP09 17.9407 (2.31x Latte ⚠)  (Mittel 16.8456 C)
+[seed 0] ep    9 | k   7 | data 0.95022 | phys   --   | wall   --   | Streuung Ort 7.607 Zeit 1.120 | |g| 1.6 | 4.4s
+[seed 0] ep   10 | k   8 | data 0.53402 | phys   --   | wall   --   | Streuung Ort 7.331 Zeit 1.870 | |g| 1.32 | 4.8s
+[seed 0]      val-MAE OP06 11.3027 (1.05x Latte ⚠)  OP09 11.4471 (1.47x Latte ⚠)  (Mittel 11.3749 C)
+[seed 0] ep   11 | k   8 | data 0.35786 | phys   --   | wall   --   | Streuung Ort 5.180 Zeit 0.791 | |g| 0.804 | 4.8s
+[seed 0] ep   12 | k   9 | data 0.34466 | phys   --   | wall   --   | Streuung Ort 1.211 Zeit 0.749 | |g| 0.661 | 5.2s
+[seed 0]      val-MAE OP06 9.9411 (0.92x Latte)  OP09 8.0286 (1.03x Latte ⚠)  (Mittel 8.9849 C)
+[seed 0] ep   13 | k  10 | data 0.29077 | phys   --   | wall   --   | Streuung Ort 2.295 Zeit 0.515 | |g| 0.397 | 5.7s
+[seed 0] ep   14 | k  10 | data 0.30627 | phys   --   | wall   --   | Streuung Ort 1.151 Zeit 0.626 | |g| 0.416 | 5.7s
+[seed 0]      val-MAE OP06 9.0134 (0.83x Latte)  OP09 7.1488 (0.92x Latte)  (Mittel 8.0811 C)
+[seed 0] ep   15 | k  11 | data 0.26153 | phys   --   | wall   --   | Streuung Ort 1.431 Zeit 0.647 | |g| 0.474 | 6.1s
+[seed 0] ep   16 | k  12 | data 0.2266 | phys   --   | wall   --   | Streuung Ort 1.405 Zeit 0.503 | |g| 0.337 | 6.5s
+[seed 0]      val-MAE OP06 8.3391 (0.77x Latte)  OP09 6.5619 (0.84x Latte)  (Mittel 7.4505 C)  <- bestes bisher
+[seed 0] ep   17 | k  13 | data 0.18608 | phys   --   | wall   --   | Streuung Ort 1.536 Zeit 0.632 | |g| 0.309 | 6.9s
+[seed 0] ep   18 | k  14 | data 0.21117 | phys   --   | wall   --   | Streuung Ort 1.583 Zeit 0.622 | |g| 0.382 | 7.4s
+[seed 0]      val-MAE OP06 7.7784 (0.72x Latte)  OP09 5.6298 (0.72x Latte)  (Mittel 6.7041 C)  <- bestes bisher
+[seed 0] ep   19 | k  15 | data 0.18461 | phys   --   | wall   --   | Streuung Ort 1.235 Zeit 0.638 | |g| 0.307 | 7.7s
+[seed 0] ep   20 | k  16 | data 0.16375 | phys   --   | wall   --   | Streuung Ort 1.359 Zeit 0.652 | |g| 0.25 | 8.1s
+[seed 0]      val-MAE OP06 7.7734 (0.72x Latte)  OP09 5.9745 (0.77x Latte)  (Mittel 6.8740 C)
+[seed 0] ep   21 | k  16 | data 0.17267 | phys   --   | wall   --   | Streuung Ort 1.885 Zeit 0.655 | |g| 0.334 | 8.3s
+[seed 0] ep   22 | k  16 | data 0.17799 | phys   --   | wall   --   | Streuung Ort 1.376 Zeit 0.637 | |g| 0.31 | 8.2s
+[seed 0]      val-MAE OP06 7.3689 (0.68x Latte)  OP09 6.1375 (0.79x Latte)  (Mittel 6.7532 C)
+[seed 0] ep   23 | k  16 | data 0.13788 | phys   --   | wall   --   | Streuung Ort 1.484 Zeit 0.735 | |g| 0.22 | 8.3s
+[seed 0] ep   24 | k  16 | data 0.17518 | phys   --   | wall   --   | Streuung Ort 1.264 Zeit 0.660 | |g| 0.34 | 8.4s
+[seed 0]      val-MAE OP06 9.2423 (0.86x Latte)  OP09 6.6444 (0.86x Latte)  (Mittel 7.9434 C)
+[seed 0] ep   25 | k  16 | data 0.14675 | phys   --   | wall   --   | Streuung Ort 1.390 Zeit 0.630 | |g| 0.255 | 8.2s
+[seed 0] ep   26 | k  16 | data 0.1462 | phys   --   | wall   --   | Streuung Ort 1.166 Zeit 0.685 | |g| 0.236 | 8.4s
+[seed 0]      val-MAE OP06 6.9727 (0.65x Latte)  OP09 5.7935 (0.75x Latte)  (Mittel 6.3831 C)  <- bestes bisher
+[seed 0] ep   27 | k  16 | data 0.12838 | phys   --   | wall   --   | Streuung Ort 1.216 Zeit 0.715 | |g| 0.19 | 8.3s
+[seed 0] ep   28 | k  16 | data 0.12792 | phys   --   | wall   --   | Streuung Ort 1.223 Zeit 0.703 | |g| 0.218 | 8.2s
+[seed 0]      val-MAE OP06 6.9679 (0.65x Latte)  OP09 5.7081 (0.73x Latte)  (Mittel 6.3380 C)  <- bestes bisher
+[seed 0] ep   29 | k  16 | data 0.1137 | phys   --   | wall   --   | Streuung Ort 1.225 Zeit 0.703 | |g| 0.173 | 8.1s
+[seed 0] ep   30 | k  16 | data 0.10286 | phys   --   | wall   --   | Streuung Ort 1.348 Zeit 0.794 | |g| 0.215 | 8.0s
+[seed 0]      val-MAE OP06 6.0943 (0.56x Latte)  OP09 5.9545 (0.77x Latte)  (Mittel 6.0244 C)  <- bestes bisher
+[seed 0] ep   31 | k  16 | data 0.083559 | phys   --   | wall   --   | Streuung Ort 1.346 Zeit 0.838 | |g| 0.187 | 8.1s
+[seed 0] ep   32 | k  16 | data 0.11018 | phys   --   | wall   --   | Streuung Ort 1.114 Zeit 0.826 | |g| 0.263 | 8.1s
+[seed 0]      val-MAE OP06 6.6790 (0.62x Latte)  OP09 6.0322 (0.78x Latte)  (Mittel 6.3556 C)
+[seed 0] ep   33 | k  16 | data 0.12728 | phys   --   | wall   --   | Streuung Ort 1.378 Zeit 0.794 | |g| 0.235 | 8.1s
+[seed 0] ep   34 | k  16 | data 0.11741 | phys   --   | wall   --   | Streuung Ort 1.054 Zeit 0.692 | |g| 0.245 | 8.0s
+[seed 0]      val-MAE OP06 6.7360 (0.62x Latte)  OP09 5.6596 (0.73x Latte)  (Mittel 6.1978 C)
+[seed 0] ep   35 | k  16 | data 0.14116 | phys   --   | wall   --   | Streuung Ort 1.236 Zeit 0.734 | |g| 0.314 | 8.1s
+[seed 0] ep   36 | k  16 | data 0.097548 | phys   --   | wall   --   | Streuung Ort 1.071 Zeit 0.751 | |g| 0.241 | 8.1s
+[seed 0]      val-MAE OP06 6.5807 (0.61x Latte)  OP09 5.5948 (0.72x Latte)  (Mittel 6.0877 C)
+[seed 0] ep   37 | k  16 | data 0.098098 | phys   --   | wall   --   | Streuung Ort 1.172 Zeit 0.780 | |g| 0.285 | 8.1s
+[seed 0] ep   38 | k  16 | data 5.2088 | phys   --   | wall   --   | Streuung Ort 2.340 Zeit 3.041 | |g| 13.7 | 8.1s | [SATURATED] 1170/17655 = 6.6%
+[seed 0]      val-MAE OP06 7.3559 (0.68x Latte)  OP09 6.4594 (0.83x Latte)  (Mittel 6.9077 C)
+[seed 0] ep   39 | k  16 | data 0.16172 | phys   --   | wall   --   | Streuung Ort 1.384 Zeit 0.599 | |g| 0.344 | 8.3s
+[seed 0] ep   40 | k  16 | data 0.13622 | phys   --   | wall   --   | Streuung Ort 1.048 Zeit 0.683 | |g| 0.249 | 8.1s
+[seed 0]      val-MAE OP06 7.5784 (0.70x Latte)  OP09 6.4057 (0.82x Latte)  (Mittel 6.9920 C)
+[seed 0] BERICHTET (Median ueber die letzten 7 von 21 Messpunkten): OP06 6.7360 (0.62x Latte)  OP09 5.9545 (0.77x Latte)
+[seed 0]   bestes  ep 30: OP06 6.0943  OP09 5.9545   <- auf der Haltemenge ausgewaehlt, also optimistisch
+[seed 0]   letztes ep 40: OP06 7.5784  OP09 6.4057   <- eine Lotterie, nicht ablesen (FAHRPLAN)
+
+[seed 1] 11427 Parameter -> GridCNN/artifacts/A/seed1
+[seed 1] ep    1 | k   4 | data 0.6724 | phys   --   | wall   --   | Streuung Ort 0.000 Zeit 0.000 | |g| 0.694 | 3.1s
+[seed 1]      val-MAE OP06 7.4774 (0.69x Latte)  OP09 8.7668 (1.13x Latte ⚠)  (Mittel 8.1221 C)  <- bestes bisher
+[seed 1] ep    2 | k   4 | data 0.69282 | phys   --   | wall   --   | Streuung Ort 1.217 Zeit 0.755 | |g| 0.817 | 3.2s
+[seed 1]      val-MAE OP06 18.5382 (1.72x Latte ⚠)  OP09 16.3162 (2.10x Latte ⚠)  (Mittel 17.4272 C)
+[seed 1] ep    3 | k   5 | data 0.50731 | phys   --   | wall   --   | Streuung Ort 3.000 Zeit 0.419 | |g| 0.841 | 3.5s
+[seed 1] ep    4 | k   5 | data 2.285 | phys   --   | wall   --   | Streuung Ort 12.803 Zeit 1.189 | |g| 1.9 | 3.6s
+[seed 1]      val-MAE OP06 11.6947 (1.08x Latte ⚠)  OP09 14.3748 (1.85x Latte ⚠)  (Mittel 13.0348 C)
+[seed 1] ep    5 | k   5 | data 1.3644 | phys   --   | wall   --   | Streuung Ort 5.847 Zeit 0.720 | |g| 1.47 | 3.6s
+[seed 1] ep    6 | k   6 | data 6.9032 | phys   --   | wall   --   | Streuung Ort 19.486 Zeit 1.015 | |g| 8.31 | 4.0s | [SATURATED] 15624/17655 = 88.5%
+[seed 1]      val-MAE OP06 15.6930 (1.45x Latte ⚠)  OP09 33.0244 (4.25x Latte ⚠)  (Mittel 24.3587 C)
+[seed 1] ep    7 | k   6 | data 1.3598 | phys   --   | wall   --   | Streuung Ort 1.301 Zeit 0.543 | |g| 2.44 | 3.9s | [SATURATED] 1356/17655 = 7.7%
+[seed 1] ep    8 | k   7 | data 51.714 | phys   --   | wall   --   | Streuung Ort 5.375 Zeit 4.088 | |g| 203 | 4.4s | [SATURATED] 11174/17655 = 63.3%
+[seed 1]      val-MAE OP06 85.5019 (7.92x Latte ⚠)  OP09 75.7546 (9.75x Latte ⚠)  (Mittel 80.6282 C)
+[seed 1] ep    9 | k   7 | data 15.095 | phys   --   | wall   --   | Streuung Ort 29.929 Zeit 4.804 | |g| 21.2 | 4.3s | [SATURATED] 16333/17655 = 92.5%
+[seed 1] ep   10 | k   8 | data 9.3341 | phys   --   | wall   --   | Streuung Ort 32.628 Zeit 4.657 | |g| 7.83 | 4.7s | [SATURATED] 14506/17655 = 82.2%
+[seed 1]      val-MAE OP06 10.5080 (0.97x Latte)  OP09 8.3272 (1.07x Latte ⚠)  (Mittel 9.4176 C)
+[seed 1] ep   11 | k   8 | data 0.27422 | phys   --   | wall   --   | Streuung Ort 1.009 Zeit 0.663 | |g| 0.482 | 4.7s
+[seed 1] ep   12 | k   9 | data 0.26718 | phys   --   | wall   --   | Streuung Ort 1.144 Zeit 0.532 | |g| 0.488 | 5.2s
+[seed 1]      val-MAE OP06 8.3719 (0.78x Latte)  OP09 5.9516 (0.77x Latte)  (Mittel 7.1618 C)  <- bestes bisher
+[seed 1] ep   13 | k  10 | data 0.25965 | phys   --   | wall   --   | Streuung Ort 1.169 Zeit 0.582 | |g| 0.552 | 5.7s
+[seed 1] ep   14 | k  10 | data 0.25301 | phys   --   | wall   --   | Streuung Ort 1.440 Zeit 0.575 | |g| 0.509 | 5.7s
+[seed 1]      val-MAE OP06 8.3308 (0.77x Latte)  OP09 6.2864 (0.81x Latte)  (Mittel 7.3086 C)
+[seed 1] ep   15 | k  11 | data 0.21456 | phys   --   | wall   --   | Streuung Ort 1.273 Zeit 0.638 | |g| 0.369 | 6.2s
+[seed 1] ep   16 | k  12 | data 0.1971 | phys   --   | wall   --   | Streuung Ort 1.312 Zeit 0.698 | |g| 0.34 | 6.7s
+[seed 1]      val-MAE OP06 8.3605 (0.77x Latte)  OP09 6.7536 (0.87x Latte)  (Mittel 7.5570 C)
+[seed 1] ep   17 | k  13 | data 0.17722 | phys   --   | wall   --   | Streuung Ort 1.205 Zeit 0.664 | |g| 0.319 | 7.0s
+[seed 1] ep   18 | k  14 | data 0.17003 | phys   --   | wall   --   | Streuung Ort 1.347 Zeit 0.652 | |g| 0.337 | 7.4s
+[seed 1]      val-MAE OP06 8.5868 (0.80x Latte)  OP09 8.2790 (1.07x Latte ⚠)  (Mittel 8.4329 C)
+[seed 1] ep   19 | k  15 | data 0.18127 | phys   --   | wall   --   | Streuung Ort 1.266 Zeit 0.657 | |g| 0.334 | 8.0s
+[seed 1] ep   20 | k  16 | data 0.17085 | phys   --   | wall   --   | Streuung Ort 1.528 Zeit 0.745 | |g| 0.34 | 8.3s
+[seed 1]      val-MAE OP06 7.4455 (0.69x Latte)  OP09 5.9171 (0.76x Latte)  (Mittel 6.6813 C)  <- bestes bisher
+[seed 1] ep   21 | k  16 | data 0.16745 | phys   --   | wall   --   | Streuung Ort 1.533 Zeit 0.663 | |g| 0.351 | 8.3s
+[seed 1] ep   22 | k  16 | data 0.13261 | phys   --   | wall   --   | Streuung Ort 1.557 Zeit 0.765 | |g| 0.334 | 8.3s
+[seed 1]      val-MAE OP06 6.4757 (0.60x Latte)  OP09 4.8647 (0.63x Latte)  (Mittel 5.6702 C)  <- bestes bisher
+[seed 1] ep   23 | k  16 | data 0.14442 | phys   --   | wall   --   | Streuung Ort 1.201 Zeit 0.693 | |g| 0.415 | 8.3s
+[seed 1] ep   24 | k  16 | data 0.10445 | phys   --   | wall   --   | Streuung Ort 1.505 Zeit 0.867 | |g| 0.275 | 8.3s
+[seed 1]      val-MAE OP06 6.3142 (0.58x Latte)  OP09 4.8779 (0.63x Latte)  (Mittel 5.5961 C)  <- bestes bisher
+[seed 1] ep   25 | k  16 | data 0.11479 | phys   --   | wall   --   | Streuung Ort 1.294 Zeit 0.709 | |g| 0.325 | 8.3s
+[seed 1] ep   26 | k  16 | data 0.23594 | phys   --   | wall   --   | Streuung Ort 1.417 Zeit 0.960 | |g| 0.776 | 8.3s
+[seed 1]      val-MAE OP06 7.3635 (0.68x Latte)  OP09 6.4313 (0.83x Latte)  (Mittel 6.8974 C)
+[seed 1] ep   27 | k  16 | data 0.13983 | phys   --   | wall   --   | Streuung Ort 1.189 Zeit 0.663 | |g| 0.291 | 8.2s
+[seed 1] ep   28 | k  16 | data 0.12901 | phys   --   | wall   --   | Streuung Ort 1.142 Zeit 0.680 | |g| 0.219 | 8.3s
+[seed 1]      val-MAE OP06 7.5572 (0.70x Latte)  OP09 5.9525 (0.77x Latte)  (Mittel 6.7549 C)
+[seed 1] ep   29 | k  16 | data 0.12577 | phys   --   | wall   --   | Streuung Ort 1.148 Zeit 0.674 | |g| 0.226 | 8.4s
+[seed 1] ep   30 | k  16 | data 0.12569 | phys   --   | wall   --   | Streuung Ort 1.146 Zeit 0.734 | |g| 0.265 | 8.3s
+[seed 1]      val-MAE OP06 6.8433 (0.63x Latte)  OP09 5.5239 (0.71x Latte)  (Mittel 6.1836 C)
+[seed 1] ep   31 | k  16 | data 0.11623 | phys   --   | wall   --   | Streuung Ort 1.157 Zeit 0.712 | |g| 0.228 | 8.4s
+[seed 1] ep   32 | k  16 | data 0.12264 | phys   --   | wall   --   | Streuung Ort 1.089 Zeit 0.741 | |g| 0.279 | 8.4s
+[seed 1]      val-MAE OP06 6.9815 (0.65x Latte)  OP09 5.0732 (0.65x Latte)  (Mittel 6.0274 C)
+[seed 1] ep   33 | k  16 | data 0.12161 | phys   --   | wall   --   | Streuung Ort 1.208 Zeit 0.705 | |g| 0.254 | 8.4s
+[seed 1] ep   34 | k  16 | data 0.11495 | phys   --   | wall   --   | Streuung Ort 1.057 Zeit 0.762 | |g| 0.27 | 8.4s
+[seed 1]      val-MAE OP06 6.9406 (0.64x Latte)  OP09 4.6825 (0.60x Latte)  (Mittel 5.8115 C)
+[seed 1] ep   35 | k  16 | data 0.12245 | phys   --   | wall   --   | Streuung Ort 1.176 Zeit 0.701 | |g| 0.281 | 8.4s
+[seed 1] ep   36 | k  16 | data 0.10672 | phys   --   | wall   --   | Streuung Ort 1.007 Zeit 0.752 | |g| 0.272 | 8.2s
+[seed 1]      val-MAE OP06 6.5440 (0.61x Latte)  OP09 4.6074 (0.59x Latte)  (Mittel 5.5757 C)  <- bestes bisher
+[seed 1] ep   37 | k  16 | data 0.11534 | phys   --   | wall   --   | Streuung Ort 1.160 Zeit 0.736 | |g| 0.326 | 8.2s
+[seed 1] ep   38 | k  16 | data 0.10837 | phys   --   | wall   --   | Streuung Ort 1.002 Zeit 0.847 | |g| 0.345 | 8.2s
+[seed 1]      val-MAE OP06 6.5214 (0.60x Latte)  OP09 4.7347 (0.61x Latte)  (Mittel 5.6281 C)
+[seed 1] ep   39 | k  16 | data 0.11328 | phys   --   | wall   --   | Streuung Ort 1.130 Zeit 0.734 | |g| 0.295 | 8.3s
+[seed 1] ep   40 | k  16 | data 0.095946 | phys   --   | wall   --   | Streuung Ort 0.990 Zeit 0.814 | |g| 0.315 | 8.2s
+[seed 1]      val-MAE OP06 6.5215 (0.60x Latte)  OP09 4.8840 (0.63x Latte)  (Mittel 5.7028 C)
+[seed 1] BERICHTET (Median ueber die letzten 7 von 21 Messpunkten): OP06 6.8433 (0.63x Latte)  OP09 4.8840 (0.63x Latte)
+[seed 1]   bestes  ep 36: OP06 6.5440  OP09 4.6074   <- auf der Haltemenge ausgewaehlt, also optimistisch
+[seed 1]   letztes ep 40: OP06 6.5215  OP09 4.8840   <- eine Lotterie, nicht ablesen (FAHRPLAN)
+
+[seed 2] 11427 Parameter -> GridCNN/artifacts/A/seed2
+[seed 2] ep    1 | k   4 | data 0.63249 | phys   --   | wall   --   | Streuung Ort 0.000 Zeit 0.000 | |g| 0.703 | 3.1s
+[seed 2]      val-MAE OP06 8.1996 (0.76x Latte)  OP09 8.8974 (1.15x Latte ⚠)  (Mittel 8.5485 C)  <- bestes bisher
+[seed 2] ep    2 | k   4 | data 0.72518 | phys   --   | wall   --   | Streuung Ort 1.568 Zeit 0.716 | |g| 0.835 | 3.1s
+[seed 2]      val-MAE OP06 66.4733 (6.16x Latte ⚠)  OP09 51.8093 (6.67x Latte ⚠)  (Mittel 59.1413 C)
+[seed 2] ep    3 | k   5 | data 8.0683 | phys   --   | wall   --   | Streuung Ort 28.065 Zeit 4.210 | |g| 9.02 | 3.5s | [SATURATED] 6269/17655 = 35.5%
+[seed 2] ep    4 | k   5 | data 67.133 | phys   --   | wall   --   | Streuung Ort 32.284 Zeit 4.739 | |g| 1.09 | 3.6s | [SATURATED] 15858/17655 = 89.8%
+[seed 2]      val-MAE OP06 17.4319 (1.61x Latte ⚠)  OP09 13.9194 (1.79x Latte ⚠)  (Mittel 15.6757 C)
+[seed 2] ep    5 | k   5 | data 1.2812 | phys   --   | wall   --   | Streuung Ort 8.545 Zeit 2.849 | |g| 0.844 | 3.6s
+[seed 2] ep    6 | k   6 | data 0.8383 | phys   --   | wall   --   | Streuung Ort 4.130 Zeit 1.194 | |g| 0.696 | 4.0s
+[seed 2]      val-MAE OP06 12.1409 (1.12x Latte ⚠)  OP09 11.3028 (1.46x Latte ⚠)  (Mittel 11.7219 C)
+[seed 2] ep    7 | k   6 | data 0.72734 | phys   --   | wall   --   | Streuung Ort 2.860 Zeit 0.676 | |g| 0.704 | 4.1s
+[seed 2] ep    8 | k   7 | data 10.281 | phys   --   | wall   --   | Streuung Ort 19.907 Zeit 2.701 | |g| 12.2 | 4.5s | [SATURATED] 16937/17655 = 95.9%
+[seed 2]      val-MAE OP06 56.7179 (5.25x Latte ⚠)  OP09 70.6159 (9.09x Latte ⚠)  (Mittel 63.6669 C)
+[seed 2] ep    9 | k   7 | data 42.735 | phys   --   | wall   --   | Streuung Ort 6.943 Zeit 3.693 | |g| 11.3 | 4.4s | [SATURATED] 10268/17655 = 58.2%
+[seed 2] ep   10 | k   8 | data 6.3882 | phys   --   | wall   --   | Streuung Ort 27.248 Zeit 3.326 | |g| 7.27 | 4.8s | [SATURATED] 15648/17655 = 88.6%
+[seed 2]      val-MAE OP06 13.1796 (1.22x Latte ⚠)  OP09 31.4963 (4.06x Latte ⚠)  (Mittel 22.3380 C)
+[seed 2] ep   11 | k   8 | data 1.1148 | phys   --   | wall   --   | Streuung Ort 8.572 Zeit 0.654 | |g| 0.939 | 4.8s
+[seed 2] ep   12 | k   9 | data 0.35255 | phys   --   | wall   --   | Streuung Ort 2.679 Zeit 0.609 | |g| 0.695 | 5.2s
+[seed 2]      val-MAE OP06 8.8317 (0.82x Latte)  OP09 6.2084 (0.80x Latte)  (Mittel 7.5200 C)  <- bestes bisher
+[seed 2] ep   13 | k  10 | data 0.33676 | phys   --   | wall   --   | Streuung Ort 3.441 Zeit 0.852 | |g| 0.579 | 5.7s
+[seed 2] ep   14 | k  10 | data 0.25663 | phys   --   | wall   --   | Streuung Ort 1.124 Zeit 0.523 | |g| 0.274 | 5.7s
+[seed 2]      val-MAE OP06 8.0798 (0.75x Latte)  OP09 8.2795 (1.07x Latte ⚠)  (Mittel 8.1797 C)
+[seed 2] ep   15 | k  11 | data 0.20293 | phys   --   | wall   --   | Streuung Ort 2.073 Zeit 0.738 | |g| 0.387 | 6.1s
+[seed 2] ep   16 | k  12 | data 0.17285 | phys   --   | wall   --   | Streuung Ort 1.416 Zeit 0.709 | |g| 0.276 | 6.5s
+[seed 2]      val-MAE OP06 6.5131 (0.60x Latte)  OP09 6.1129 (0.79x Latte)  (Mittel 6.3130 C)  <- bestes bisher
+[seed 2] ep   17 | k  13 | data 0.16013 | phys   --   | wall   --   | Streuung Ort 1.488 Zeit 0.649 | |g| 0.284 | 6.9s
+[seed 2] ep   18 | k  14 | data 0.1555 | phys   --   | wall   --   | Streuung Ort 1.443 Zeit 0.702 | |g| 0.254 | 7.3s
+[seed 2]      val-MAE OP06 6.6383 (0.61x Latte)  OP09 5.8873 (0.76x Latte)  (Mittel 6.2628 C)  <- bestes bisher
+[seed 2] ep   19 | k  15 | data 0.13741 | phys   --   | wall   --   | Streuung Ort 1.563 Zeit 0.730 | |g| 0.286 | 7.8s
+[seed 2] ep   20 | k  16 | data 0.11532 | phys   --   | wall   --   | Streuung Ort 1.655 Zeit 0.780 | |g| 0.277 | 8.3s
+[seed 2]      val-MAE OP06 7.7098 (0.71x Latte)  OP09 6.2283 (0.80x Latte)  (Mittel 6.9691 C)
+[seed 2] ep   21 | k  16 | data 0.15857 | phys   --   | wall   --   | Streuung Ort 1.626 Zeit 0.729 | |g| 0.268 | 8.2s
+[seed 2] ep   22 | k  16 | data 0.12701 | phys   --   | wall   --   | Streuung Ort 1.236 Zeit 0.656 | |g| 0.316 | 8.1s
+[seed 2]      val-MAE OP06 8.7489 (0.81x Latte)  OP09 6.7530 (0.87x Latte)  (Mittel 7.7510 C)
+[seed 2] ep   23 | k  16 | data 0.12732 | phys   --   | wall   --   | Streuung Ort 1.361 Zeit 0.639 | |g| 0.246 | 8.2s
+[seed 2] ep   24 | k  16 | data 0.1222 | phys   --   | wall   --   | Streuung Ort 1.152 Zeit 0.653 | |g| 0.272 | 8.1s
+[seed 2]      val-MAE OP06 7.7602 (0.72x Latte)  OP09 9.1539 (1.18x Latte ⚠)  (Mittel 8.4571 C)
+[seed 2] ep   25 | k  16 | data 0.1042 | phys   --   | wall   --   | Streuung Ort 1.206 Zeit 0.737 | |g| 0.255 | 8.1s
+[seed 2] ep   26 | k  16 | data 0.10157 | phys   --   | wall   --   | Streuung Ort 1.201 Zeit 0.737 | |g| 0.276 | 8.1s
+[seed 2]      val-MAE OP06 4.4271 (0.41x Latte)  OP09 4.8485 (0.62x Latte)  (Mittel 4.6378 C)  <- bestes bisher
+[seed 2] ep   27 | k  16 | data 0.053948 | phys   --   | wall   --   | Streuung Ort 1.260 Zeit 0.844 | |g| 0.207 | 8.2s
+[seed 2] ep   28 | k  16 | data 0.06103 | phys   --   | wall   --   | Streuung Ort 1.177 Zeit 0.838 | |g| 0.222 | 8.1s
+[seed 2]      val-MAE OP06 6.6407 (0.61x Latte)  OP09 6.5999 (0.85x Latte)  (Mittel 6.6203 C)
+[seed 2] ep   29 | k  16 | data 0.053659 | phys   --   | wall   --   | Streuung Ort 1.286 Zeit 0.797 | |g| 0.224 | 8.2s
+[seed 2] ep   30 | k  16 | data 0.041908 | phys   --   | wall   --   | Streuung Ort 1.219 Zeit 0.894 | |g| 0.205 | 8.2s
+[seed 2]      val-MAE OP06 7.8527 (0.73x Latte)  OP09 7.6096 (0.98x Latte)  (Mittel 7.7312 C)
+[seed 2] ep   31 | k  16 | data 0.056431 | phys   --   | wall   --   | Streuung Ort 1.195 Zeit 0.752 | |g| 0.211 | 8.2s
+[seed 2] ep   32 | k  16 | data 0.056071 | phys   --   | wall   --   | Streuung Ort 1.303 Zeit 0.889 | |g| 0.273 | 8.3s
+[seed 2]      val-MAE OP06 6.9531 (0.64x Latte)  OP09 7.0299 (0.91x Latte)  (Mittel 6.9915 C)
+[seed 2] ep   33 | k  16 | data 0.058376 | phys   --   | wall   --   | Streuung Ort 1.123 Zeit 0.785 | |g| 0.166 | 8.2s
+[seed 2] ep   34 | k  16 | data 0.039277 | phys   --   | wall   --   | Streuung Ort 1.178 Zeit 0.846 | |g| 0.155 | 8.2s
+[seed 2]      val-MAE OP06 6.1334 (0.57x Latte)  OP09 6.7517 (0.87x Latte)  (Mittel 6.4425 C)
+[seed 2] ep   35 | k  16 | data 0.034916 | phys   --   | wall   --   | Streuung Ort 1.170 Zeit 0.865 | |g| 0.148 | 8.3s
+[seed 2] ep   36 | k  16 | data 0.034253 | phys   --   | wall   --   | Streuung Ort 1.186 Zeit 0.881 | |g| 0.142 | 8.2s
+[seed 2]      val-MAE OP06 5.6996 (0.53x Latte)  OP09 6.1001 (0.79x Latte)  (Mittel 5.8999 C)
+[seed 2] ep   37 | k  16 | data 0.033415 | phys   --   | wall   --   | Streuung Ort 1.116 Zeit 0.896 | |g| 0.124 | 8.2s
+[seed 2] ep   38 | k  16 | data 0.032966 | phys   --   | wall   --   | Streuung Ort 1.118 Zeit 0.884 | |g| 0.122 | 8.2s
+[seed 2]      val-MAE OP06 5.6710 (0.53x Latte)  OP09 5.7676 (0.74x Latte)  (Mittel 5.7193 C)
+[seed 2] ep   39 | k  16 | data 0.034193 | phys   --   | wall   --   | Streuung Ort 1.103 Zeit 0.897 | |g| 0.122 | 8.2s
+[seed 2] ep   40 | k  16 | data 0.035405 | phys   --   | wall   --   | Streuung Ort 1.120 Zeit 0.871 | |g| 0.127 | 8.4s
+[seed 2]      val-MAE OP06 5.6852 (0.53x Latte)  OP09 5.5485 (0.71x Latte)  (Mittel 5.6169 C)
+[seed 2] BERICHTET (Median ueber die letzten 7 von 21 Messpunkten): OP06 6.1334 (0.57x Latte)  OP09 6.5999 (0.85x Latte)
+[seed 2]   bestes  ep 26: OP06 4.4271  OP09 4.8485   <- auf der Haltemenge ausgewaehlt, also optimistisch
+[seed 2]   letztes ep 40: OP06 5.6852  OP09 5.5485   <- eine Lotterie, nicht ablesen (FAHRPLAN)
+
+======================================================================
+A (Blackbox, ohne Physik in der Architektur)  --  3 Seed(s), 40 Epochen
+Protokoll: k=4->16 clip=1 lr=0.001/cosine inner=25x32 subsample=10
+Berichtet ist je Seed der Median ueber das letzte Drittel der Messpunkte.
+  val-MAE OP06: 6.5709 +- 0.3827 C   (6.7360, 6.8433, 6.1334)
+      triviale Latte 10.7995 C (Mittelwert 10.7995 / Persistenz 16.6699) -- 3/3 Seed(s) unterbieten sie
+  val-MAE OP09: 5.8128 +- 0.8666 C   (5.9545, 4.8840, 6.5999)
+      triviale Latte 7.7663 C (Mittelwert 7.7663 / Persistenz 18.5408) -- 3/3 Seed(s) unterbieten sie
+
+----------------------------------------------------------------------
+[verdikt] Guete = val-MAE / beste triviale Latte. < 1.00 heisst gelernt.
+          OP06  0.61x   3/3 Seed(s) unter der Latte   Seed-Streuung 0.38 C
+          OP09  0.75x   3/3 Seed(s) unter der Latte   Seed-Streuung 0.87 C
+          ERGEBNIS: alle OPs unter der Latte, und die Streuung ist lesbar. Das traegt einen Vergleich.
+  -> GridCNN/artifacts/A/zusammenfassung.json

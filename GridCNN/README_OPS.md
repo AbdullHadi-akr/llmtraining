@@ -8,6 +8,12 @@
 > festgelegt, bevor es ein Modell gab, gegen das man ihn hätte prüfen können.
 > Was hier steht, ist die Liste dessen, was der Datensatz **nicht hergeben
 > kann** — damit niemand wochenlang Gewichte gegen eine Datenlücke tunt.
+>
+> **Suchst du nachschlagend statt urteilend** — wer ist welcher OP, welche
+> Stufe trägt er, warum ist OP15 der speziellste, warum kann man die Test-OPs
+> nicht ins Training ziehen —, dann steht das im
+> [`README_OPS_STECKBRIEF.md`](README_OPS_STECKBRIEF.md). Diese Seite hier ist
+> das Urteil, jene das Nachschlagewerk.
 
 ## Das Plansheet, ausgezählt
 

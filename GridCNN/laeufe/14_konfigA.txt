@@ -1,0 +1,208 @@
+[device] cuda:0 Tesla T4  14.6 GiB  sm_75  torch=2.6.0+cu124 cuda=12.4
+[t4] cudnn.benchmark an (feste Eingangsformen). TF32 NICHT gesetzt: das ist Ampere und neuer, die T4 ist Turing (sm_75).
+[konfiguration] A (Blackbox, ohne Physik in der Architektur)
+[modell] 17 statische Karten -> 44 Eingangskanaele, width=16 blocks=3
+[wand] AUS -- dieser Lauf ist adiabat. Das ist eine ABLATION, keine Latte, und darf auch nicht als eine zitiert werden (FAHRPLAN, 'Was fehlt').
+[daten] 11 Trainings-OPs, 2 Halte-OPs, subsample=2 -> dt_n=0.000124595, 3.7s
+[gitter] 3 x 11 x 11 = 363 Punkte
+[normierung] T_mu=33 T_sigma=9.602 C L_ref=0.0768039 m T_span_ref=1605.2 s
+!! [CFL] dt_n=0.000124595 (0.2 s) liegt 110.3x UEBER der expliziten Schranke dt_max_n=1.12998e-06 (0.001814 s).
+   Laeuft der Rollout weg, ist DAS die erste Erklaerung -- nicht das Netz. Kleineres --subsample, oder pruefen, ob die Materialdaten echt sind: ein synthetisches material_properties/ macht das Problem viel steifer, als es ist. Arm A (--no-physics) ist davon nicht betroffen.
+
+[seed 0] 11427 Parameter -> GridCNN/artifacts/A/seed0
+[seed 0] ep    1 | data 0.33096 | phys   --   | wall   --   | Streuung Ort 0.000 Zeit 0.000
+[seed 0] ep    2 | data 0.97371 | phys   --   | wall   --   | Streuung Ort 2.823 Zeit 1.757
+[seed 0] ep    3 | data 13.939 | phys   --   | wall   --   | Streuung Ort 114.253 Zeit 18.230 | [SATURATED] 35109
+[seed 0] ep    4 | data 38.58 | phys   --   | wall   --   | Streuung Ort 25.575 Zeit 1.354
+[seed 0] ep    5 | data 5.277 | phys   --   | wall   --   | Streuung Ort 7.443 Zeit 1.515
+[seed 0] ep    6 | data 0.76204 | phys   --   | wall   --   | Streuung Ort 4.878 Zeit 1.637
+[seed 0] ep    7 | data 19.298 | phys   --   | wall   --   | Streuung Ort 20.558 Zeit 4.943 | [SATURATED] 87675
+[seed 0] ep    8 | data 36.309 | phys   --   | wall   --   | Streuung Ort 137.502 Zeit 9.078 | [SATURATED] 43041
+[seed 0] ep    9 | data 2500.7 | phys   --   | wall   --   | Streuung Ort 196.123 Zeit 3.689 | [SATURATED] 88188
+[seed 0] ep   10 | data 32.101 | phys   --   | wall   --   | Streuung Ort 16.378 Zeit 0.787
+[seed 0] ep   11 | data 15.304 | phys   --   | wall   --   | Streuung Ort 13.738 Zeit 0.920
+[seed 0] ep   12 | data 47.938 | phys   --   | wall   --   | Streuung Ort 196.176 Zeit 1.840 | [SATURATED] 88248
+[seed 0] ep   13 | data 181.6 | phys   --   | wall   --   | Streuung Ort 119.181 Zeit 11.406 | [SATURATED] 87932
+[seed 0] ep   14 | data 41.512 | phys   --   | wall   --   | Streuung Ort 0.662 Zeit 3.359 | [SATURATED] 88225
+[seed 0] ep   15 | data 25.78 | phys   --   | wall   --   | Streuung Ort 79.181 Zeit 5.600 | [SATURATED] 87887
+[seed 0] ep   16 | data 60.422 | phys   --   | wall   --   | Streuung Ort 145.743 Zeit 23.488 | [SATURATED] 83924
+[seed 0] ep   17 | data 23.705 | phys   --   | wall   --   | Streuung Ort 123.888 Zeit 2.984 | [SATURATED] 88147
+[seed 0] ep   18 | data 1.8578 | phys   --   | wall   --   | Streuung Ort 11.408 Zeit 3.753
+[seed 0] ep   19 | data 1.1411 | phys   --   | wall   --   | Streuung Ort 7.472 Zeit 1.478
+[seed 0] ep   20 | data 1.8776 | phys   --   | wall   --   | Streuung Ort 7.134 Zeit 1.003
+[seed 0] ep   21 | data 5.1866 | phys   --   | wall   --   | Streuung Ort 10.678 Zeit 1.489
+[seed 0] ep   22 | data 5.5904 | phys   --   | wall   --   | Streuung Ort 10.694 Zeit 1.633
+[seed 0] ep   23 | data 5.0525 | phys   --   | wall   --   | Streuung Ort 10.415 Zeit 1.467
+[seed 0] ep   24 | data 3.6714 | phys   --   | wall   --   | Streuung Ort 9.652 Zeit 2.189
+[seed 0] ep   25 | data 4.7735 | phys   --   | wall   --   | Streuung Ort 10.998 Zeit 2.545
+[seed 0] ep   26 | data 26.74 | phys   --   | wall   --   | Streuung Ort 80.247 Zeit 18.863 | [SATURATED] 54390
+[seed 0] ep   27 | data 20.977 | phys   --   | wall   --   | Streuung Ort 149.130 Zeit 74.461 | [SATURATED] 82162
+[seed 0] ep   28 | data 24.145 | phys   --   | wall   --   | Streuung Ort 27.628 Zeit 4.977 | [SATURATED] 8766
+[seed 0] ep   29 | data 6.9785 | phys   --   | wall   --   | Streuung Ort 19.840 Zeit 1.894
+[seed 0] ep   30 | data 7.4676 | phys   --   | wall   --   | Streuung Ort 12.756 Zeit 2.064
+[seed 0] ep   31 | data 5.034 | phys   --   | wall   --   | Streuung Ort 10.282 Zeit 1.743
+[seed 0] ep   32 | data 3.6199 | phys   --   | wall   --   | Streuung Ort 8.783 Zeit 1.398
+[seed 0] ep   33 | data 3.0378 | phys   --   | wall   --   | Streuung Ort 8.987 Zeit 2.663
+[seed 0] ep   34 | data 1.8006 | phys   --   | wall   --   | Streuung Ort 6.270 Zeit 1.683
+[seed 0] ep   35 | data 2.3563 | phys   --   | wall   --   | Streuung Ort 7.088 Zeit 1.300
+[seed 0] ep   36 | data 2.1375 | phys   --   | wall   --   | Streuung Ort 6.755 Zeit 1.139
+[seed 0] ep   37 | data 2.5959 | phys   --   | wall   --   | Streuung Ort 9.570 Zeit 2.832
+[seed 0] ep   38 | data 6.4189 | phys   --   | wall   --   | Streuung Ort 30.731 Zeit 11.453 | [SATURATED] 34686
+[seed 0] ep   39 | data 35.462 | phys   --   | wall   --   | Streuung Ort 53.443 Zeit 10.739 | [SATURATED] 42793
+[seed 0] ep   40 | data 105.4 | phys   --   | wall   --   | Streuung Ort 192.816 Zeit 83.381 | [SATURATED] 86765
+[seed 0] ep   41 | data 49.956 | phys   --   | wall   --   | Streuung Ort 92.536 Zeit 40.804 | [SATURATED] 64072
+[seed 0] ep   42 | data 85.967 | phys   --   | wall   --   | Streuung Ort 55.868 Zeit 17.178 | [SATURATED] 22953
+[seed 0] ep   43 | data 15.432 | phys   --   | wall   --   | Streuung Ort 134.937 Zeit 8.946 | [SATURATED] 85726
+[seed 0] ep   44 | data 89.794 | phys   --   | wall   --   | Streuung Ort 70.699 Zeit 26.469 | [SATURATED] 67117
+[seed 0] ep   45 | data 50.676 | phys   --   | wall   --   | Streuung Ort 154.540 Zeit 66.344 | [SATURATED] 86721
+[seed 0] ep   46 | data 50.221 | phys   --   | wall   --   | Streuung Ort 74.391 Zeit 15.956 | [SATURATED] 70930
+[seed 0] ep   47 | data 38.8 | phys   --   | wall   --   | Streuung Ort 84.201 Zeit 32.108 | [SATURATED] 52341
+[seed 0] ep   48 | data 17.76 | phys   --   | wall   --   | Streuung Ort 116.699 Zeit 45.973 | [SATURATED] 88026
+[seed 0] ep   49 | data 62.692 | phys   --   | wall   --   | Streuung Ort 53.770 Zeit 22.343 | [SATURATED] 59727
+[seed 0] ep   50 | data 18.531 | phys   --   | wall   --   | Streuung Ort 123.887 Zeit 50.090 | [SATURATED] 88149
+[seed 0] ep   51 | data 0.8788 | phys   --   | wall   --   | Streuung Ort 8.575 Zeit 4.034
+[seed 0] ep   52 | data 0.5192 | phys   --   | wall   --   | Streuung Ort 2.680 Zeit 0.860
+[seed 0] ep   53 | data 0.43674 | phys   --   | wall   --   | Streuung Ort 2.395 Zeit 0.860
+[seed 0] ep   54 | data 0.38309 | phys   --   | wall   --   | Streuung Ort 1.811 Zeit 0.879
+[seed 0] ep   55 | data 0.35418 | phys   --   | wall   --   | Streuung Ort 1.935 Zeit 0.914
+[seed 0] ep   56 | data 0.32525 | phys   --   | wall   --   | Streuung Ort 1.727 Zeit 0.955
+[seed 0] ep   57 | data 0.39668 | phys   --   | wall   --   | Streuung Ort 2.392 Zeit 0.988
+[seed 0] ep   58 | data 0.50935 | phys   --   | wall   --   | Streuung Ort 3.006 Zeit 1.017
+[seed 0] ep   59 | data 0.7766 | phys   --   | wall   --   | Streuung Ort 33.135 Zeit 13.073
+[seed 0] ep   60 | data 0.33213 | phys   --   | wall   --   | Streuung Ort 2.395 Zeit 0.575
+[seed 0] val-MAE OP06: 51.9519 C
+[seed 0] val-MAE OP09: 51.4483 C
+
+[seed 1] 11427 Parameter -> GridCNN/artifacts/A/seed1
+[seed 1] ep    1 | data 0.35971 | phys   --   | wall   --   | Streuung Ort 0.000 Zeit 0.000
+[seed 1] ep    2 | data 0.59407 | phys   --   | wall   --   | Streuung Ort 1.429 Zeit 0.459
+[seed 1] ep    3 | data 5.1459 | phys   --   | wall   --   | Streuung Ort 23.516 Zeit 5.346
+[seed 1] ep    4 | data 2432.4 | phys   --   | wall   --   | Streuung Ort 193.831 Zeit 8.828 | [SATURATED] 86925
+[seed 1] ep    5 | data 11.185 | phys   --   | wall   --   | Streuung Ort 19.968 Zeit 2.291
+[seed 1] ep    6 | data 1.9427 | phys   --   | wall   --   | Streuung Ort 11.507 Zeit 3.001
+[seed 1] ep    7 | data 5.6989 | phys   --   | wall   --   | Streuung Ort 55.270 Zeit 4.292 | [SATURATED] 15872
+[seed 1] ep    8 | data 24.643 | phys   --   | wall   --   | Streuung Ort 70.951 Zeit 22.886 | [SATURATED] 88128
+[seed 1] ep    9 | data 28.519 | phys   --   | wall   --   | Streuung Ort 182.030 Zeit 4.358 | [SATURATED] 87686
+[seed 1] ep   10 | data 5.8617 | phys   --   | wall   --   | Streuung Ort 94.417 Zeit 23.624 | [SATURATED] 44069
+[seed 1] ep   11 | data 13.317 | phys   --   | wall   --   | Streuung Ort 39.815 Zeit 19.013 | [SATURATED] 13299
+[seed 1] ep   12 | data 1.7754 | phys   --   | wall   --   | Streuung Ort 11.510 Zeit 3.718
+[seed 1] ep   13 | data 2.1607 | phys   --   | wall   --   | Streuung Ort 7.894 Zeit 1.552
+[seed 1] ep   14 | data 2.5461 | phys   --   | wall   --   | Streuung Ort 7.426 Zeit 1.470
+[seed 1] ep   15 | data 1.4908 | phys   --   | wall   --   | Streuung Ort 5.440 Zeit 1.154
+[seed 1] ep   16 | data 2.9726 | phys   --   | wall   --   | Streuung Ort 8.110 Zeit 1.980
+[seed 1] ep   17 | data 3.3382 | phys   --   | wall   --   | Streuung Ort 8.201 Zeit 1.239
+[seed 1] ep   18 | data 8.7351 | phys   --   | wall   --   | Streuung Ort 25.054 Zeit 9.131
+[seed 1] ep   19 | data 9.5493 | phys   --   | wall   --   | Streuung Ort 14.548 Zeit 2.266
+[seed 1] ep   20 | data 9.5224 | phys   --   | wall   --   | Streuung Ort 25.266 Zeit 7.589
+[seed 1] ep   21 | data 184.45 | phys   --   | wall   --   | Streuung Ort 129.918 Zeit 22.632 | [SATURATED] 84681
+[seed 1] ep   22 | data 40.189 | phys   --   | wall   --   | Streuung Ort 158.104 Zeit 70.686 | [SATURATED] 88164
+[seed 1] ep   23 | data 171.93 | phys   --   | wall   --   | Streuung Ort 81.309 Zeit 22.924 | [SATURATED] 58505
+[seed 1] ep   24 | data 113.62 | phys   --   | wall   --   | Streuung Ort 82.554 Zeit 26.330 | [SATURATED] 74261
+[seed 1] ep   25 | data 22.891 | phys   --   | wall   --   | Streuung Ort 124.937 Zeit 8.853 | [SATURATED] 85891
+[seed 1] ep   26 | data 25.916 | phys   --   | wall   --   | Streuung Ort 64.245 Zeit 20.676 | [SATURATED] 12574
+[seed 1] ep   27 | data 22.239 | phys   --   | wall   --   | Streuung Ort 45.097 Zeit 8.319 | [SATURATED] 59800
+[seed 1] ep   28 | data 52.347 | phys   --   | wall   --   | Streuung Ort 89.103 Zeit 31.158 | [SATURATED] 82115
+[seed 1] ep   29 | data 62.037 | phys   --   | wall   --   | Streuung Ort 181.676 Zeit 26.607 | [SATURATED] 87666
+[seed 1] ep   30 | data 3.8076 | phys   --   | wall   --   | Streuung Ort 42.191 Zeit 18.399 | [SATURATED] 395
+[seed 1] ep   31 | data 1.6303 | phys   --   | wall   --   | Streuung Ort 8.187 Zeit 0.806
+[seed 1] ep   32 | data 1.2344 | phys   --   | wall   --   | Streuung Ort 5.893 Zeit 0.826
+[seed 1] ep   33 | data 1.0012 | phys   --   | wall   --   | Streuung Ort 4.793 Zeit 0.853
+[seed 1] ep   34 | data 0.74345 | phys   --   | wall   --   | Streuung Ort 4.626 Zeit 0.860
+[seed 1] ep   35 | data 0.66708 | phys   --   | wall   --   | Streuung Ort 3.892 Zeit 0.849
+[seed 1] ep   36 | data 0.51006 | phys   --   | wall   --   | Streuung Ort 3.171 Zeit 0.838
+[seed 1] ep   37 | data 0.68238 | phys   --   | wall   --   | Streuung Ort 3.825 Zeit 0.859
+[seed 1] ep   38 | data 1.1758 | phys   --   | wall   --   | Streuung Ort 5.416 Zeit 0.878
+[seed 1] ep   39 | data 1.7011 | phys   --   | wall   --   | Streuung Ort 6.389 Zeit 0.885
+[seed 1] ep   40 | data 2.9421 | phys   --   | wall   --   | Streuung Ort 62.303 Zeit 23.812 | [SATURATED] 8493
+[seed 1] ep   41 | data 0.67241 | phys   --   | wall   --   | Streuung Ort 4.055 Zeit 0.825
+[seed 1] ep   42 | data 0.4928 | phys   --   | wall   --   | Streuung Ort 3.023 Zeit 0.841
+[seed 1] ep   43 | data 0.45221 | phys   --   | wall   --   | Streuung Ort 2.591 Zeit 0.846
+[seed 1] ep   44 | data 0.50768 | phys   --   | wall   --   | Streuung Ort 2.650 Zeit 0.864
+[seed 1] ep   45 | data 0.71724 | phys   --   | wall   --   | Streuung Ort 3.510 Zeit 0.882
+[seed 1] ep   46 | data 0.62511 | phys   --   | wall   --   | Streuung Ort 3.282 Zeit 0.925
+[seed 1] ep   47 | data 0.82438 | phys   --   | wall   --   | Streuung Ort 4.910 Zeit 2.502 | [SATURATED] 254
+[seed 1] ep   48 | data 0.42343 | phys   --   | wall   --   | Streuung Ort 2.230 Zeit 0.803
+[seed 1] ep   49 | data 0.49286 | phys   --   | wall   --   | Streuung Ort 7.431 Zeit 2.275
+[seed 1] ep   50 | data 0.49383 | phys   --   | wall   --   | Streuung Ort 2.715 Zeit 0.866
+[seed 1] ep   51 | data 0.40616 | phys   --   | wall   --   | Streuung Ort 2.759 Zeit 0.849
+[seed 1] ep   52 | data 0.37621 | phys   --   | wall   --   | Streuung Ort 2.922 Zeit 0.915
+[seed 1] ep   53 | data 0.36399 | phys   --   | wall   --   | Streuung Ort 3.328 Zeit 0.768
+[seed 1] ep   54 | data 0.42366 | phys   --   | wall   --   | Streuung Ort 5.798 Zeit 2.783
+[seed 1] ep   55 | data 0.26897 | phys   --   | wall   --   | Streuung Ort 4.408 Zeit 0.816
+[seed 1] ep   56 | data 0.23924 | phys   --   | wall   --   | Streuung Ort 1.840 Zeit 1.153
+[seed 1] ep   57 | data 0.25143 | phys   --   | wall   --   | Streuung Ort 1.811 Zeit 0.375
+[seed 1] ep   58 | data 0.21392 | phys   --   | wall   --   | Streuung Ort 1.476 Zeit 1.065
+[seed 1] ep   59 | data 0.24991 | phys   --   | wall   --   | Streuung Ort 3.014 Zeit 3.024
+[seed 1] ep   60 | data 0.25449 | phys   --   | wall   --   | Streuung Ort 1.679 Zeit 0.842
+[seed 1] val-MAE OP06: 20.4273 C
+[seed 1] val-MAE OP09: 15.4754 C
+
+[seed 2] 11427 Parameter -> GridCNN/artifacts/A/seed2
+[seed 2] ep    1 | data 0.3373 | phys   --   | wall   --   | Streuung Ort 0.000 Zeit 0.000
+[seed 2] ep    2 | data 0.90961 | phys   --   | wall   --   | Streuung Ort 2.261 Zeit 0.685
+[seed 2] ep    3 | data 0.71 | phys   --   | wall   --   | Streuung Ort 13.462 Zeit 3.134
+[seed 2] ep    4 | data 32.389 | phys   --   | wall   --   | Streuung Ort 98.642 Zeit 9.928 | [SATURATED] 80531
+[seed 2] ep    5 | data 62.743 | phys   --   | wall   --   | Streuung Ort 176.946 Zeit 1.887 | [SATURATED] 88248
+[seed 2] ep    6 | data 52.521 | phys   --   | wall   --   | Streuung Ort 151.982 Zeit 5.522 | [SATURATED] 87342
+[seed 2] ep    7 | data 247.39 | phys   --   | wall   --   | Streuung Ort 120.552 Zeit 12.545 | [SATURATED] 87475
+[seed 2] ep    8 | data 131.18 | phys   --   | wall   --   | Streuung Ort 181.333 Zeit 10.893 | [SATURATED] 88232
+[seed 2] ep    9 | data 161.99 | phys   --   | wall   --   | Streuung Ort 196.318 Zeit 2.303 | [SATURATED] 88210
+[seed 2] ep   10 | data 21.062 | phys   --   | wall   --   | Streuung Ort 10.170 Zeit 2.823 | [SATURATED] 88187
+[seed 2] ep   11 | data 61.166 | phys   --   | wall   --   | Streuung Ort 180.805 Zeit 3.248 | [SATURATED] 88168
+[seed 2] ep   12 | data 22.299 | phys   --   | wall   --   | Streuung Ort 87.205 Zeit 23.556 | [SATURATED] 25806
+[seed 2] ep   13 | data 16.329 | phys   --   | wall   --   | Streuung Ort 152.008 Zeit 3.851 | [SATURATED] 88147
+[seed 2] ep   14 | data 1.794 | phys   --   | wall   --   | Streuung Ort 7.080 Zeit 2.969
+[seed 2] ep   15 | data 25.558 | phys   --   | wall   --   | Streuung Ort 77.731 Zeit 3.993 | [SATURATED] 87970
+[seed 2] ep   16 | data 7.04 | phys   --   | wall   --   | Streuung Ort 22.504 Zeit 3.158
+[seed 2] ep   17 | data 4.9759 | phys   --   | wall   --   | Streuung Ort 19.658 Zeit 9.837
+[seed 2] ep   18 | data 3.4452 | phys   --   | wall   --   | Streuung Ort 9.058 Zeit 1.690
+[seed 2] ep   19 | data 2.1246 | phys   --   | wall   --   | Streuung Ort 6.867 Zeit 1.454
+[seed 2] ep   20 | data 2.4921 | phys   --   | wall   --   | Streuung Ort 7.266 Zeit 1.108
+[seed 2] ep   21 | data 2.9667 | phys   --   | wall   --   | Streuung Ort 12.971 Zeit 4.278
+[seed 2] ep   22 | data 1.9481 | phys   --   | wall   --   | Streuung Ort 11.415 Zeit 3.875
+[seed 2] ep   23 | data 6.243 | phys   --   | wall   --   | Streuung Ort 16.261 Zeit 2.310
+[seed 2] ep   24 | data 14.046 | phys   --   | wall   --   | Streuung Ort 30.104 Zeit 13.296 | [SATURATED] 10540
+[seed 2] ep   25 | data 51.529 | phys   --   | wall   --   | Streuung Ort 67.578 Zeit 14.577 | [SATURATED] 36990
+[seed 2] ep   26 | data 80.112 | phys   --   | wall   --   | Streuung Ort 150.208 Zeit 57.964 | [SATURATED] 85833
+[seed 2] ep   27 | data 417.58 | phys   --   | wall   --   | Streuung Ort 120.505 Zeit 43.803 | [SATURATED] 84516
+[seed 2] ep   28 | data 22.344 | phys   --   | wall   --   | Streuung Ort 141.409 Zeit 65.884 | [SATURATED] 88239
+[seed 2] ep   29 | data 54.376 | phys   --   | wall   --   | Streuung Ort 129.471 Zeit 36.187 | [SATURATED] 87620
+[seed 2] ep   30 | data 22.799 | phys   --   | wall   --   | Streuung Ort 67.359 Zeit 26.991 | [SATURATED] 5396
+[seed 2] ep   31 | data 18.314 | phys   --   | wall   --   | Streuung Ort 32.491 Zeit 11.183 | [SATURATED] 11263
+[seed 2] ep   32 | data 27.209 | phys   --   | wall   --   | Streuung Ort 24.854 Zeit 5.337 | [SATURATED] 50715
+[seed 2] ep   33 | data 16.568 | phys   --   | wall   --   | Streuung Ort 19.763 Zeit 4.167 | [SATURATED] 31855
+[seed 2] ep   34 | data 3.2132 | phys   --   | wall   --   | Streuung Ort 8.102 Zeit 1.391
+[seed 2] ep   35 | data 2.9545 | phys   --   | wall   --   | Streuung Ort 7.635 Zeit 1.249
+[seed 2] ep   36 | data 3.0002 | phys   --   | wall   --   | Streuung Ort 7.236 Zeit 1.274
+[seed 2] ep   37 | data 1.9274 | phys   --   | wall   --   | Streuung Ort 5.968 Zeit 1.318
+[seed 2] ep   38 | data 3.6198 | phys   --   | wall   --   | Streuung Ort 21.144 Zeit 8.144 | [SATURATED] 1480
+[seed 2] ep   39 | data 1.6962 | phys   --   | wall   --   | Streuung Ort 5.779 Zeit 1.237
+[seed 2] ep   40 | data 1.247 | phys   --   | wall   --   | Streuung Ort 21.405 Zeit 8.830
+[seed 2] ep   41 | data 0.78391 | phys   --   | wall   --   | Streuung Ort 3.795 Zeit 1.149
+[seed 2] ep   42 | data 0.63774 | phys   --   | wall   --   | Streuung Ort 4.585 Zeit 1.062
+[seed 2] ep   43 | data 0.68985 | phys   --   | wall   --   | Streuung Ort 4.695 Zeit 1.502
+[seed 2] ep   44 | data 3.5362 | phys   --   | wall   --   | Streuung Ort 9.399 Zeit 2.026
+[seed 2] ep   45 | data 0.7728 | phys   --   | wall   --   | Streuung Ort 4.809 Zeit 1.536
+[seed 2] ep   46 | data 0.92467 | phys   --   | wall   --   | Streuung Ort 5.719 Zeit 0.976
+[seed 2] ep   47 | data 0.43626 | phys   --   | wall   --   | Streuung Ort 3.913 Zeit 1.293
+[seed 2] ep   48 | data 0.60631 | phys   --   | wall   --   | Streuung Ort 15.201 Zeit 6.799
+[seed 2] ep   49 | data 0.41435 | phys   --   | wall   --   | Streuung Ort 3.046 Zeit 1.229
+[seed 2] ep   50 | data 0.4585 | phys   --   | wall   --   | Streuung Ort 4.031 Zeit 0.840
+[seed 2] ep   51 | data 0.43774 | phys   --   | wall   --   | Streuung Ort 3.656 Zeit 2.776
+[seed 2] ep   52 | data 0.27988 | phys   --   | wall   --   | Streuung Ort 3.790 Zeit 2.362
+[seed 2] ep   53 | data 0.23778 | phys   --   | wall   --   | Streuung Ort 1.695 Zeit 0.507
+[seed 2] ep   54 | data 0.32256 | phys   --   | wall   --   | Streuung Ort 2.351 Zeit 0.953
+[seed 2] ep   55 | data 0.22539 | phys   --   | wall   --   | Streuung Ort 1.735 Zeit 0.772
+[seed 2] ep   56 | data 13.097 | phys   --   | wall   --   | Streuung Ort 17.627 Zeit 1.690 | [SATURATED] 6021
+[seed 2] ep   57 | data 42.807 | phys   --   | wall   --   | Streuung Ort 106.998 Zeit 39.508 | [SATURATED] 86979
+[seed 2] ep   58 | data 0.75891 | phys   --   | wall   --   | Streuung Ort 8.171 Zeit 0.803
+[seed 2] ep   59 | data 0.33005 | phys   --   | wall   --   | Streuung Ort 4.213 Zeit 0.881
+[seed 2] ep   60 | data 0.30485 | phys   --   | wall   --   | Streuung Ort 2.633 Zeit 0.970
+[seed 2] val-MAE OP06: 8.9538 C
+[seed 2] val-MAE OP09: 8.0314 C
+
+============================================================
+A (Blackbox, ohne Physik in der Architektur)  --  3 Seed(s), 60 Epochen
+  val-MAE OP06: 27.1110 +- 22.2646 C   (51.9519, 20.4273, 8.9538)
+  val-MAE OP09: 24.9850 +- 23.2181 C   (51.4483, 15.4754, 8.0314)
+  -> GridCNN/artifacts/A/zusammenfassung.json

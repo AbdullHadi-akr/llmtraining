@@ -33,24 +33,307 @@ Der Plan ist eine **Leiter mit Toren**, keine gerade Linie. **Ein rotes Tor
 
 ---
 
-## ▶ Das Nächste: Abschnitt 4 nachholen, dann Stufe 2
+## ▶ Das Nächste: **A auf voller Auflösung, mit dem Fenster in Sekunden**
 
-**Der zweite Lauf ist am 22.09. gefahren** (`10_bilanz.txt`, sieben
-Konstant-Treiber-Trainings-OPs, drei Flusslevel). Abschnitt 1 bis 3 sind
-durch, **Abschnitt 4 ist abgestürzt** — also genau `U(V̇)`, die Frage, für die
-der Lauf gemacht wurde. Wieder das Werkzeug, wieder nicht die Daten; der Fehler
-ist repariert (siehe unten). Es fehlt nur der Wiederholungslauf:
+> ## 🟡 23.09. — volle Auflösung: **OP06 hält, OP09 fällt, und der Lauf war nicht der POC**
+>
+> | | berichtet (3 Seeds) | Latte | Güte | unter Latte | Seed-Streuung |
+> |---|---|---|---|---|---|
+> | **OP06** | 6.64 °C | 10.8009 | **0.62x** | 3/3 | 1.52 °C |
+> | **OP09** | 8.60 °C | 7.7625 | **1.11x** | **1/3** | 1.76 °C |
+>
+> **Kein Ergebnis**, weil die Streuung über ~1 °C liegt. Die Frühphase war in
+> allen drei Seeds instabil, zwei davon haben sich erst bei ep 18–19
+> gefangen.
+>
+> **Und der Befund dahinter:** `k` stand in **Schritten**. 4→16 Schritte
+> sind bei `--subsample 10` 4→16 s, bei `--subsample 2` nur **0.8→3.2 s**.
+> Mit `k = 16 < lag2 = 20` lief **kein einziges Update** durch die
+> Rückkopplung über lag2. Die Lags wurden in PR #46 auf Sekunden umgestellt,
+> das Fenster nicht. `train.py` warnt jetzt davor (`!! [fenster]`) und nennt
+> k auch in Sekunden.
+>
+> ⚠ Auf der Maschine lief der Code **vor PR #47**. Das Training ist identisch,
+> es fehlt nur das Fehlerprofil. Nachholen mit
+> `GridCNN/tools/nachmessen.py`, **bevor** Lauf 17 die Gewichte überschreibt.
+>
+> Bericht: **[`TRAININGS_BERICHT_2026-09-23_KonfigA_voll.md`](../TRAININGS_BERICHT_2026-09-23_KonfigA_voll.md)** ·
+> Lauf: [`laeufe/16_konfigA_voll.txt`](laeufe/16_konfigA_voll.txt) ·
+> Übergabe: **[`UEBERGABE_2026-09-23.md`](../UEBERGABE_2026-09-23.md)**
+
+### Schritt 1a — Lauf 16 nachmessen (Minuten, kein Training)
 
 ```bash
-cd ~/llmtraining            # nicht der Windows-Pfad; python3 aus modulus_env
-git checkout main && git pull
-python3 GridCNN/tools/balance_check.py 2>&1 | tee 11_bilanz.txt
+cp -r GridCNN/artifacts/A GridCNN/artifacts/A_16_voll
+python3 GridCNN/tools/nachmessen.py --no-physics --subsample 2 \
+    --device cuda --cache data_cache --laeufe GridCNN/artifacts/A_16_voll \
+    2>&1 | tee 16_konfigA_nachgemessen.txt
 ```
 
-Abschnitt 1–3 kommen dabei unverändert wieder — nachgerechnet, der reparierte
-Pfad gibt in Abschnitt 2 denselben Wert wie der alte. Neu ist Abschnitt 4 und
-eine Spalte `T_fluid`, die mitschreibt, **welche** Fluidtemperatur in `dT`
-steckt.
+Probe: die MAE je `model.pt` muss `letztes ep 60` im Log treffen. Die Frage:
+ist OP09 ein Spätfehler (`drift > 1.5`), und zu warm oder zu kalt?
+
+### Schritt 1b — Lauf 17: dasselbe Fenster in Sekunden wie der POC, ~1.5–2 h
+
+**Eine Änderung gegen Lauf 16:** `--tbptt-start 20 --tbptt 80` (= 4→16 s).
+
+```bash
+python3 GridCNN/train.py --no-physics --seeds 3 --epochs 60 \
+    --subsample 2 --inner-steps 25 --tbptt-start 20 --tbptt 80 \
+    --val-every 2 --device cuda --cache data_cache \
+    2>&1 | tee 17_konfigA_voll_k_sekunden.txt
+```
+
+Die Entscheidungstabelle steht im Bericht, Abschnitt 5.
+
+---
+
+### Was vorher galt: **A auf voller Auflösung bestätigen** (→ Lauf 16, oben)
+
+> ## 🟢 22.09., abends — der POC trägt: **der CNN ist rettbar**
+>
+> | | berichtet | Latte | Güte | Seed-Streuung |
+> |---|---|---|---|---|
+> | **OP06** | **6.571 °C** | 10.7995 | **0.61x** | 0.38 °C |
+> | **OP09** | **5.813 °C** | 7.7663 | **0.75x** | 0.87 °C |
+>
+> **3/3 Seeds unter der Latte auf beiden OPs**, Streuung **unter** der
+> Lesbarkeitsschwelle von ~1 °C. Von 27.11 ± 22.26 °C am Vormittag auf
+> 6.57 ± 0.38 °C. Die Diagnose war richtig: es lag an der Schleife
+> (`--tbptt`), nicht am Netz.
+>
+> Die trivialen Latten stimmen mit `PINNmodulusTwo/FAHRPLAN.md:1244` auf drei
+> bis vier Nachkommastellen überein — der Ladepfad baut dieselbe Haltemenge,
+> und der Vergleich gegen den PINN (6.270 / 3.585, **ein** Seed, mit
+> Randterm) steht: **auf OP06 gleichauf, auf OP09 zurück.**
+>
+> ⚠ **Der Lauf lief bei `--subsample 10`** (1445 Schritte), nicht bei 2
+> (~8040). Das ist die leichtere Aufgabe. Voller Bericht in
+> **[`TRAININGS_BERICHT_2026-09-22_KonfigA_POC.md`](../TRAININGS_BERICHT_2026-09-22_KonfigA_POC.md)**,
+> Übergabe in **[`UEBERGABE_2026-09-22_ABEND.md`](../UEBERGABE_2026-09-22_ABEND.md)**.
+
+> ## 🔴 Und der Befund, der alles andere überlagert: **O13 ist zurück**
+>
+> Der Plot
+> **[`15_konfigA_OP06_fehler_ueber_zeit.png`](laeufe/15_konfigA_OP06_fehler_ueber_zeit.png)**
+> zeigt den Fehler über die Trajektorie statt als Mittelwert:
+>
+> | t [s] | 131 | 394 | 788 | 919 | 1181 | 1444 |
+> |---|---|---|---|---|---|---|
+> | **MAE [°C]** | 9.8 | **1.1** | 7.8 | 3.7 | 8.9 | **15.0** |
+>
+> **Bei 394 s ist das Modell auf dem ~1 K-Ziel. Am Ende liegt es bei 15 °C**,
+> und der *kleinste* Fehler über alle 363 Punkte beträgt dort noch 11.5 °C —
+> das ganze Feld liegt daneben. Ein **Pegelfehler**, keine Streuung.
+>
+> `model.py` hat genau das vorhergesagt: die Delta-Form trägt den Level
+> **ohne Leck**, und der dissipative Diffusionskern sollte es liefern.
+> **Arm A hat ihn nicht.** Damit ist Arm B nicht der nächste Listenpunkt,
+> sondern die Behandlung für die beobachtete Krankheit.
+>
+> **Seit dem 22.09., abends, misst `train.py` das selbst**: sechs Abschnitte,
+> MAE und vorzeichenbehafteter Bias je Abschnitt, plus
+> `drift = MAE(letzter Abschnitt)/MAE(gesamt)`. Ab 1.5 meldet der Lauf O13.
+
+### Schritt 1 — volle Auflösung, ~45 min (gelaufen am 23.09., Lauf 16 — siehe oben)
+
+Nur `--subsample` und `--epochs` ändern sich. Die Lags leiten sich bei
+`--subsample 2` automatisch wieder auf 5/20 ab.
+
+```bash
+python3 GridCNN/train.py --no-physics --seeds 3 --epochs 60 \
+    --subsample 2 --inner-steps 25 --tbptt-start 4 --tbptt 16 \
+    --val-every 2 --device cuda --cache data_cache \
+    2>&1 | tee 16_konfigA_voll.txt
+```
+
+Worauf zu schauen ist: hält die Güte < 1.0 bei fünffachem Horizont? Was sagt
+`drift`? Und vor allem — **was sagt der Bias?** Negativ zum Ende heißt, das
+Modell wird zu kalt; positiv, zu warm. Das ist neu und es entscheidet, wo man
+ansetzt.
+
+Geht es schief: Frühphase instabil → `--tbptt-start 8`; val-Kurve schwankt →
+EMA. Beides begründet, aber **eins nach dem anderen**.
+
+### Schritt 2 — CFL entscheiden (eine Rechnung, kein Lauf)
+
+110× über der Schranke bei `--subsample 2`, 551× bei 10. Für A egal, für
+B/C/D ein Blocker. Zuerst zu prüfen: sind die Materialdaten echt? Ein
+synthetisches `material_properties/` macht das Problem viel steifer, als es
+ist — die `[CFL]`-Zeile sagt das selbst.
+
+### Schritt 3 — Arm B, der Physik-POC
+
+Gated auf Schritt 2. Die Frage ist präzise: **holt der dissipative
+Diffusionskern den Pegel zurück?** Messbar an `drift` und `bias`, nicht am
+Mittelwert.
+
+### Und was keiner dieser Schritte holt: die Datenlücken
+
+Bevor jemand Gewichte gegen eine Datenlücke tunt — die beiden Halte-OPs haben
+**verschiedene Krankheiten**, und keine davon ist eine Architekturfrage:
+
+| | leidet an | Behandlung |
+|---|---|---|
+| **OP06** | **O14**: bei `V̇ = 0` hört das Training bei 10 °C auf, OP06 sitzt bei 25 °C | ein neuer Trainings-OP bei `V̇ = 0`, `T0 = 25…30` |
+| **OP09** | **T0/T_fluid-Konfundierung**: in allen elf Trainings-OPs ist `T0 = T_fluid` | ein neuer Lauf mit `T0 = 25`, `T_fluid = 15` |
+
+Wer ist wer, welche Stufe, warum ist OP15 der speziellste von allen und warum
+kann man die Test-OPs **nicht** einfach ins Training ziehen — das steht im
+**[`README_OPS_STECKBRIEF.md`](README_OPS_STECKBRIEF.md)**. Das Urteil über den
+Versuchsplan und die Bestellliste stehen in
+[`README_OPS.md`](README_OPS.md).
+
+### Parallel, weil Code und kein Lauf: den Wandterm verdrahten
+
+`_wall_ghost` wirft weiterhin — **der genannte Grund war abgestanden.**
+Stufe 2 ist durch, `U(V̇)` kalibriert, `physics.UCurve` und
+`physics.WallModel.ghost` gebaut und getestet. Was wirklich fehlt:
+
+1. `op_tensoren` füllt `OPTensors.q_wall_meas` nie → `wall_loss` kann nicht
+   laufen.
+2. `WallModel.ghost` braucht `t_in` und `mdot` **je Zeitschritt**; beide
+   liegen seit Stufe 2 im Bündel, sind aber nicht in `OPTensors` übernommen.
+
+---
+
+### Was vorher galt: **der POC — unterbietet der CNN die Latte überhaupt?**
+
+> **Erledigt am 22.09., abends.** Er trägt, siehe oben.
+
+### Die vier offenen Fragen aus Abschnitt 4 des Berichts — entschieden
+
+| | Frage | Entscheidung |
+|---|---|---|
+| **1** | Budget: 60 × 100 gesetzt? | **Nein, erster Schuss.** Was konstant gehört, ist `inner_steps × k`, nicht `inner_steps`: mit einem Fenster von `k` kostet ein Update `k` Schritte. Der POC fährt 40 × 25 bei `k` bis 16 — viermal die Arbeit vom 22.09., bei sechzehnfachem Horizont |
+| **2** | Darf sich das Experiment ändern? | **Ja.** Clipping, LR-Plan und TBPTT sind **Protokoll**, keine Experimentvariablen: sie beschreiben, *wie* trainiert wird, nicht *was* verglichen wird. Einmal festgelegt, dann identisch für A, B, C und D. Der Einwand „dann ist A die Latte, und die ist unbrauchbar" trägt nicht — A wie am 22.09. **ist** keine Latte und kann darum auch keine verlieren. Der alte Pfad bleibt exakt reproduzierbar: `--tbptt 1 --clip-grad 0 --lr-plan konstant --clamp 50 --lag1 5 --lag2 20` |
+| **3** | `--clamp 50` — gewählt oder geerbt? | **Geerbt**, aus `PINNmodulusTwo`. Bei ±480 °C fängt er nichts ab, was noch zu retten wäre. Die Vorgabe ist jetzt `auto`: das Dreifache der größten Auslenkung in den Labels, aus den Daten gerechnet und in °C gedruckt |
+| **4** | CFL für B/C/D — kleineres oder größeres `subsample`? | **Noch nicht zu entscheiden, und das ist die Entscheidung.** Arm A ist `--no-physics`, dort gibt es keine CFL-Schranke; der POC braucht die Antwort also nicht. Umgekehrt liefert er den Eingang für sie: erst wenn bekannt ist, wie viel Horizont das Netz überhaupt trägt, ist die Gabelung eine Rechnung statt eines Ratens. ⚠ **Festhalten:** `--subsample 10` *verschärft* CFL für B/C/D auf rund **550×**. Der POC-Befehl unten ist deshalb **kein** Vorgriff auf B |
+
+### Was dafür gebaut wurde (22.09., abends)
+
+| Stufe | | |
+|---|---|---|
+| **I — Messung** | val-MAE je `--val-every` Epochen, `model_best.pt`, Sättigung als **Anteil**, triviale Latten **vor** jedem Lauf und **in jeder val-Zeile** (`0.79x Latte`) | ändert das Experiment nicht |
+| **I+ — Berichtsregel** | berichtet wird der **Median über das letzte Drittel** der Messpunkte. Nicht das Beste: das wäre auf der Haltemenge ausgewählt, und die Haltemenge ist hier die ganze Messung. Bestes und letztes stehen als Diagnose daneben | ändert das Experiment nicht |
+| **II — Stabilität** | `--clip-grad 1.0`, `--lr-plan cosine`, `--clamp auto`, Verwerfen nicht-endlicher Updates, Gradientennorm im Log | Protokoll (Frage 2) |
+| **5 — der Bruch selbst** | **`--tbptt`**: truncated BPTT. Das Fenster rollt **mit** Gradient und frisst sich selbst; ab Schritt 1 ist der Anker die eigene Vorhersage. Das schließt die Lücke „ein Schritt trainiert, ~8040 gemessen" | Protokoll (Frage 2) |
+| **Tempo** | Lags aus **Sekunden** statt Schritten (5/20 bei `--subsample 2` unverändert), val-Rollout gebatcht, Wanduhr je Epoche | ändert das Experiment nicht |
+
+### Der Befehl
+
+```bash
+{ python3 GridCNN/train.py --no-physics --seeds 1 --epochs 3 \
+      --subsample 10 --inner-steps 4 --tbptt-start 2 --tbptt 8 \
+      --val-every 1 --device cuda --cache data_cache \
+      --artifacts-dir /tmp/poc_smoke \
+  && python3 GridCNN/train.py --no-physics --seeds 3 --epochs 40 \
+      --subsample 10 --inner-steps 25 --tbptt-start 4 --tbptt 16 \
+      --val-every 2 --device cuda --cache data_cache ; } \
+  2>&1 | tee 15_konfigA_poc.txt
+```
+
+Der erste Lauf ist ein Rauchtest von rund einer Minute: stürzt der Ladepfad
+bei `--subsample 10` ab, fällt das auf, bevor eine halbe Stunde verbrannt ist.
+Der zweite ist der POC. **`--subsample 10` braucht keinen Cache-Rebuild** —
+die `.npz` halten die volle Rohauflösung, `subsample_time` wirkt erst beim
+Laden.
+
+### Was der POC beweist — und was nicht
+
+| | |
+|---|---|
+| ✅ **Beweist** | ob der CNN in Arm A die trivialen Latten (Mittelwert **und** Persistenz) über einen freilaufenden Rollout von ~1608 Schritten unterbietet, und ob die Seed-Streuung unter die Lesbarkeitsschwelle von ~1 °C fällt. Beides liest das `[verdikt]` am Ende vor |
+| ❌ **Beweist nicht** | die volle Auflösung (`--subsample 2`, ~8040 Schritte). Ein kürzerer Horizont ist **leichter**, ein Erfolg hier ist also die schwächere Aussage — ein **Misserfolg** hier ist dafür die starke |
+| ❌ **Beweist nicht** | irgendetwas über B, C oder D. Arm A ist adiabat und ohne Physik: eine **Ablation, keine Latte**, und `--subsample 10` verschärft CFL (Frage 4) |
+
+**Trägt der POC**, ist derselbe Befehl mit `--subsample 2 --epochs 60` die
+Bestätigung auf voller Auflösung, und *danach* ist A die Latte für B.
+**Trägt er nicht**, ist der nächste Hebel `--ema-decay` (hat im Basisprojekt
+O15 repariert) und dann die Netzgröße — nicht ein weiterer Lauf desselben.
+
+---
+
+### Was vorher galt: **A wiederholen, nachdem die Messung repariert ist**
+
+> ## 🔴 22.09., abends — A ist gelaufen und ist **kein Ergebnis**
+>
+> | | Seed 0 | Seed 1 | Seed 2 | Mittel ± σ |
+> |---|---|---|---|---|
+> | val-MAE OP06 | 51.95 | 20.43 | **8.95** | **27.11 ± 22.26 °C** |
+> | val-MAE OP09 | 51.45 | 15.48 | **8.03** | **24.99 ± 23.22 °C** |
+>
+> **Die Streuung ist der Befund, nicht der Mittelwert.** 22 °C gegen eine
+> Lesbarkeitsschwelle von ~1 °C — dieser Lauf kann **nichts ranken**. Und der
+> beste Seed unterbietet die triviale Latte nicht: „sage überall den
+> Trainingsmittelwert" liegt bei ~7.7 °C, Seed 2 bei 8.03 / 8.95.
+>
+> Ursache ist der Bruch zwischen Training und Messung: **ein Schritt trainiert,
+> ~8040 gemessen.** Bis zu **99.8 %** aller OP-Zeitschritte lagen an `--clamp`.
+> Volle Analyse in **[`TRAININGS_BERICHT_2026-09-22_KonfigA.md`](../TRAININGS_BERICHT_2026-09-22_KonfigA.md)**,
+> die Epochenzeile erklärt **[`README_DIAGNOSTIK.md`](README_DIAGNOSTIK.md)**.
+>
+> **Stufe I ist am selben Abend gebaut** (Messung, ohne das Experiment
+> anzufassen): val-MAE je `--val-every` Epochen mit `model_best.pt`, Sättigung
+> als Anteil, und die trivialen Latten vor jedem Lauf.
+>
+> **Überholt noch am selben Abend.** Eine reine Wiederholung von A hätte die
+> Messung repariert und die Ursache stehen lassen: der Bruch zwischen „ein
+> Schritt trainiert" und „~8040 gemessen" liegt nicht in der Messung, sondern
+> in der Schleife. Ein zweiter Lauf desselben Protokolls hätte dieselbe
+> 22-°C-Streuung sauberer berichtet — und wäre wieder kein Ergebnis gewesen.
+> Stattdessen läuft der POC oben, mit Stufe 5 und II im Protokoll.
+
+### Was vorher galt: Konfiguration A fahren — Stufe 1 und 2 sind durch
+
+> **Stand 22.09., abends.** Stufe 1 abgeschlossen (`U(V̇)` kalibriert), Stufe 2
+> **durch mit grünem Tor** (17/17 OPs auf Schema v3, die drei Reports
+> zeichengleich), und der **Ladepfad ist angeschlossen** — `train.py` trainiert.
+> Was jetzt fehlt, ist kein Code, sondern eine **Messung**: Konfiguration A,
+> `--seeds 3`, auf der Maschine mit echten Daten. Sie ist die Latte für B, C
+> und D.
+>
+> ```bash
+> python3 GridCNN/train.py --no-physics --seeds 3 --epochs 60 \
+>     --device cuda --cache data_cache 2>&1 | tee 14_konfigA.txt
+> ```
+>
+> Achte auf die `[CFL]`-Zeile am Anfang: liegt `dt_n` über der Schranke, ist
+> ein weglaufender Rollout **damit** erklärt und nicht mit dem Netz. Arm A ist
+> davon unberührt (keine Physik in der Architektur), B/C/D nicht.
+>
+> Der Lauf ist **adiabat** — `--w-wall` bleibt 0, bis `UCurve` an die vier
+> neuen Cache-Größen angeschlossen ist. Das ist eine **Ablation, keine Latte**.
+
+### Was Stufe 2 war — erledigt
+
+**Drei Läufe am 22.09.** (`10`/`11`/`12_bilanz.txt`; sieben
+Konstant-Treiber-Trainings-OPs, drei Flusslevel). **Stufe 1 ist damit
+abgeschlossen** — `U(V̇)` ist kalibriert, gegen die Bezugstemperatur, die
+`physics.UCurve` selbst vorschreibt:
+
+| V̇ [l/min] | ṁ [kg/s] | **`U(T_mittel)`** [W/m²K] | Streuung |
+|---|---|---|---|
+| 0 | 0 | **50.4** | 2.10 % |
+| 15 | 0.0013 | **421.0** | 1.38 % |
+| 30 | 0.0026 | **501.7** | 1.09 % |
+
+**Das sind genau die drei trainierten Flusslevel** — also genau die
+Stützstellen, die `UCurve` braucht. Sie interpoliert linear dazwischen und
+klemmt außerhalb. **Null freie Parameter, und keine Funktionsform nötig.**
+
+> **Der Wandterm ist damit kalibrierbar.** Das war der Engpass in
+> „Was fehlt"; er ist weg. Was noch fehlt, ist der Weg der vier Größen *in den
+> Cache* — und das ist Stufe 2.
+
+**Stufe 2** schreibt `q_solid_to_fluid`, `fluid_out_temp`, `cp_fluid`, `mdot`
+— und `total_w`, weil O17 sonst nie messbar wird — in `generate_cache.py` und
+`opbundle_contract.md`, hebt `schema_version` und baut **alle siebzehn** OPs
+neu (10–30 min). `generate_cache.py` ohne Argumente baut nur OP05–OP07; die
+Liste gehört ausgeschrieben, **OP19 eingeschlossen**.
+
+**Tor:** `profile_report`, `coverage_report` und `energy_balance_report`
+liefern exakt dieselben Zahlen wie vorher.
 
 > ### Was der Lauf vom 22.09. ergeben hat
 >
@@ -60,7 +343,7 @@ steckt.
 > | 1 — `Q_ht/tot` | **0.700 … 0.772** mit Fluss | 🔴 **Die Hypothese aus 1a ist widerlegt** — der Monitor draint **nicht** die ganze Erzeugung |
 > | 1 — `Q_ht/jr1` | **2.286 … 2.566** | 🟡 nahe „beide Platten", aber **nicht konstant** — siehe unten |
 > | 1 — `tot/jr1` | **2.99 … 3.44** | die Zelle erzeugt **gut das Dreifache** einer Rolle |
-> | 4 — `U(V̇)` | **abgestürzt** | offen, der Wiederholungslauf holt es |
+> | 4 — `U(V̇)` | **50.4 / 421.0 / 501.7** W/m²K gegen `T_mittel` | 🟢 je Flusslevel auf **1.1–2.1 %** zusammen. Siehe 1e |
 >
 > **Der Befund, der den Plan ändert:** `Q_ht/jr1` **hängt vom Flusslevel ab** —
 > 2.286 / 2.302 / 2.304 bei V̇ = 0.0013 gegen 2.488 / 2.566 bei 0.0026, und
@@ -129,7 +412,7 @@ Zeitspalte.
 | Stufe | was | Dauer | Tor |
 |---|---|---|---|
 | **0** | Rangtest | ✅ **erledigt — ROT, überstimmt** | 4 Moden. Folge: 16 × 3 statt 64 × 4 |
-| **1** | Bilanz-Gegenprobe | 🟡 **teilweise**, zweiter Lauf offen | geht die Wärmebilanz auf? |
+| **1** | Bilanz-Gegenprobe | ✅ **erledigt 22.09.** | Fluidbilanz 🟢, `U(V̇)` kalibriert, `Q_ht/jr1` als flussabhängig entlarvt |
 | **2** | vier Größen in den Cache | 30 min | Reports weiter grün? |
 | **3** | **Physik ohne Netz** — der explizite Löser | ✅ **gebaut**, läuft adiabat | schlägt reine Physik die trivialen Vorhersager? |
 | **4** | **der CNN**, Ein-Schritt-Training | ✅ **gebaut**, Ladepfad offen | schlägt er Stufe 3? |
@@ -147,7 +430,7 @@ Zeitspalte.
 
 ---
 
-# Stufe 1 — Geht die Bilanz auf? 🟡
+# Stufe 1 — Geht die Bilanz auf? ✅ **abgeschlossen 22.09.**
 
 **Gebaut:** [`tools/balance_check.py`](tools/balance_check.py). Erster Lauf am
 09.09., Zahlen in der Stand-Tabelle. Drei Befunde:
@@ -184,14 +467,27 @@ Energie wird **gespeichert**, nicht abtransportiert.
 
 Und die Zahlen bestätigen es:
 
-| | `U` [W/m²K] |
-|---|---|
-| mit Fluss (V̇ = 30) | ~1130 |
-| ohne Fluss | ~50 |
+| | `U` [W/m²K] | 22.09. korrigiert |
+|---|---|---|
+| mit Fluss (V̇ = 30) | ~~~1130~~ | **326** gegen `T_in`; gegen `T_mittel` höher, **der Lauf misst es** |
+| ohne Fluss | ~50 | **50.3** — bestätigt |
 
-Faktor **~23**. Stehendes Flüssigkühlmittel bei O(50) und Zwangskonvektion in
-einer Kühlplatte bei O(1000) sind beide lehrbuchplausibel. **Das ist eine
-Bestätigung der Messkette, kein Fehler.**
+~~Faktor **~23**.~~ ⚠ **Zurückgezogen am 22.09., siehe 1e.** Die 1130 war nicht
+gemessen, sondern die Folge einer anderen Bezugstemperatur: `T_in` fehlte, das
+Werkzeug fiel auf `T_out` zurück. Konsistent gerechnet ist der Faktor
+**4.5× … 7.6×**, nicht 23.
+
+**Die Aussage von 1b bleibt trotzdem stehen** — und darauf kam es an:
+stehendes Flüssigkühlmittel bei O(50) und Zwangskonvektion in einer Kühlplatte
+deutlich darüber sind beide lehrbuchplausibel. **Das ist eine Bestätigung der
+Messkette, kein Fehler.** Was fällt, ist nur das „O(1000)": für einen
+*Gesamtdurchgang* inklusive der 1.9 mm Festkörper sind O(200…500) das
+Erwartbare, und die korrigierte Zahl ist damit die plausiblere.
+
+> ⚠ Für V̇ = 15 ist `U(T_mittel) ≈ 381` belastbar — die Wandüberhöhung
+> `dT_wand ≈ 8.92 K` lässt sich aus der 09.09.-Zahl zurückrechnen und trifft
+> sie auf drei Stellen. Für V̇ = 30 gibt es **keinen solchen Anker**; dort
+> steht keine Schätzung, sondern der Lauf.
 
 ### Was daraus folgt, ist ein Modellbefund
 
@@ -264,6 +560,142 @@ es erst, wenn `total_w` in **Stufe 2** mit in den Cache geht.
 Flusslevel auf einer Kurve, ist der flussabhängige Teil erklärt; was dann an
 konstantem Faktor übrig bleibt, ist die Konvention. Vorher ist jede Korrektur
 an `Q` oder `A` geraten.
+
+## 1e. `U` hing an der Bezugstemperatur — und die war falsch gewählt
+
+Abschnitt 4 hat geliefert, wonach gefragt war:
+
+| V̇ [l/min] | ṁ | OPs | `U(T_in)` [W/m²K] | Spanne |
+|---|---|---|---|---|
+| 0 | 0 | OP07, OP14 | 50.83 / 49.78 | **2.1 %** |
+| 15 | 0.0013 | OP01–OP03 | 229.25 / 226.64 / 230.31 | **1.6 %** |
+| 30 | 0.0026 | OP04, OP05 | 324.37 / 328.48 | **1.3 %** |
+
+**Je Flusslevel liegen die OPs auf 1.3–2.1 % zusammen**, obwohl sie sich in
+C-Rate, SOC und Starttemperatur unterscheiden. `U` hängt also **am Fluss und
+an sonst nichts** — das ist der Teil des Tores, der hält.
+
+### Aber der Absolutwert steht gegen die falsche Temperatur
+
+`physics.UCurve` schreibt die Kalibrierung selbst vor:
+
+```
+U(t) = Q_dot(t) / (A * (T2_mittel(t) - T_fluid_mittel(t)))
+```
+
+**`T_fluid_mittel`** — und das passt zu `WallModel._advective`, das entlang +y
+marschiert und dabei von `T_in` bis `T_out` läuft. Das Werkzeug rechnet gegen
+**`T_in`**, also gegen den kältesten Punkt des Marsches. Das Fluid erwärmt sich
+um `dT_fluid` = 7.11 K (V̇ = 15) bzw. 4.12 K (V̇ = 30) — bei einer
+Wandüberhöhung von grob 9 K ist das **kein Detail, sondern der halbe Nenner**.
+
+| Bezug (OP01) | `U` | |
+|---|---|---|
+| `T_in` | 229.25 | **untere** Schranke |
+| `T_mittel` | **421.66** | **das, was `UCurve` will** — gemessen |
+| `T_out` | **−8684** | **unbrauchbar**, siehe unten |
+
+### Gemessen, alle drei nebeneinander
+
+| V̇ | ṁ | `U(T_in)` | **`U(T_mittel)`** | `U(T_out)` | `dT_fluid` |
+|---|---|---|---|---|---|
+| 0 | 0 | 50.83 / 49.78 | **50.91 / 49.85** | 50.98 / 49.92 | 0.37 / 0.47 |
+| 15 | 0.0013 | 229.25 / 226.64 / 230.31 | **421.66 / 417.71 / 423.52** | −8684 / +21933 / −12729 | 7.11 / 8.15 / 6.69 |
+| 30 | 0.0026 | 324.37 / 328.48 | **498.92 / 504.40** | 1129.94 / 1132.60 | 4.12 / 3.47 |
+
+**`U(T_mittel)` streut je Level um 1.09 / 1.38 / 2.10 %** — genauso eng wie
+`U(T_in)`. Die Bezugstemperatur verschiebt den Wert, sie verrauscht ihn nicht.
+
+> ### ⚠ `U(T_out)` ist keine obere Schranke, sondern unbrauchbar
+>
+> Bei V̇ = 15 kommen **−8684, +21933, −12729** heraus. `Tw` ist ein
+> **Flächenmittel** der Wand, `T_out` das **heiße Ende** des Kanals — die
+> Differenz wechselt das Vorzeichen, und der Mittelwert von `q/(A·dT)` läuft
+> weg. Es werden die falschen Paare verglichen, nicht bloß die falsche Seite.
+>
+> **Bei V̇ = 30 wechselt sie nicht** und liefert brave 1129.94 / 1132.60.
+> Die Default-OPs vom 09.09. waren **OP04, OP05, OP07, OP14** — also genau
+> die zwei Fluss-OPs, bei denen der Fehler *plausibel aussieht*. Deshalb kam
+> damals „~1130" heraus und nicht offensichtlicher Unsinn.
+
+> ### Und damit ist die `~1130` vom 09.09. erklärt
+>
+> Am 09.09. fand das Werkzeug die `T_in`-Spalte nicht (`nan` in Abschnitt 2)
+> und fiel in Abschnitt 4 auf **`T_out`** zurück. Das steht jetzt nicht mehr
+> als Rekonstruktion da, sondern **als Zahl in derselben Tabelle**:
+>
+> | | gemessen `U(T_out)` | Stand-Tabelle 09.09. |
+> |---|---|---|
+> | OP04 / OP05 | **1129.94 / 1132.60** | „~1130" |
+> | OP07 / OP14 | **50.98 / 49.92** | „~50" |
+>
+> **Die Zahl war kein Messergebnis, sondern die Bezugstemperatur.**
+
+⚠ **Damit ist auch „Faktor ~23" aus 1b hinfällig.** Er verglich 1130
+(`T_out`-Bezug, mit Fluss) gegen 50 (`T_in`-Bezug, ohne Fluss) — zwei
+verschiedene Maßstäbe. Konsistent gerechnet sind es **4.5× gegen `T_in`** bzw.
+grob **7.6× gegen `T_mittel`**. Die *Aussage* von 1b bleibt: stehendes Fluid
+trägt deutlich weniger als strömendes, und beide Größenordnungen sind
+plausibel. Was fällt, ist das „O(1000) in einer Kühlplatte" — als
+**Gesamtdurchgang inklusive der 1.9 mm Festkörper** sind O(200…400) das
+Erwartbare, und die korrigierte Zahl ist damit die plausiblere.
+
+### Was das Tor jetzt wirklich sagt
+
+| Teilfrage | Stand |
+|---|---|
+| hängt `U` nur von V̇ ab? | 🟢 **ja** — 1.1–2.1 % Streuung je Level über OPs mit verschiedener C-Rate, SOC, Starttemperatur |
+| ist der Absolutwert belastbar? | 🟢 **ja** — gegen `T_mittel`, wie `UCurve` es vorschreibt |
+| **reicht das für den Wandterm?** | 🟢 **ja** — die drei Level *sind* die Stützstellen. `UCurve` interpoliert und klemmt, **null freie Parameter** |
+| liegt `U(V̇)` auf *einer Kurve*? | 🟡 **nicht entscheidbar** — siehe unten. **Blockiert aber nichts** |
+
+⚠ **„Drei Flusslevel" sind für die Kurven*form* nur zwei.** V̇ = 0 ist nach 1b
+ein **anderer Mechanismus** — stehendes Fluid lädt seine Wärmekapazität, Modus
+`capacity`, nicht Konvektion. Für die Advektionsform bleiben **zwei**
+Stützstellen, und durch zwei Punkte geht jedes Zweiparametergesetz exakt.
+
+**Das ist aber kein Hindernis**, weil die Form gar nicht gebraucht wird: jeder
+Trainings-OP fährt eines der drei Level, und dort steht der gemessene Wert.
+Die Form wird erst außerhalb gebraucht — und außerhalb klemmt `UCurve`
+ausdrücklich und zählt in `clamped_calls` mit.
+
+### Was die zwei Punkte hergeben — und was nicht
+
+Gemessen: `U(30)/U(15) = 501.7 / 421.0 = 1.1917`, also **`U ∝ ṁ^0.253`**.
+Deutlich unter dem turbulenten 0.8 — passend zu einem **Serienwiderstand**,
+denn die 1.9 mm Festkörper stecken laut `UCurve` ausdrücklich in `U`. Setzt
+man `1/U = R_s + C·ṁ^{-0.8}` an, liefern die zwei Punkte
+`U(ṁ→∞) ≈ 677 W/m²K`; `R_s` entspräche 1.9 mm bei **λ ≈ 1.29 W/mK** — also
+kein Metall, sondern eher Kontakt oder Spalt.
+
+> ⚠ **Zwei Punkte, zwei Parameter: das ist eine Interpolation, kein Test.**
+> Der Exponent 0.8 ist angesetzt, nicht gemessen. `R_s` und die 677 sind
+> Folgen dieser Annahme und dürfen nicht als Messwerte zitiert werden.
+
+**Entschieden wird es an OP16** (V̇ = 90, ṁ ≈ 0.0078) — und der Test ist
+scharf:
+
+| Lesart | Vorhersage `U` bei OP16 |
+|---|---|
+| reines Potenzgesetz `ṁ^0.253` | **662** |
+| Serienwiderstand mit `ṁ^{-0.8}` | **591** |
+
+**12 % auseinander gegen 1.1–1.4 % Streuung je Level.** Die Gegenprobe
+trennt die beiden also sauber. OP16 bleibt **Test**-OP: Gegenprobe, nie
+Stützstelle.
+
+### Nebenbefund: `A = 0.0206 m²` ist die Wandfläche des Gitters selbst
+
+Nachgerechnet aus der am 22.09. gemessenen Geometrie:
+`0.198094368 × 0.104431991 = 0.0206874 m²`. Die im Werkzeug benutzte `0.0206`
+liegt **0.42 % darunter**. Also ist `A` keine geratene Größe, sondern genau
+die y × z-Fläche, durch die das Modell kühlt — und damit zu `UCurve`
+konsistent, weil Kalibrierung und Wandterm dieselbe Fläche benutzen.
+
+> Die 0.42 % liegen **unter der Streuung je Flusslevel** (1.1–2.1 %), ein
+> neuer Lauf lohnt dafür nicht. Aber die Zahl gehört nachgezogen, wenn
+> `balance_check.py` das nächste Mal ohnehin läuft — es ist derselbe
+> Konstantentyp, der am 22.09. schon bei der Spannweite falsch war.
 
 **Blockiert nichts mehr:** `data_raw/` liegt vor.
 
@@ -397,6 +829,33 @@ Drei Konfigurationen, die sich in genau einer Sache unterscheiden:
 
 A → B ändert die Architektur bei gleichem Verlust, B → C den Verlust bei
 gleicher Architektur. Jede Differenz ist einem einzigen Eingriff zuzuordnen.
+
+> ### ⚠ Parallel läuft hier **noch nichts** — und das ist eine Bremse, keine Fußnote
+>
+> Vier Arme × mindestens drei Seeds sind **zwölf Läufe**. Das ist genau die
+> Form, für die `PINNmodulusTwo/sweep.py` gebaut wurde und dort **3.69× mit
+> MPS** bringt. Für `GridCNN` steht davon nichts bereit, aus drei Gründen, die
+> alle zuerst wegmüssen:
+>
+> 1. **`GridCNN` hat kein `sweep.py`**, und `PINNmodulusTwo/sweep.py` kann hier
+>    nicht einspringen: `TRAIN_PY = THIS_DIR / "train.py"` zeigt fest auf den
+>    PINN.
+> 2. ~~Keine Artefakt-Trennung.~~ ✅ **22.09. erledigt** — jeder Seed
+>    schreibt nach `<artifacts-dir>/<Arm>/seed<N>/`.
+> 3. ~~`--seeds` dreht keine Schleife.~~ ✅ **22.09. erledigt** — `--seeds N`
+>    fährt N Läufe und meldet Mittel ± `std(ddof=1)`. Vorher war es eine
+>    Warnschwelle: wer `--seeds 3` tippte, bekam **einen** Lauf und glaubte,
+>    er habe drei — dieselbe Klasse stiller Zusage wie `xyz = raw[0]`.
+>
+> **Es fehlt also nur noch der Treiber.** Der Ladepfad steht, die Trennung
+> steht, die Seeds laufen. Ein `-j` über Arme × Seeds ist jetzt Fleißarbeit
+> und kein Umbau mehr — und `sweep.py` bleibt trotzdem der falsche Ort dafür,
+> weil `TRAIN_PY` dort fest auf den PINN zeigt.
+>
+> **MPS gehört trotzdem an** — er kostet einen Einzellauf nichts und ist dann
+> schon da. Für den Cache-Rebuild ändert er allerdings **gar nichts**: der ist
+> pandas auf CSVs, also CPU und Platte. Dort hilft `generate_cache.py -j`,
+> nicht MPS.
 
 > ### Arm D — neu am 22.09., ✅ gebaut
 >
@@ -561,7 +1020,23 @@ Damit der Umfang nicht wandert:
 | **22.09.** | **Stufe 1, zweiter Lauf.** Fluidbilanz **1.030 … 1.062** → `ghost_hi` steht. `Q_ht/tot = 0.700 … 0.772`, **nicht ≈ 1** — die Hypothese aus 1a ist widerlegt. `tot/jr1 = 2.99 … 3.44` belegt **O17** |
 | **22.09.** | **`Q_ht/jr1` ist keine Konstante** — 2.29 bei V̇ = 0.0013 gegen 2.53 bei 0.0026. Eine Bezugsfläche kann nicht flussabhängig sein, also ist das Tor „Q halbieren oder A verdoppeln" falsch gestellt. Siehe 1d |
 | **22.09.** | **`balance_check.py` Abschnitt 4 abgestürzt und repariert:** das Skript las die Zeitachse von zwei der fünf CSVs und legte den Rest stillschweigend darauf. In Abschnitt 2 hat numpy das still gebroadcastet — richtige Zahl, falscher Grund |
+| **22.09.** | **`U` je Flusslevel gemessen:** 50.3 / 228.7 / 326.4 W/m²K, je Level **1.3–2.1 %** Streuung über OPs mit verschiedener C-Rate, SOC und Starttemperatur. `U` hängt am Fluss und an sonst nichts |
+| **22.09.** | **Die `~1130` vom 09.09. ist zurückgezogen.** Sie war der `T_out`-Bezug, in den das Werkzeug fiel, weil es `T_in` nicht fand — nachgerechnet ergibt er 1128.5 aus `U(T_in) = 229.25` und `dT_fluid = 7.108`. Damit fällt auch „Faktor ~23" aus 1b. Siehe 1e |
+| **22.09.** | **Die Bezugstemperatur ist der größere Hebel als die Halbmodellfrage:** `U` gegen `T_in` / `T_mittel` / `T_out` steht wie 1 : 1.7 : 4.9. `UCurve` verlangt `T_mittel`, das Werkzeug rechnete gegen `T_in` — beide Schranken stehen jetzt nebeneinander in der Tabelle |
+| **22.09.** | **Stufe 1 abgeschlossen. `U(T_mittel)` = 50.4 / 421.0 / 501.7 W/m²K** für V̇ = 0 / 15 / 30, Streuung 2.10 / 1.38 / 1.09 %. Das sind genau die Stützstellen, die `UCurve` braucht — **der Wandterm ist kalibrierbar, null freie Parameter** |
+| **22.09.** | **`U(T_out)` ist unbrauchbar, nicht nur eine obere Schranke:** −8684 / +21933 / −12729 bei V̇ = 15. `Tw` ist ein Flächenmittel, `T_out` das heiße Kanalende — die Differenz wechselt das Vorzeichen. Bei V̇ = 30 wechselt sie *nicht*, und die Default-OPs vom 09.09. waren genau diese zwei. Deshalb sah der Fehler damals wie eine Messung aus |
+| **22.09.** | **Die Kurvenform bleibt offen und blockiert nichts.** Zwei Konvektionspunkte, `U ∝ ṁ^0.253`. OP16 trennt Potenzgesetz (662) von Serienwiderstand (591) — 12 % gegen 1.1–1.4 % Streuung, also eine scharfe Gegenprobe |
+| **22.09.** | **`A = 0.0206 m²` ist die y × z-Fläche des Gitters selbst** — gemessen 0.0206874, benutzt 0.0206, 0.42 % darunter. Unter der Streuung, aber nachzuziehen |
 | **22.09.** | Beide fallenden Tests repariert: die float32-Schranke im gepaddeten Rollout (1.2e-6 gegen 1e-6, hielt zufällig) und **`torch.equal` im float64-Vergleich** — Bitgleichheit zwischen zwei Batchgrößen ist durch nichts garantiert und war nicht portabel (lokal grün, auf dem Runner rot). Jetzt beide gegen eine relative Schranke `1e-12` |
+| **22.09.** | **Stufe 2 ist durch — Tor grün.** `generate_cache.py --all` hat **17/17** OPs auf Schema v3 gebaut; `profile_report`, `coverage_report` und `energy_balance_report` liefern danach **zeichengleich** dieselben Zahlen (`diff` leer). Der Wandpfad liegt im Cache, ohne dass sich etwas Bestehendes bewegt hat |
+| **22.09.** | **Der Ladepfad ist angeschlossen.** `train.py` trainiert — `lade_datensatz` zieht die Bündel über `PINNmodulusTwo/data.py`, `layout_aus_bundle` leitet den Reshape aus `bundle.xn` (float64) ab, `statics_aus_bundle` holt `lam` aus `materials`, nicht aus `Fo` zurückgerechnet. Alle vier Arme A/B/C/D laufen durch; **11 427 Parameter** wie geplant |
+| **22.09.** | **Die Gitterabbildung ist punktweise geprüft**, nicht angenommen: alle 363 Punkte, für `tn_seq` *und* für den 3×3-Tensor `fo` — der trägt seine Matrixachsen hinten und stünde bei naivem `to_field` auf dem Kopf |
+| **22.09.** | **`--seeds` dreht jetzt eine Schleife.** Vorher war es eine Warnschwelle: wer `--seeds 3` tippte, bekam **einen** Lauf. Jede Wiederholung schreibt in ihr eigenes `--artifacts-dir`, und die Zusammenfassung nennt Mittel **und** `std(ddof=1)` |
+| **22.09.** | **CFL wird vor dem Lauf ausgerechnet, nicht danach gerätselt.** Auf dem synthetischen Fixture liegt der Schritt selbst bei `subsample 1` **53×** über der Schranke (1.9 ms gegen die echten 0.241 s) — die Ersatz-Materialdaten machen das Problem viel steifer, als es ist. Arm A ist davon unberührt, B/C/D laufen dort weg. **Auf der Rechenmaschine mit echten Materialdaten ist das eine andere Zahl** |
+| **22.09.** | 🔴 **Konfiguration A gelaufen — und es ist kein Ergebnis.** val-MAE **27.11 ± 22.26 °C** (OP06) über drei Seeds, bester gegen schlechtesten **Faktor 5.8**. Die Schwelle liegt bei ~1 °C. Der beste Seed unterbietet die Mittelwert-Vorhersage (~7.7 °C) **nicht** |
+| **22.09.** | **Die Ursache ist der Horizont, nicht das Netz:** ein Schritt trainiert, ~8040 frei laufend gemessen. Bis **99.8 %** aller OP-Zeitschritte an `--clamp` (= ±480 °C bei `T_sigma` 9.602). Eine Sättigungsphase vergiftet die nächste Epoche, weil die Historie aus dem eingefrorenen Rollout kommt |
+| **22.09.** | **`data` sagt das Ergebnis nicht vorher:** Seed 0 endet bei 0.332 → 51.95 °C, Seed 2 bei 0.305 → 8.95 °C. Derselbe Verlust, Faktor 5.8 |
+| **22.09.** | **Stufe I gebaut — Messung repariert, Experiment unberührt:** val-MAE je `--val-every` Epochen statt nur am Schluss (der FAHRPLAN verbot „die letzte Zeile ablesen" schon für den PINN), `model_best.pt`, Sättigung als **Anteil** (`88248/88400 = 99.8 %`), und **triviale Latten** vor jedem Lauf |
 
 ## Stand
 
@@ -576,8 +1051,14 @@ Damit der Umfang nicht wandert:
 | 1 | `tot/jr1` | **2.99 … 3.44** — ⅓ bis 40 % der Erzeugung liegt außerhalb der Wickel. **O17 belegt** | **22.09.** |
 | 1 | Fluidbilanz-Verhältnis | ✅ **1.030 … 1.062** — 🟢 `ghost_hi` steht. `T_in` aus `Input Signale.csv` | **22.09.** |
 | 1 | Wandanteil bei ṁ = 0 | **≈ 0.27** — physikalisch richtig (Fluidkapazität), Kriterium war falsch | 09.09. |
-| 1 | `U` mit Fluss / ohne | **~1130 / ~50 W/m²K**, Faktor ~23 — vorläufig, Faktor 2 aus 1a offen | 09.09. |
-| 1 | `U(V̇)` auf einer Kurve? | *offen* — Abschnitt 4 stürzte am 22.09. ab (Zeitachsen), Werkzeug repariert, Lauf steht aus | |
+| 1 | ~~`U` mit Fluss / ohne, Faktor ~23~~ | ~~**~1130 / ~50**~~ — **zurückgezogen 22.09.**: die 1130 war der `T_out`-Bezug, nachgerechnet 1128.5. Siehe 1e | 09.09. |
+| 1 | `U(T_in)` je Flusslevel | **50.3 / 228.7 / 326.4 W/m²K** — je Level **1.3–2.1 %** Streuung über verschiedene Treiber | **22.09.** |
+| 1 | `U` hängt nur von V̇ ab? | 🟢 **ja** — das ist der Teil des Tores, der hält | **22.09.** |
+| 1 | **`U(T_mittel)`, wie `UCurve` es will** | ✅ **50.4 / 421.0 / 501.7 W/m²K** für V̇ = 0 / 15 / 30, Streuung 2.10 / 1.38 / 1.09 % | **22.09.** |
+| 1 | `U(T_out)` | **unbrauchbar** — Vorzeichenwechsel, −8684 … +21933 bei V̇ = 15. Bei V̇ = 30 *nicht*, daher die brave „~1130" vom 09.09. | **22.09.** |
+| 1 | **Wandterm kalibrierbar?** | 🟢 **ja** — die drei trainierten Level *sind* die Stützstellen von `UCurve`, null freie Parameter | **22.09.** |
+| — | `A` gegen die gemessene Geometrie | `0.198094368 × 0.104431991 = 0.0206874 m²`; benutzt wird 0.0206, **0.42 % darunter** | **22.09.** |
+| 1 | `U(V̇)`-Kurven*form* | 🟡 **nicht entscheidbar, blockiert aber nichts** — zwei Konvektionspunkte, `U ∝ ṁ^0.253`. OP16 trennt Potenzgesetz (662) von Serienwiderstand (591): **12 %** gegen 1.1–1.4 % Streuung | **22.09.** |
 | 2 | Reports unverändert | | |
 | — | Reshape aus Koordinaten ableitbar und umkehrbar | **ja**, 0.198094368 × 0.104431991 m | 14.09. / korrigiert 22.09. |
 | — | `xyz` über alle siebzehn Cache-OPs identisch | **ja, bitgleich**, gleiche Reihenfolge | 22.09. |
@@ -669,7 +1150,7 @@ abgefangen, und tote Kanäle werden **gemeldet** statt still zu bleiben.
 
 | | was | blockiert durch |
 |---|---|---|
-| **Ladepfad** | `train.py` an `PINNmodulusTwo/data.py` anschließen: Bündel laden, `OPTensors` füllen, `op_metrics` auswerten | `data_cache` (liegt nicht im Repo) |
+| ~~**Ladepfad**~~ | ~~`train.py` an `PINNmodulusTwo/data.py` anschließen~~ | ✅ **erledigt 22.09.** — `lade_datensatz`, `op_tensoren`, `val_mae`, Seed-Schleife. Gegen das synthetische Fixture rauchgetestet, alle vier Arme laufen. `op_metrics` ist noch nicht angeschlossen: die val-MAE kommt heute aus dem freilaufenden Rollout gegen `tn_seq × T_sigma` |
 
 > **Was der Ladepfad schon vorfindet** (22.09. gebaut, mit Tests):
 > `train.modell_kwargs(args)` übersetzt die Ablationsflags an **einer** Stelle
@@ -677,10 +1158,15 @@ abgefangen, und tote Kanäle werden **gemeldet** statt still zu bleiben.
 > aufrufen. Und `derive_layout` gehört mit `bundle.xn` (float64) × `L_ref`
 > gefüttert, **nicht** mit `op.xn`: der ist float32 und halbiert die Reserve der
 > Äquidistanzprüfung (4e-7 gemessen gegen `rtol` 1e-6).
-| **Wandterm benutzbar** | `U(V̇)` kalibrieren | **Stufe 2**: `q_solid_to_fluid`, `mdot`, `cp_fluid`, `fluid_out_temp` fehlen im Bündel |
+| ~~**Wandterm benutzbar**~~ | ~~`U(V̇)` kalibrieren~~ | ✅ **erledigt 22.09.** — `U(T_mittel)` = 50.4 / 421.0 / 501.7 W/m²K für V̇ = 0 / 15 / 30, die drei trainierten Level. Siehe 1e |
+| **Wandterm im Training** | die vier Größen aus dem Bündel ziehen | **Stufe 2**: `q_solid_to_fluid`, `mdot`, `cp_fluid`, `fluid_out_temp` fehlen im Cache — `U` ist kalibriert, der *Weg dorthin* fehlt |
 | **Physik-Latte** | Stufe 3 mit echter Wand | Wandterm |
 | **`L_wall`** | der einzige Verlustterm mit gemessenem Ziel | Wandterm |
 | **`C_fluid`** | Wärmekapazität des Kühlmittels im Kanal, für den Kapazitätsmodus | liegt nicht vor — **nicht raten** |
+| ~~**Artefakt-Trennung**~~ | ~~`--artifacts-dir` je Lauf~~ | ✅ **erledigt 22.09.** — jeder Seed bekommt `<artifacts-dir>/<Arm>/seed<N>/` mit `model.pt`, `history.json`, `metrics.json` |
+| ~~**Seed-Schleife**~~ | ~~`--seeds` dreht keine~~ | ✅ **erledigt 22.09.** — `--seeds N` fährt N Läufe mit `seed, seed+1, …` und meldet Mittel ± `std(ddof=1)` |
+| **`op_metrics` anschließen** | die Kennzahlen des Basisprojekts (`peak_pred`, `late_bias_frac`) auch für den CNN | nichts — Fleißarbeit. Ohne sie ist **O17 am CNN nicht messbar** |
+| **Ein Sweep-Treiber** | `-j N` über Arme × Seeds, wie `PINNmodulusTwo/sweep.py` | nichts mehr. Die Artefakt-Trennung stand im Weg, sie steht jetzt |
 
 ⚠ **Der Löser und das Training laufen heute adiabat.** Der Wandterm ist gebaut
 und getestet, aber ohne die vier Cache-Größen nicht kalibrierbar.

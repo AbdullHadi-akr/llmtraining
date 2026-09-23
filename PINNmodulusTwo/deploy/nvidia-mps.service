@@ -1,0 +1,67 @@
+# CUDA MPS (Multi-Process Service) als Dienst -- einmal einrichten statt jeden
+# Morgen tippen.
+#
+# Warum ueberhaupt: ohne MPS zerlegt der Treiber die Karte per Zeitscheibe
+# zwischen den Prozessen, statt ihre Kernel nebeneinander auf die SMs zu
+# lassen. Auf der g4dn.2xlarge gemessen (4 Laeufe, --ops OP01 OP02 --epochs 6):
+#
+#     -j 1  seriell        596.2 s
+#     -j 4  ohne MPS       407.4 s   1.46x
+#     -j 4  mit  MPS       161.7 s   3.69x
+#
+# MPS allein traegt davon den Faktor 2.52. Ihn zu vergessen kostet diesen
+# Faktor *lautlos*: die Laeufe werden fertig, die Zahlen stimmen, und nichts in
+# irgendeinem Log sagt, dass die Karte ihre Zeit mit Kontextwechseln verbracht
+# hat. Genau deshalb ist der Daemon ein Dienst und kein Handgriff.
+#
+# ⚠ ZUERST DEN PFAD PRUEFEN. systemd braucht in ExecStart einen absoluten
+#   Pfad, waehrend der Einzeiler im README auf PATH vertraut. Auf der
+#   g4dn-AMI liegt das Programm unter /usr/bin; weicht das bei dir ab, dann
+#   ExecStart/ExecStop unten anpassen:
+#
+#     command -v nvidia-cuda-mps-control
+#
+#   Gegenprobe nach dem Anpassen:  systemd-analyze verify nvidia-mps.service
+#
+# Einrichten (siehe README_GPU_SERVER.md 6.4):
+#     sudo cp PINNmodulusTwo/deploy/nvidia-mps.service /etc/systemd/system/
+#     sudo systemctl daemon-reload
+#     sudo systemctl enable --now nvidia-mps
+#     systemctl status nvidia-mps          # "active (running)"
+
+[Unit]
+Description=NVIDIA CUDA MPS control daemon
+Documentation=https://docs.nvidia.com/deploy/mps/
+# Der Treiber muss geladen sein, bevor der Daemon sich an die Karte haengt.
+After=nvidia-persistenced.service
+Wants=nvidia-persistenced.service
+
+[Service]
+# '-d' gabelt sich selbst in den Hintergrund und gibt den Elternprozess frei.
+Type=forking
+
+# ACHTUNG, DIESE ZWEI ZEILEN NICHT UMSTELLEN.
+#
+# sweep.py:209 (mps_is_running) sucht die Kontroll-Pipe unter
+# CUDA_MPS_PIPE_DIRECTORY -- und liest die Variable aus SEINER eigenen
+# Umgebung, mit /tmp/nvidia-mps als Vorgabe. systemd setzt Environment= nur
+# fuer den Daemon, nicht fuer deine Shell. Ein abweichender Pfad heisst also:
+# MPS laeuft, und die Pruefung meldet trotzdem "kein MPS" -- ein falsches
+# Negativ, das jeden Sweep mit einer unnoetigen Warnung eroeffnet.
+#
+# Wer den Pfad wirklich verlegen will, muss ihn in BEIDEN Umgebungen setzen.
+Environment=CUDA_MPS_PIPE_DIRECTORY=/tmp/nvidia-mps
+Environment=CUDA_MPS_LOG_DIRECTORY=/var/log/nvidia-mps
+
+ExecStartPre=/bin/mkdir -p /tmp/nvidia-mps /var/log/nvidia-mps
+ExecStart=/usr/bin/nvidia-cuda-mps-control -d
+
+# Der Daemon kennt kein Signal zum Beenden; er will 'quit' auf seinem stdin.
+# Ein blosses SIGTERM laesst den MPS-Server verwaist zurueck.
+ExecStop=/bin/sh -c '/usr/bin/echo quit | /usr/bin/nvidia-cuda-mps-control'
+
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

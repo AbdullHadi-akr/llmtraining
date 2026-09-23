@@ -223,9 +223,21 @@ def test_wall_loss_summiert_ueber_die_knotenflaechen():
 
 
 def test_der_wandterm_faellt_laut_aus_statt_zu_raten(net, op, statics):
-    """Stufe 2 ist offen. Ein geratenes U waere ein freier Parameter."""
+    """Ein geratenes U waere ein freier Parameter -- also lieber laut fallen.
+
+    ⚠ Die Begruendung hat sich am 22.09., abends, GEAENDERT, und der Test
+    haelt jetzt die neue fest. Bis dahin stand hier "Stufe 2 ist offen" --
+    das stimmte seit dem Rebuild auf Schema v3 nicht mehr. ``U(V_dot)`` ist
+    kalibriert; was fehlt, ist die Verdrahtung (``q_wall_meas`` bleibt None,
+    ``t_in``/``mdot`` je Zeitschritt fehlen in ``op_tensoren``).
+
+    Der Test prueft deshalb die **Verdrahtung** als Grund, nicht die
+    Kalibrierung -- sonst haelt er eine Behauptung fest, die falsch ist.
+    """
     wall = object()
-    with pytest.raises(NotImplementedError, match="U\\(V_dot\\)"):
+    with pytest.raises(NotImplementedError, match="nicht verdrahtet"):
+        T._wall_ghost(op.tn_ic.unsqueeze(0), wall, op, 0)
+    with pytest.raises(NotImplementedError, match="q_wall_meas"):
         T._wall_ghost(op.tn_ic.unsqueeze(0), wall, op, 0)
 
 
@@ -570,3 +582,519 @@ def test_der_konfigurationsname_trifft_die_vier_arme():
     # A schlaegt D: ohne Physik ist die Kartenfrage nicht mehr dieselbe Frage.
     assert T.konfigurationsname(
         _args("--no-physics", "--no-coord-maps")).startswith("A")
+
+
+# ---------------------------------------------------------------------------
+# Stufe 5 -- truncated BPTT. Die Aenderung, wegen der der 22.09. kein
+# Ergebnis war: ein Schritt trainierte, achttausend wurden gemessen.
+# ---------------------------------------------------------------------------
+def _zwei_schritte_mit_abgeschnittener_mitte(net, op, statics, traj, idx,
+                                             lag1, lag2):
+    """Dasselbe Zweischritt-Fenster wie ``rollout_loss(k=2)``, aber der
+    Zwischenzustand ist ``detach()``-ed.
+
+    Vorwaerts ist das Zeichen fuer Zeichen dieselbe Zahl -- ``detach`` aendert
+    keinen Wert. Rueckwaerts ist es der alte Zustand: der Gradient kommt nicht
+    ueber den ersten Schritt hinaus. Die Referenz, gegen die sich beweisen
+    laesst, dass ``rollout_loss`` genau das nicht mehr tut.
+    """
+    t0 = traj[idx]
+    ny, nz = t0.shape[2:]
+
+    def einen(zustand, j):
+        x = M.assemble_input(
+            M.state_channels(zustand,
+                             traj[(idx + j - lag1).clamp(min=0)],
+                             traj[(idx + j - lag2).clamp(min=0)]),
+            statics,
+            M.driver_channels(op.config[idx + j], op.forcing[idx + j], ny, nz))
+        p = net.step(zustand, x, dt_n=op.dtn, fo_field=op.fo,
+                     qsrc=op.qsrc[idx + j], ghost_hi=M.adiabatic_ghost(zustand))
+        return p, torch.mean((p - op.tn_seq[idx + j + 1]) ** 2)
+
+    p0, l0 = einen(t0, 0)
+    _, l1 = einen(p0.detach(), 1)          # <- hier wird die Zeit gekappt
+    return (l0 + l1) / 2
+
+
+def test_rollout_loss_bei_k_eins_ist_exakt_data_loss(net, op, statics):
+    """``--tbptt 1`` muss den Lauf vom 22.09. reproduzieren, nicht aehneln."""
+    traj, _ = T.rollout(net, op, statics, lag1=5, lag2=20)
+    idx = torch.tensor([7, 18, 25])
+    kw = dict(lag1=5, lag2=20)
+    a = T.data_loss(net, op, statics, traj, idx, **kw)
+    b = T.rollout_loss(net, op, statics, traj, idx, k=1, **kw)
+    assert float(a.detach()) == float(b.detach())
+
+
+def test_der_gradient_ueberquert_die_historie_bei_k_groesser_eins_sehr_wohl(
+        net, op, statics):
+    """Die Zusage von Stufe 5, als Gegenstueck zum Ein-Schritt-Test oben.
+
+    Vorwaerts sind beide Fassungen dieselbe Zahl; rueckwaerts darf die
+    abgeschnittene NICHT denselben Gradienten liefern. Waere sie es, liefe der
+    Gradient trotz ``k = 2`` nur einen Schritt weit -- und Stufe 5 waere
+    gebaut, ohne zu wirken.
+    """
+    traj, _ = T.rollout(net, op, statics, lag1=5, lag2=20)
+    idx = torch.tensor([25])
+    kw = dict(lag1=5, lag2=20)
+
+    voll = T.rollout_loss(net, op, statics, traj, idx, k=2, **kw)
+    gekappt = _zwei_schritte_mit_abgeschnittener_mitte(
+        net, op, statics, traj, idx, 5, 20)
+    assert float(voll.detach()) == pytest.approx(float(gekappt.detach()), rel=1e-12), \
+        "die beiden Fassungen sind vorwaerts verschieden -- der Test misst nichts"
+
+    g_voll = torch.autograd.grad(voll, list(net.parameters()), retain_graph=True)
+    g_kapp = torch.autograd.grad(gekappt, list(net.parameters()))
+    assert any(not torch.allclose(a, b) for a, b in zip(g_voll, g_kapp)), \
+        "derselbe Gradient wie mit abgeschnittener Mitte -- k>1 wirkt nicht"
+
+
+def test_ein_systematischer_drift_faellt_erst_ueber_mehrere_schritte_auf(layout,
+                                                                         op,
+                                                                         statics):
+    """Warum ``data_loss`` den Lauf vom 22.09. nicht retten konnte.
+
+    Ein Netz mit konstanter Vorspannung ``c`` auf flachen Labels macht je
+    Schritt denselben winzigen Fehler ``dt*c``. Nach ``j`` Schritten steht
+    ``(j+1)*dt*c`` da, der quadratische Fehler waechst also mit ``(j+1)^2``:
+
+        L(k) = (dt*c)^2 * mean_j (j+1)^2      ->  L(4) = 7.5 * L(1)
+
+    ``data_loss`` sieht davon **nur** ``L(1)``. Genau dieser Faktor ist der
+    Unterschied zwischen "der Verlust ist klein" und "der Rollout ist weg".
+    """
+    net = M.GridCNN(layout, use_physics=False)
+    with torch.no_grad():
+        net.correction.head.weight.zero_()
+        net.correction.head.bias.fill_(0.25)      # g_theta == 0.25, ueberall
+
+    op.tn_seq = torch.zeros_like(op.tn_seq)
+    traj = torch.zeros(op.n_t, *op.tn_ic.shape)
+    idx = torch.tensor([9])
+    kw = dict(lag1=5, lag2=20)
+
+    eins = float(T.rollout_loss(net, op, statics, traj, idx, k=1, **kw).detach())
+    vier = float(T.rollout_loss(net, op, statics, traj, idx, k=4, **kw).detach())
+    assert eins == pytest.approx((op.dtn * 0.25) ** 2, rel=1e-5)
+    assert vier == pytest.approx(7.5 * eins, rel=1e-5)
+
+
+def test_das_fenster_greift_nicht_ueber_split_t(layout, op, statics):
+    """Sonst wird aus der ausgehaltenen Zahl eine Trainingszahl -- mit k
+    schlimmer als mit einem Schritt, weil das Fenster k Ziele weit reicht."""
+    torch.manual_seed(0)
+    net = M.GridCNN(layout)
+    opt = torch.optim.Adam(net.parameters(), lr=1e-3)
+    gesehen = []
+    echt = T.rollout_loss
+
+    def spion(n, o, s, traj, idx, *, k, **kw):
+        gesehen.append(idx.max().item() + k)      # das letzte Ziel ist idx+k
+        return echt(n, o, s, traj, idx, k=k, **kw)
+
+    T.rollout_loss = spion
+    try:
+        T.train_epoch(net, T.stack_ops([op]), statics, opt, inner_steps=40,
+                      batch_t=8, lag1=5, lag2=20, w_data=1.0, w_phys=0.0,
+                      w_wall=0.0, clamp=50.0, rng=np.random.default_rng(0),
+                      tbptt=6)
+    finally:
+        T.rollout_loss = echt
+    assert gesehen, "der k>1-Pfad wurde gar nicht genommen"
+    assert max(gesehen) <= op.split_t - 1, \
+        f"Ziel {max(gesehen)} >= split_t {op.split_t}"
+
+
+def test_ein_zu_kurzer_op_kuerzt_das_fenster_statt_zu_fallen(layout, statics):
+    """Ein OP mit split_t = 3 traegt kein Fenster von 16 -- k wird gekuerzt."""
+    torch.manual_seed(0)
+    nx, ny, nz = layout.shape
+    kurz = T.OPTensors(
+        op_id="OP_KURZ", tn_seq=torch.randn(6, nx, ny, nz),
+        tn_ic=torch.randn(nx, ny, nz), qsrc=torch.zeros(6, nx, ny, nz),
+        fo=torch.zeros(nx, ny, nz, 3, 3), config=torch.randn(6, 7),
+        forcing=torch.randn(6, 11), dtn=0.01, split_t=3, n_t=6)
+    net = M.GridCNN(layout)
+    opt = torch.optim.Adam(net.parameters(), lr=1e-3)
+    st = T.train_epoch(net, T.stack_ops([kurz]), statics, opt, inner_steps=3,
+                       batch_t=2, lag1=5, lag2=20, w_data=1.0, w_phys=0.0,
+                       w_wall=0.0, clamp=50.0, rng=np.random.default_rng(0),
+                       tbptt=16)
+    assert np.isfinite(st.data)
+
+
+# ---------------------------------------------------------------------------
+# Stabilitaet: Clipping und der Endlichkeitswaechter
+# ---------------------------------------------------------------------------
+def _aenderungsnorm(vorher, net):
+    return float(torch.sqrt(sum(((a - b.detach()) ** 2).sum()
+                                for a, b in zip(vorher, net.parameters()))))
+
+
+def test_clip_grad_begrenzt_den_schritt(layout, op, statics):
+    """Mit SGD ist der Schritt genau ``lr * g`` -- geklemmt also hoechstens
+    ``lr * clip``. Mit Adam waere derselbe Test blind: der normiert ohnehin."""
+    def einmal(clip):
+        torch.manual_seed(0)
+        net = M.GridCNN(layout)
+        with torch.no_grad():
+            net.correction.head.weight.normal_(0.0, 0.05)
+        vorher = [p.detach().clone() for p in net.parameters()]
+        opt = torch.optim.SGD(net.parameters(), lr=1.0)
+        st = T.train_epoch(net, T.stack_ops([op]), statics, opt, inner_steps=1,
+                           batch_t=8, lag1=5, lag2=20, w_data=1.0, w_phys=0.0,
+                           w_wall=0.0, clamp=50.0,
+                           rng=np.random.default_rng(0), clip_grad=clip)
+        return _aenderungsnorm(vorher, net), st
+
+    geklemmt, st_k = einmal(1e-4)
+    frei, st_f = einmal(0.0)
+    assert geklemmt <= 1e-4 * 1.001, geklemmt
+    assert frei > geklemmt, "ohne Schranke war der Schritt nicht groesser"
+    # Die Norm wird in BEIDEN Faellen gemessen -- auch ohne Schranke.
+    assert np.isfinite(st_k.grad_norm) and np.isfinite(st_f.grad_norm)
+    assert st_k.grad_norm == pytest.approx(st_f.grad_norm, rel=1e-5), \
+        "gemeldet wird die Norm VOR dem Klemmen, sonst sagt sie nichts"
+
+
+def test_nicht_endliche_updates_werden_verworfen_und_gezaehlt(layout, op,
+                                                              statics):
+    """Ein einziges NaN vergiftet sonst den ganzen Lauf, und die Kurve zeigte
+    nur eine flache Linie -- nicht zu unterscheiden von Konvergenz."""
+    torch.manual_seed(0)
+    net = M.GridCNN(layout)
+    op.tn_seq = torch.full_like(op.tn_seq, float("inf"))
+    vorher = [p.detach().clone() for p in net.parameters()]
+    opt = torch.optim.Adam(net.parameters(), lr=1e-3)
+    st = T.train_epoch(net, T.stack_ops([op]), statics, opt, inner_steps=5,
+                       batch_t=4, lag1=5, lag2=20, w_data=1.0, w_phys=0.0,
+                       w_wall=0.0, clamp=50.0, rng=np.random.default_rng(0))
+    assert st.uebersprungen == 5
+    assert all(torch.equal(a, b) for a, b in zip(vorher, net.parameters())), \
+        "ein nicht-endliches Update ist in die Gewichte gelaufen"
+    assert "[UEBERSPRUNGEN] 5" in st.line(1)
+
+
+def test_die_epochenzeile_traegt_k_und_die_gradientennorm(layout, op, statics):
+    torch.manual_seed(0)
+    net = M.GridCNN(layout)
+    opt = torch.optim.Adam(net.parameters(), lr=1e-3)
+    st = T.train_epoch(net, T.stack_ops([op]), statics, opt, inner_steps=2,
+                       batch_t=4, lag1=5, lag2=20, w_data=1.0, w_phys=0.0,
+                       w_wall=0.0, clamp=50.0, rng=np.random.default_rng(0),
+                       tbptt=3)
+    zeile = st.line(7)
+    assert "k   3" in zeile and "|g|" in zeile
+
+
+# ---------------------------------------------------------------------------
+# Die drei Zahlen, die geraten statt hergeleitet waren
+# ---------------------------------------------------------------------------
+def test_lags_kommen_aus_der_zeit_nicht_aus_der_schrittzahl(op):
+    """5 und 20 Schritte sind bei subsample 2 genau 1 s und 4 s. Bei
+    subsample 10 waeren dieselben Zahlen 5 s und 20 s -- eine andere
+    Historie, ohne dass jemand etwas geaendert haette."""
+    assert T.lags_aufloesen(2, None, None)[:2] == (5, 20)
+    assert T.lags_aufloesen(10, None, None)[:2] == (1, 4)
+    assert T.lags_aufloesen(20, None, None)[:2] == (1, 2)
+    # Von Hand gesetzt gewinnt, und das steht auch im Text.
+    l1, l2, text = T.lags_aufloesen(10, 5, 20)
+    assert (l1, l2) == (5, 20) and "von Hand" in text
+
+
+def test_clamp_auto_kommt_aus_den_labels(op):
+    """Die geerbten 50 sind ±480 C und fangen nichts ab, was noch zu retten
+    waere. 'auto' bindet die Schranke an die groesste echte Auslenkung."""
+    op.tn_seq = torch.full_like(op.tn_seq, 0.0)
+    op.tn_seq[3] = 2.4
+    wert, text = T.clamp_aufloesen("auto", [op], faktor=3.0, T_sigma=9.602)
+    assert wert == 8.0 and "auto" in text          # ceil(3 * 2.4) = 8
+    assert T.clamp_aufloesen("aus", [op], faktor=3.0, T_sigma=9.602)[0] == 0.0
+    assert T.clamp_aufloesen("12.5", [op], faktor=3.0, T_sigma=9.602)[0] == 12.5
+
+
+def test_das_curriculum_erreicht_sein_ziel_und_bleibt_dort():
+    """Die zweite Haelfte laeuft auf voller Laenge -- sonst kaeme der
+    berichtete Median von einem wandernden Ziel."""
+    werte = [T.tbptt_bei(e, 4, 16, 40) for e in range(1, 41)]
+    assert werte[0] == 4 and werte[-1] == 16
+    assert werte == sorted(werte), "das Fenster darf nicht schrumpfen"
+    assert all(v == 16 for v in werte[19:]), "ab der Haelfte muss k stehen"
+    # Kein Curriculum verlangt, kein Curriculum geliefert.
+    assert [T.tbptt_bei(e, 16, 16, 40) for e in (1, 20, 40)] == [16, 16, 16]
+
+
+def test_berichtet_wird_der_median_nicht_das_beste():
+    """Das Beste waere auf der Haltemenge ausgewaehlt -- und die Haltemenge
+    ist hier die ganze Messung."""
+    punkte = [(10, {"OP06": 30.0}), (20, {"OP06": 3.0}),   # der Ausreisser
+              (30, {"OP06": 9.0}), (40, {"OP06": 11.0}),
+              (50, {"OP06": 10.0}), (60, {"OP06": 12.0})]
+    assert T.median_ueber(punkte) == {"OP06": 11.0}        # Median von 10, 12
+    assert T.median_ueber([]) == {}
+
+
+def test_die_val_mae_gebatcht_trifft_die_einzeln_gerollte(net, op, statics):
+    """Gebatcht ist ein Tempohebel, kein Experiment -- die Zahl muss stehen."""
+    kurz = T.OPTensors(
+        op_id="OP_KURZ", tn_seq=op.tn_seq[:25].clone(),
+        tn_ic=op.tn_ic.clone(), qsrc=op.qsrc[:25].clone(), fo=op.fo,
+        config=op.config[:25].clone(), forcing=op.forcing[:25].clone(),
+        dtn=op.dtn, split_t=20, n_t=25)
+    kw = dict(lag1=5, lag2=20, clamp=10.0)
+    gebatcht = T.val_mae(net, [op, kurz], statics, T_sigma=9.602, **kw)
+    for einzeln in (op, kurz):
+        traj, _ = T.rollout(net, einzeln, statics, **kw)
+        erwartet = float((traj - einzeln.tn_seq).abs().mean().item() * 9.602)
+        assert gebatcht[einzeln.op_id] == pytest.approx(erwartet, rel=1e-4)
+
+
+def test_der_protokollname_sagt_wie_trainiert_wurde():
+    """Ohne ihn steht in einem halben Jahr eine val-MAE in einer Tabelle und
+    niemand weiss, ob sie mit k=1 oder k=16 entstanden ist."""
+    args = T.build_argparser().parse_args([])
+    assert "k=4->16" in T.protokollname(args)
+    alt = T.build_argparser().parse_args(
+        ["--tbptt", "1", "--tbptt-start", "1", "--clip-grad", "0",
+         "--lr-plan", "konstant"])
+    name = T.protokollname(alt)
+    assert "k=1" in name and "clip=aus" in name and "konstant" in name
+
+
+def test_das_verdikt_nennt_einen_unlesbaren_lauf_beim_namen():
+    """Der Lauf vom 22.09., durch die neue Schlusstafel geschickt.
+
+    27.11 ± 22.26 C gegen eine Latte von 7.7: der Mittelwert sieht nach einem
+    Ergebnis aus, die Streuung sagt, dass es keines ist. Genau das musste man
+    damals aus drei Dokumenten zusammensuchen.
+    """
+    alle = {"OP06": [51.95, 20.43, 8.95]}
+    latten = {"OP06": {"mittelwert": 7.70, "persistenz": 14.0}}
+    zeilen, kenn = T.zusammenfassung(alle, latten)
+    text = "\n".join(zeilen)
+    assert kenn["lesbar"] is False
+    assert kenn["seed_streuung_C"]["OP06"] > T.LESBARKEIT_C
+    assert "KEIN ERGEBNIS" in text and "NICHTS ranken" in text
+    assert kenn["guete"]["OP06"] == pytest.approx(27.11 / 7.70, rel=1e-3)
+
+
+def test_das_verdikt_trennt_gelernt_von_geraten():
+    """Dieselbe Streuung, zwei verschiedene Befunde -- und beide sind echt."""
+    latten = {"OP06": {"mittelwert": 7.70, "persistenz": 14.0}}
+    _, gut = T.zusammenfassung({"OP06": [4.0, 4.3, 4.2]}, latten)
+    assert gut["lesbar"] is True and gut["guete"]["OP06"] < 1.0
+
+    zeilen, schlecht = T.zusammenfassung({"OP06": [8.0, 8.3, 8.2]}, latten)
+    assert schlecht["lesbar"] is True and schlecht["guete"]["OP06"] > 1.0
+    assert "negatives" in "\n".join(zeilen)
+
+
+def test_ohne_latten_sagt_das_verdikt_dass_es_nichts_sagen_kann():
+    zeilen, kenn = T.zusammenfassung({"OP06": [4.0, 4.1, 4.2]}, {})
+    assert kenn["lesbar"] is False and kenn["guete"] == {}
+    assert "keine Latten" in "\n".join(zeilen)
+
+
+# ---------------------------------------------------------------------------
+# Das Fehlerprofil ueber die Trajektorie -- der Befund vom 22.09., abends
+# ---------------------------------------------------------------------------
+def _driftendes_netz(layout, c: float):
+    """Ein Netz, dessen Rollout linear wegdriftet: ``T_k = k * dt * c``.
+
+    Kopfgewichte null, Kopf-Bias ``c``, keine Physik -- also ist die Rate
+    ueberall exakt ``c``, und der Fehler gegen flache Labels waechst linear
+    mit dem Zeitschritt. Genau die Form, die der Plot vom 22.09. auf OP06
+    zeigt, nur in geschlossener Form statt gemessen.
+    """
+    net = M.GridCNN(layout, use_physics=False)
+    with torch.no_grad():
+        net.correction.head.weight.zero_()
+        net.correction.head.bias.fill_(c)
+    return net
+
+
+def _flacher_op(layout, n_t: int = 40, dtn: float = 0.01):
+    nx, ny, nz = layout.shape
+    return T.OPTensors(
+        op_id="OP_FLACH", tn_seq=torch.zeros(n_t, nx, ny, nz),
+        tn_ic=torch.zeros(nx, ny, nz), qsrc=torch.zeros(n_t, nx, ny, nz),
+        fo=torch.zeros(nx, ny, nz, 3, 3), config=torch.zeros(n_t, 7),
+        forcing=torch.zeros(n_t, 11), dtn=dtn, split_t=n_t - 1, n_t=n_t)
+
+
+def test_das_profil_findet_den_spaetfehler_den_der_mittelwert_verdeckt(
+        layout, statics):
+    """Der Befund, wegen dem es diese Messung gibt.
+
+    ``OP06 6.57 C`` sah am 22.09. nach einer Zahl aus. Der Plot ueber
+    dieselbe Trajektorie zeigte 1.1 C in der Mitte und 15 C am Ende. Hier
+    dasselbe in geschlossener Form: der Fehler waechst linear, also ist
+
+        MAE(letztes Viertel) / MAE(gesamt) = 34.5 / 19.5 = 1.769
+
+    und genau das muss ``drift`` melden.
+    """
+    op = _flacher_op(layout)
+    net = _driftendes_netz(layout, 0.25)
+    d = T.val_auswertung(net, [op], statics, lag1=5, lag2=20, clamp=0.0,
+                         T_sigma=10.0, segmente=4)["OP_FLACH"]
+
+    schritt = 0.01 * 0.25 * 10.0                       # dt * c * T_sigma
+    assert d["mae"] == pytest.approx(schritt * 19.5, rel=1e-5)
+    assert d["mae_segmente"][0] == pytest.approx(schritt * 4.5, rel=1e-5)
+    assert d["mae_segmente"][-1] == pytest.approx(schritt * 34.5, rel=1e-5)
+    assert d["drift"] == pytest.approx(34.5 / 19.5, rel=1e-5)
+    assert d["drift"] > T.DRIFT_SCHWELLE, "der Spaetfehler muss auffallen"
+
+
+def test_der_bias_sagt_zu_warm_oder_zu_kalt(layout, statics):
+    """Ohne Vorzeichen ist ein feldweiter Pegelfehler nicht von Streuung zu
+    unterscheiden -- und genau das zeigt der Plot vom 22.09. nicht."""
+    op = _flacher_op(layout)
+    kw = dict(lag1=5, lag2=20, clamp=0.0, T_sigma=10.0, segmente=4)
+    warm = T.val_auswertung(_driftendes_netz(layout, 0.25), [op], statics,
+                            **kw)["OP_FLACH"]
+    kalt = T.val_auswertung(_driftendes_netz(layout, -0.25), [op], statics,
+                            **kw)["OP_FLACH"]
+    assert warm["bias"] > 0 and kalt["bias"] < 0
+    assert warm["bias"] == pytest.approx(-kalt["bias"], rel=1e-5)
+    # Der Betrag ist derselbe -- die MAE allein koennte die beiden nie trennen.
+    assert warm["mae"] == pytest.approx(kalt["mae"], rel=1e-5)
+    assert warm["bias_segmente"][-1] > warm["bias_segmente"][0]
+
+
+def test_ein_gleichmaessiger_fehler_hat_drift_nahe_eins(layout, statics):
+    """Die Gegenprobe: ohne Spaetfehler darf nichts gemeldet werden."""
+    op = _flacher_op(layout)
+    net = _driftendes_netz(layout, 0.0)           # exakt null Rate
+    op.tn_seq = torch.full_like(op.tn_seq, 0.5)   # konstanter Versatz
+    op.tn_ic = torch.full_like(op.tn_ic, 0.5)
+    d = T.val_auswertung(net, [op], statics, lag1=5, lag2=20, clamp=0.0,
+                         T_sigma=10.0, segmente=4)["OP_FLACH"]
+    assert d["mae"] == pytest.approx(0.0, abs=1e-6)
+    assert not np.isfinite(d["drift"]) or d["drift"] <= T.DRIFT_SCHWELLE
+
+
+def test_val_mae_ist_genau_die_mae_aus_der_auswertung(net, op, statics):
+    """Zwei Wege zu derselben Zahl driften auseinander -- also gibt es einen."""
+    kw = dict(lag1=5, lag2=20, clamp=10.0, T_sigma=9.602)
+    schlank = T.val_mae(net, [op], statics, **kw)
+    voll = T.val_auswertung(net, [op], statics, **kw)
+    assert schlank == {k: v["mae"] for k, v in voll.items()}
+
+
+def test_das_profil_wird_ueber_messpunkte_und_seeds_gemedianed():
+    """Ein Ausreisser-Messpunkt darf das Profil nicht kippen."""
+    mach = lambda m, segs: {"mae": m, "bias": -m, "drift": 2.0,            # noqa: E731
+                            "mae_segmente": segs,
+                            "bias_segmente": [-v for v in segs]}
+    # Neun Messpunkte -> das letzte Drittel sind drei. Die Ausreisser liegen
+    # davor und duerfen genau deshalb nichts aendern.
+    punkte = [(e, {"OP06": mach(99.0, [99.0, 99.0])}) for e in (10, 20, 30)]
+    punkte += [(e, {"OP06": mach(0.1, [0.1, 0.1])}) for e in (40, 50, 60)]
+    punkte += [(70, {"OP06": mach(6.0, [3.0, 9.0])}),
+               (80, {"OP06": mach(7.0, [4.0, 10.0])}),
+               (90, {"OP06": mach(8.0, [5.0, 11.0])})]
+    p = T.median_profil(punkte)["OP06"]
+    assert p["mae"] == pytest.approx(7.0)                    # Median von 6,7,8
+    assert p["mae_segmente"] == pytest.approx([4.0, 10.0])
+
+    ueber = T.profil_ueber_seeds([
+        {"OP06": mach(5.0, [2.0, 8.0])},
+        {"OP06": mach(7.0, [4.0, 10.0])},
+        {"OP06": mach(9.0, [6.0, 12.0])}])["OP06"]
+    assert ueber["mae"] == pytest.approx(7.0)
+    assert ueber["mae_segmente"] == pytest.approx([4.0, 10.0])
+    assert T.profil_ueber_seeds([]) == {} and T.median_profil([]) == {}
+
+
+def test_die_schlusstafel_nennt_den_spaetfehler_beim_namen():
+    latten = {"OP06": {"mittelwert": 10.80, "persistenz": 16.67}}
+    profil = {"OP06": {"mae": 6.57, "bias": -3.4, "drift": 2.01,
+                       "mae_segmente": [4.6, 1.7, 4.3, 4.6, 8.1, 13.2],
+                       "bias_segmente": [-1.0, -0.5, -2.0, -3.0, -6.0, -12.9]}}
+    zeilen, kenn = T.zusammenfassung({"OP06": [6.5, 6.6, 6.7]}, latten,
+                                     profil=profil)
+    text = "\n".join(zeilen)
+    assert "O13" in text and "NICHT gleichmaessig" in text
+    assert kenn["drift"]["OP06"] == pytest.approx(2.01)
+
+    # Und die Gegenprobe: ohne Spaetfehler keine Warnung.
+    flach = {"OP06": dict(profil["OP06"], drift=1.02,
+                          mae_segmente=[6.5] * 6, bias_segmente=[-0.1] * 6)}
+    zeilen2, _ = T.zusammenfassung({"OP06": [6.5, 6.6, 6.7]}, latten,
+                                   profil=flach)
+    assert "gleichmaessig verteilt" in "\n".join(zeilen2)
+    assert "O13" not in "\n".join(zeilen2)
+
+
+def test_das_fenster_muss_lag2_erreichen():
+    """23.09.: k=16 bei subsample 2 liegt hinter lag2=20 -- kein Update lief
+    durch die Rueckkopplung ueber lag2. Im POC (subsample 10) lag lag2=4 im
+    Fenster."""
+    w = T.fensterwarnung(4, 16, 5, 20, subsample=2)
+    assert w and "NIE" in w and "--tbptt-start 20 --tbptt 80" in w
+    assert T.fensterwarnung(4, 16, 1, 4, subsample=10) is None
+    assert T.fensterwarnung(20, 80, 5, 20, subsample=2) is None
+
+
+def test_der_protokollname_nennt_k_in_sekunden():
+    args = T.build_argparser().parse_args(["--subsample", "2"])
+    assert "(0.8->3.2 s)" in T.protokollname(args)
+
+
+def test_nachmessen_trifft_die_auswertung_im_lauf(tmp_path, layout, net, op,
+                                                  statics):
+    """Checkpoint nachgemessen == dieselbe Zahl wie im Lauf."""
+    pfad = tmp_path / "model.pt"
+    torch.save(net.state_dict(), pfad)
+    kw = dict(lag1=5, lag2=20, clamp=10.0, T_sigma=9.602)
+    nach = T.profil_aus_checkpoint(pfad, layout, {}, [op], statics, **kw)
+    vor = T.val_auswertung(net, [op], statics, **kw)
+    assert nach["OP99"]["mae"] == pytest.approx(vor["OP99"]["mae"])
+    assert nach["OP99"]["drift"] == pytest.approx(vor["OP99"]["drift"])
+
+
+# ---------------------------------------------------------------------------
+# 23.09.: das Fenster in Sekunden, und das Nachmessen aus Gewichten
+# ---------------------------------------------------------------------------
+def test_das_fenster_muss_lag2_erreichen():
+    """Lauf 16: k=16 bei subsample 2 liegt hinter lag2=20 -- kein Update lief
+    durch die Rueckkopplung ueber lag2. Im POC (subsample 10) lag lag2=4 im
+    Fenster 4->16, und dort meldet sich nichts."""
+    w = T.fensterwarnung(4, 16, 5, 20, subsample=2)
+    assert w is not None and "NIE" in w
+    assert "--tbptt-start 40 --tbptt 160" not in w       # nicht bei dt=0.1 s
+    assert "--tbptt-start 20 --tbptt 80" in w            # 4->16 s bei dt=0.2 s
+    assert T.fensterwarnung(4, 16, 1, 4, subsample=10) is None
+    assert T.fensterwarnung(20, 80, 5, 20, subsample=2) is None
+    # lag2 erreicht, aber das Startfenster nicht einmal lag1.
+    w = T.fensterwarnung(4, 80, 5, 20, subsample=2)
+    assert w is not None and "lag1" in w
+
+
+def test_der_protokollname_nennt_k_in_sekunden():
+    """Zwei Logs mit 'k=4->16' waren 4->16 s und 0.8->3.2 s -- ohne dass es
+    einer Zeile anzusehen war."""
+    zwei = T.build_argparser().parse_args(["--subsample", "2"])
+    zehn = T.build_argparser().parse_args(["--subsample", "10"])
+    assert "k=4->16 (0.8->3.2 s)" in T.protokollname(zwei)
+    assert "k=4->16 (4->16 s)" in T.protokollname(zehn)
+
+
+def test_nachmessen_trifft_die_auswertung_im_lauf(tmp_path, layout, net, op,
+                                                  statics):
+    """Ein gespeichertes model.pt nachgemessen ist dieselbe Zahl wie im Lauf
+    -- sonst waere das nachgeholte Profil von Lauf 16 nichts wert."""
+    pfad = tmp_path / "model.pt"
+    torch.save(net.state_dict(), pfad)
+    kw = dict(lag1=5, lag2=20, clamp=10.0, T_sigma=9.602)
+    nach = T.profil_aus_checkpoint(pfad, layout, {}, [op], statics, **kw)
+    vor = T.val_auswertung(net, [op], statics, **kw)
+    for schl in ("mae", "bias", "drift"):
+        assert nach["OP99"][schl] == pytest.approx(vor["OP99"][schl], rel=1e-6)
+    assert nach["OP99"]["mae_segmente"] == pytest.approx(
+        vor["OP99"]["mae_segmente"], rel=1e-6)
