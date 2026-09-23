@@ -33,7 +33,62 @@ Der Plan ist eine **Leiter mit Toren**, keine gerade Linie. **Ein rotes Tor
 
 ---
 
-## ▶ Das Nächste: **A auf voller Auflösung bestätigen**
+## ▶ Das Nächste: **A auf voller Auflösung, mit dem Fenster in Sekunden**
+
+> ## 🟡 23.09. — volle Auflösung: **OP06 hält, OP09 fällt, und der Lauf war nicht der POC**
+>
+> | | berichtet (3 Seeds) | Latte | Güte | unter Latte | Seed-Streuung |
+> |---|---|---|---|---|---|
+> | **OP06** | 6.64 °C | 10.8009 | **0.62x** | 3/3 | 1.52 °C |
+> | **OP09** | 8.60 °C | 7.7625 | **1.11x** | **1/3** | 1.76 °C |
+>
+> **Kein Ergebnis**, weil die Streuung über ~1 °C liegt. Die Frühphase war in
+> allen drei Seeds instabil, zwei davon haben sich erst bei ep 18–19
+> gefangen.
+>
+> **Und der Befund dahinter:** `k` stand in **Schritten**. 4→16 Schritte
+> sind bei `--subsample 10` 4→16 s, bei `--subsample 2` nur **0.8→3.2 s**.
+> Mit `k = 16 < lag2 = 20` lief **kein einziges Update** durch die
+> Rückkopplung über lag2. Die Lags wurden in PR #46 auf Sekunden umgestellt,
+> das Fenster nicht. `train.py` warnt jetzt davor (`!! [fenster]`) und nennt
+> k auch in Sekunden.
+>
+> ⚠ Auf der Maschine lief der Code **vor PR #47**. Das Training ist identisch,
+> es fehlt nur das Fehlerprofil. Nachholen mit
+> `GridCNN/tools/nachmessen.py`, **bevor** Lauf 17 die Gewichte überschreibt.
+>
+> Bericht: **[`TRAININGS_BERICHT_2026-09-23_KonfigA_voll.md`](../TRAININGS_BERICHT_2026-09-23_KonfigA_voll.md)** ·
+> Lauf: [`laeufe/16_konfigA_voll.txt`](laeufe/16_konfigA_voll.txt) ·
+> Übergabe: **[`UEBERGABE_2026-09-23.md`](../UEBERGABE_2026-09-23.md)**
+
+### Schritt 1a — Lauf 16 nachmessen (Minuten, kein Training)
+
+```bash
+cp -r GridCNN/artifacts/A GridCNN/artifacts/A_16_voll
+python3 GridCNN/tools/nachmessen.py --no-physics --subsample 2 \
+    --device cuda --cache data_cache --laeufe GridCNN/artifacts/A_16_voll \
+    2>&1 | tee 16_konfigA_nachgemessen.txt
+```
+
+Probe: die MAE je `model.pt` muss `letztes ep 60` im Log treffen. Die Frage:
+ist OP09 ein Spätfehler (`drift > 1.5`), und zu warm oder zu kalt?
+
+### Schritt 1b — Lauf 17: dasselbe Fenster in Sekunden wie der POC, ~1.5–2 h
+
+**Eine Änderung gegen Lauf 16:** `--tbptt-start 20 --tbptt 80` (= 4→16 s).
+
+```bash
+python3 GridCNN/train.py --no-physics --seeds 3 --epochs 60 \
+    --subsample 2 --inner-steps 25 --tbptt-start 20 --tbptt 80 \
+    --val-every 2 --device cuda --cache data_cache \
+    2>&1 | tee 17_konfigA_voll_k_sekunden.txt
+```
+
+Die Entscheidungstabelle steht im Bericht, Abschnitt 5.
+
+---
+
+### Was vorher galt: **A auf voller Auflösung bestätigen** (→ Lauf 16, oben)
 
 > ## 🟢 22.09., abends — der POC trägt: **der CNN ist rettbar**
 >
@@ -80,7 +135,7 @@ Der Plan ist eine **Leiter mit Toren**, keine gerade Linie. **Ein rotes Tor
 > MAE und vorzeichenbehafteter Bias je Abschnitt, plus
 > `drift = MAE(letzter Abschnitt)/MAE(gesamt)`. Ab 1.5 meldet der Lauf O13.
 
-### Schritt 1 — volle Auflösung, ~45 min
+### Schritt 1 — volle Auflösung, ~45 min (gelaufen am 23.09., Lauf 16 — siehe oben)
 
 Nur `--subsample` und `--epochs` ändern sich. Die Lags leiten sich bei
 `--subsample 2` automatisch wieder auf 5/20 ab.
