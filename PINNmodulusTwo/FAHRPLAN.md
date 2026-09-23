@@ -1,6 +1,130 @@
 # Fahrplan — OP01–OP16 trainiert, OP19 als Messvergleich
 
-> ## ▶ Das Nächste: O18 — die Leitungsgleichung steht in der falschen Form
+> ## 🆕 Neues Modell P3 — Priorität 1: sein POC auf der T4 (23.09.)
+>
+> **Beschreibung, vorher/nachher, Kommando, Lesart, was danach geschrieben wird:
+> [`README_MODELL_P3_POC.md`](README_MODELL_P3_POC.md).** Hier nur das Wichtigste.
+>
+> **P3 = P2.1 mit `--phys-stencil live`.** Das MLP ist **dasselbe** (4 × 128,
+> lernbares Swish, hybride Historie). Anders ist nur, woher der Physik-Term
+> `T(t−δ)` und `T(t−2δ)` seiner Zeitableitung nimmt: bisher aus dem zu
+> Epochenbeginn **eingefrorenen** Rollout, in P3 aus dem **lebenden** Netz. Damit
+> fällt der Sprung weg, der laut §11.10 ≥ 91 % von `L_phys` in Achse 1 ausmacht
+> (O21). P3 existiert als Schalter (PR #49), ist **nicht** Default und ist auf
+> echten Daten **noch nie gelaufen**.
+>
+> | | P2 (alle Läufe bis 23.09.) | **P3** |
+> |---|---|---|
+> | MLP, Historie, Datenterm | — | unverändert |
+> | `T(t−δ)`, `T(t−2δ)` im Physik-Term | eingefrorener Rollout | **lebendes Netz** |
+> | synthetisch, POC-Kommando, 2 Seeds | val OP06 6.585 ± 0.179 °C | **3.330 ± 0.264 °C** — *Mechanismus, kein Ergebnis* |
+> | echte Daten | Achse 1: 4.868 ± 0.650 (δ = 0.2) | **offen — der POC** |
+>
+> **Der POC:** `buffer` gegen `live`, 3 Seeds, dt = 1 s, 40 Epochen, sonst wie
+> Achse 1 — **6 Läufe, `-j 3` mit MPS, geschätzt ~1–1.5 h**. `-j 3` statt `-j 4`
+> kostet nichts (6 Läufe sind so oder so zwei Wellen) und lässt den vierten Kern
+> für GridCNN-Lauf 17 frei, der **gleichzeitig** laufen kann.
+>
+> ```bash
+> cd ~/llmtraining && git checkout main && git pull
+> source modulus_env/bin/activate                          # python, nicht python3
+> systemctl is-active nvidia-mps                           # "active"; sonst README_GPU_SERVER §6.4
+> pgrep -x nvidia-cuda-mps || nvidia-cuda-mps-control -d   # Notnagel ohne Unit
+> pgrep -af "sweep.py|train.py|residual_decomposition" || echo "Karte frei"
+> nohup python PINNmodulusTwo/sweep.py --seeds 0 1 2 \
+>     --vary phys-stencil buffer live -j 3 \
+>     --out artifacts/poc_p3 --csv artifacts/poc_p3.csv \
+>     -- --subsample 10 --delta-grid 1.0 --delta-phys 1.0 \
+>        --epochs 40 --ema-decay 0.5 --device cuda > poc_p3.log 2>&1 &
+> ```
+>
+> **Urteil:** `L_phys` von `live` ≥ 10× kleiner **und** `live` vorn um ≥ ~1 °C
+> über der Seed-Streuung → 🟢 Achse 5 (P3 auf voller Auflösung).
+> `[NOT SEPARATED]` → 🟡 P3 nicht Default, weiter mit dem Kasten darunter.
+> `buffer` vorn oder Rollout läuft weg → 🔴 P3 verworfen. Danach
+> `TRAININGS_BERICHT_<datum>_PINN_P3_POC.md`, Zeilen in `README_MODELLSTAND.md`,
+> Stand-Tabelle hier.
+
+> **Modellstand und alle Experimente, chronologisch:**
+> [`README_MODELLSTAND.md`](../README_MODELLSTAND.md) — welche Modellversion
+> (P1, P2, P2.1, P3) es gibt, was sich an ihr geändert hat, und welcher Lauf auf
+> welcher lief. **Im Code seit 23.09.: P2.1** (Default = P2 bitgleich); **P3**
+> ist der Schalter, den der POC prüft.
+
+> ## ▶ Nach dem POC (23.09.): die Checkpoints zerlegen — O18 ist ausgesetzt
+>
+> **Vorweg, damit nichts falsch verstanden wird: das Modell ist seit dem 23.09.
+> nicht besser.** P2.1 rechnet mit den Defaults **bitgleich** wie P2 (Test).
+> Besser geworden ist die **Diagnose**: der Plan „O18 einbauen" hätte an der
+> falschen Stelle repariert. Weiter geht es **mit diesem MLP** — P3 wird erst
+> Default, wenn POC und Achse 5 es tragen.
+>
+> **Die Achse-1-Signatur `L_phys ∝ 1/δ²` kann O18 gar nicht erzeugen.**
+> `heat_residual` rechnet `(3T − 4T₁ + T₂)/(2δ) − aniso − Qsrc`. Ein räumlicher
+> Fehler steckt in `aniso`, wird **addiert** und nie durch δ geteilt. Nur was im
+> BDF-**Zähler** steckt und nicht mit δ schrumpft, skaliert wie 1/δ². Der Fit
+> `L = A + B/δ²` an die drei Achse-1-Zahlen trifft auf 5 %, und der 1/δ²-Teil ist
+> **91 / 98 / 99.6 %** von `L_phys`. Für alles, was O18 sein könnte, bleiben
+> höchstens 9 %. Einzelheiten, zwei Mechanismen und die synthetische
+> Nachmessung: **§11.10**.
+>
+> Dazu ein zweiter, grundsätzlicherer Befund (**O22**): der autograd-Laplace
+> sieht die räumliche Struktur nicht, die das Netz über den Historien-Anker
+> trägt. Auf dem synthetischen Cache sah er **0.01 … 9 %** der tatsächlichen
+> Krümmung. Dann wirkt **keine** Änderung *im* Leitungsterm — weder O18 noch ein
+> Robin-Term für O16.
+>
+> ### Schritt 2 — die Checkpoints zerlegen (T4 + MPS, keine Trainingszeit)
+>
+> Die 6 aus dem POC (`artifacts/poc_p3/*/model.pt`, Minuten) und die 15 aus
+> Achse 0/1. Die POC-Checkpoints sagen, ob `[BLIND]` auch auf echten Daten gilt.
+>
+> Der Cache ist seit dem 22.09. auf **Schema v3** neu gebaut (GridCNN-Stufe 2,
+> `8d76084`). v3 fügt den Wandpfad hinzu; `T` und `q_source` werden gleich
+> gebaut (am Code gelesen). Das Werkzeug rechnet die Normierung der Checkpoints
+> trotzdem aus dem Cache nach und **verweigert**, wenn sie nicht mehr passt —
+> dann ist das selbst ein Befund und gehört hierher.
+>
+> ```bash
+> cd ~/llmtraining && git checkout main && git pull
+> source modulus_env/bin/activate          # python, nicht python3
+> systemctl is-active nvidia-mps           # "active" -- seit 22.09. als Unit, README_GPU_SERVER §6.4
+> pgrep -x nvidia-cuda-mps || nvidia-cuda-mps-control -d   # Notnagel ohne Unit
+> pgrep -af "sweep.py|train.py" || echo frei
+> nohup python PINNmodulusTwo/tools/residual_decomposition.py \
+>     artifacts/poc_p3/*/model.pt artifacts/achse0/*/model.pt artifacts/achse1/*/model.pt \
+>     -j 4 --device cuda > zerlegung.log 2>&1 &
+> tail -f zerlegung.log                    # am Ende: eine Tabelle, eine Zeile je Checkpoint
+> ```
+>
+> Die Pfade sind die `--out`-Ordner der beiden Sweeps (§11.8, §11.9); liegen sie
+> woanders, `ls artifacts/*/*/model.pt`. Jeder Checkpoint bekommt
+> `residual_decomposition.txt` und `.json` daneben. Laufzeit **nicht gemessen**;
+> Schätzung aus 7.4 s Rollout je OP auf der T4: ~10 min je Checkpoint seriell
+> bei dt 0.2 s, also rund 40 min für die 15 aus Achse 0/1 bei `-j 4`; die
+> POC-Checkpoints (dt 1 s) gehen schneller. ⚠ Auch `live`-Checkpoints zeigen
+> `[STALE]` — das Werkzeug misst, was der alte Stencil loggen würde.
+>
+> ### Schritt 3 — die Tabelle entscheidet, die MLP-Struktur bleibt
+>
+> | Befund auf den echten Checkpoints | Folge |
+> |---|---|
+> | **`[BLIND]`** (autograd sieht < 10 % der Krümmung) | Der Physik-Term braucht Ortsableitungen, die das Feld sehen: das **MLP unverändert** an allen 363 Punkten des gezogenen Zeitpunkts auswerten und die Ableitungen **per Differenzenstern auf dem Gitter** bilden — derselbe Operator wie `GridCNN/physics.py`. Dann werden O16 und O18 zu wohldefinierten Rand- und Grenzflächentermen dieses Operators (GridCNN R4), und Stufe 6 vergleicht zwei Architekturen statt zwei Physik-Formulierungen. Als Flag, Default aus, gemessen gegen die Nullmessung |
+> | **`[STALE]`** (Sprung ≥ 50 % des geloggten `L_phys`) | **Schon gebaut und im POC:** P3 = `--phys-stencil live`. `T₁`, `T₂` kommen dann aus dem **lebenden** Netz (Historien aus dem eingefrorenen Puffer); ein gemeinsamer Versatz hebt sich auf (3 − 4 + 1 = 0). Zwei Vorwärtsläufe mehr, keine weitere Hesse-Matrix. Bei 🟢 im POC: Achse 5 auf voller Auflösung ([`README_MODELL_P3_POC.md`](README_MODELL_P3_POC.md) §4) |
+> | **`[JITTER]`** (Rollout rau von Schritt zu Schritt) | ein Rollout-Problem, kein Gleichungsproblem — gehört zu O17 und Achse 4 |
+> | keins davon | Achse 1 ist auf diesen Gewichten nicht reproduziert; dann ist O18 wieder offen, mit `A` und der Aufteilung je x-Ebene als Ausgangspunkt |
+>
+> Jede dieser Änderungen ist eine neue Modellversion (`live` ist **P3**, der
+> Differenzenstern wäre **P4**) und bekommt vor dem ersten Lauf eine Zeile in
+> [`README_MODELLSTAND.md`](../README_MODELLSTAND.md).
+> Die Latte bleibt **~1 °C** gegen die Nullmessung **5.248 ± 0.518**, 3 Seeds,
+> 60 Epochen, `sweep.py -j 4` mit MPS (Kasten unten, unverändert gültig).
+
+> ## ⏸ Stand 15.09. — „Das Nächste: O18" (ausgesetzt am 23.09., siehe oben und §11.10)
+>
+> *Der Kasten bleibt stehen, weil er die Achse-1-Zahlen und die MPS-Anleitung
+> trägt, die weiter gelten. Nicht mehr gültig ist sein Schluss, O18 erkläre
+> `L_phys ∝ 1/δ²`, und sein „Schritt 2 — den Term einbauen".*
 >
 > **Achse 1 ist am 15.09. gelaufen, und sie hat δ als Hebel ausgeschlossen —
 > dafür den eigentlichen Grund gefunden.**
@@ -264,6 +388,12 @@ Schritt 6 hat dafür gerade das Lehrstück geliefert: nach drei Epochen stand
 
 ## Die Achsen — **Stand 14.09.: Reparieren, dann messen**
 
+> **23.09.: Vor Achse 2 und 3 steht jetzt die Residuenzerlegung** (Kopf-Kasten,
+> §11.10). Sie kostet keine Trainingszeit und entscheidet, ob ein Term, der per
+> autograd im Ort ableitet — der Laplace, `L_bc`, ein Robin-Term für O16 —
+> überhaupt am Feld ankommt (O22). Achse 1 steht unten mit ihrem Zustand vom
+> 14.09.; ihr Ergebnis steht in §11.9 und ihre Deutung seit 23.09. in §11.10.
+
 Achse 0 hat zweimal umgeworfen. Am 10.09. sah es so aus, als wäre der
 Physik-Term erledigt. Bei genauem Hinsehen sagt derselbe Lauf etwas Genaueres:
 **der Term war richtig gewichtet und trotzdem wirkungslos, weil das Residuum
@@ -278,8 +408,8 @@ danach gibt es wieder Gewichte zu messen.
 |---|---|---|
 | **0** | `--w-phys 0` gegen `0.1`, 60 Epochen, 3 Seeds | ✅ **gelaufen 10.09.** Nullmessung steht: **5.248 ± 0.518 C** ohne Physik und BC. Wird nicht wiederholt — sie ist ab jetzt die Vergleichslinie |
 | **1** | **δ (`--delta-phys`) 1.0 / 0.4 / 0.2, mit Physik UND BC an**, O8 + O15 | **das Nächste.** 9 Läufe, ~6 h. δ = 0.2 unterschreitet Δt_max (0.241 s), die `[CFL WARN]` verschwindet dort. `--ema-decay 0.5` repariert gleichzeitig O15, und der `δ = 1.0`-Arm dient als Anker, um beides auseinanderzuhalten |
-| **2** | **O16 — die Randbedingung an der Gehäusewand** | **danach, und es ist Code.** Robin-Term bei `x = 0.0219` mit `U(V̇)` auf `A = 0.0206 m²`, beaufsichtigt gegen den **gemessenen** Wärmestrom aus dem Rohexport. Kein geratener Term. Tor: erst nach der GridCNN-Bilanzprobe |
-| **3** | `w_phys` und `w_bc` als echtes Gitter, O6 | **erst nach 1 und 2.** Vorher misst man den Anker des ersten Optimiererschritts (O15) oder ein falsches Residuum (O8/O16). Danach sind es zum ersten Mal echte Achsen |
+| **2** | **O16 — die Randbedingung an der Gehäusewand** | **danach, und es ist Code.** Robin-Term bei `x = 0.0219` mit `U(V̇)` auf `A = 0.0206 m²`, beaufsichtigt gegen den **gemessenen** Wärmestrom aus dem Rohexport. Kein geratener Term. Tor: erst nach der GridCNN-Bilanzprobe **⏸ 23.09.: hängt an §11.10** — per autograd wäre der Robin-Term so blind wie der Laplace (O22). |
+| **3** | `w_phys` und `w_bc` als echtes Gitter, O6 | **erst nach 1 und 2.** Vorher misst man den Anker des ersten Optimiererschritts (O15) oder ein falsches Residuum (O8/O16). Danach sind es zum ersten Mal echte Achsen **⏸ 23.09.: hängt an §11.10.** |
 | **4** | **O17 — der Fixpunkt des Rollouts** | **läuft parallel, ohne GPU-Zeit.** `evaluate.py` plus Teacher Forcing gegen freien Rollout auf den sechs vorhandenen Checkpoints. Unabhängig von 1–3 und der Ort, an dem der Fehler nachweislich sitzt |
 
 > **Warum nicht sofort O16, wo es doch der plausiblere Verdacht ist?** Weil δ ein
@@ -659,7 +789,7 @@ Seeds → keine Rangfolge · **kein Befund aus der letzten Epoche** (neu 02.09.,
 > einer Nachricht nach Wochen noch stimmt. Offene stehen hier, geschlossene in
 > Teil III unter „Geschlossene Punkte".
 
-### Index: alle Punkte, O1 bis O18
+### Index: alle Punkte, O1 bis O22
 
 | # | worum es geht | Zustand |
 |---|---|---|
@@ -679,8 +809,12 @@ Seeds → keine Rangfolge · **kein Befund aus der letzten Epoche** (neu 02.09.,
 | **O14** | **Volumenstrom ist die Schwierigkeitsachse** | **dauerhafte Envelope-Grenze** (Datensatz ist fix) |
 | **O15** | **das Loss-Balancing greift nach 60 Epochen nicht** | **offen — 10.09. gemessen statt vermutet.** Blockiert nichts mehr (O6 ist hinfällig), bleibt aber falsch: die EMA-Zeitkonstante ist 0.9 **je Epoche**. **Abhilfe ohne Code-Änderung: `--ema-decay 0.5`** (§11.8) |
 | **O16** | **die Gehäusewand hat gar keine Randbedingung** | **offen — Achse 3, zusammen mit O18.** Dieselbe Krankheit an der anderen Stelle: die Gleichung beschreibt die Übergänge nicht. §11.9 |
-| **O18** | **NEU 15.09.: `(∇λ)·(∇T)` fehlt im Leitungsterm** | **offen — das Nächste.** λ springt um Faktor 167 zwischen Jelly Roll und Gehäuse, und das Gitter hat in x nur Grenzflächen (121 Spalten × 3 Knoten = die 3 Materialien). Erklärt jede offene Beobachtung auf einmal. §11.9 |
-| **O17** | **NEU 10.09.: der freilaufende Rollout hat einen OP-unabhängigen Fixpunkt** | **offen — Achse 4, läuft parallel.** `peak_pred` bei 45–50 C, egal welcher Betriebspunkt. Braucht `evaluate.py` und keine GPU-Stunden. §11.8 |
+| **O18** | **NEU 15.09.: `(∇λ)·(∇T)` fehlt im Leitungsterm** | **⏸ ausgesetzt 23.09.** — erklärt die 1/δ²-Signatur nicht, und „∇λ analytisch" ist an den Knoten null (§11.10). Wiedervorlage als konservative Form (GridCNN R4), wenn §11.10 es verlangt. *Stand 15.09.:* offen — das Nächste. λ springt um Faktor 167 zwischen Jelly Roll und Gehäuse, und das Gitter hat in x nur Grenzflächen (121 Spalten × 3 Knoten = die 3 Materialien). Erklärt jede offene Beobachtung auf einmal. §11.9 |
+| **O17** | **NEU 10.09.: der freilaufende Rollout hat einen OP-unabhängigen Fixpunkt** | **offen — Achse 4, läuft parallel.** `peak_pred` bei 45–50 C, egal welcher Betriebspunkt. Braucht `evaluate.py` und keine GPU-Stunden. §11.8 ⚠ *Nicht verwechseln:* der GridCNN-Fahrplan nennt die unvollständige Quelle ebenfalls „O17" (die GridCNN-Dokumente bleiben unangetastet) — im PINN-Index ist das **O19**. |
+| **O19** | **NEU 23.09. (belegt 22.09., GridCNN Stufe 1): die Modellquelle ist unvollständig** | **offen.** `tot/jr1 = 2.99 … 3.44` bei `jr2/jr1 = 1.000` — ⅓ bis 40 % der Erzeugung liegt außerhalb der Wickel, `q_dot` deckt nur JR1. `total_w` liegt **schon** im Cache (`q_source[:, 2]`; `data.py:421` liest nur Spalte 0) — messbar ohne Rebuild. GridCNN-FAHRPLAN 1d |
+| **O20** | **NEU 23.09.: `--time-deriv autograd` trainiert ein zweites Netz** | ✅ **gesperrt 23.09.** `mlp_with_time` wird nur im Physik-Term ausgewertet, der Rollout benutzt `mlp`. `train.py` verweigert die Option jetzt, bevor Daten gelesen werden. Freigabe erst, wenn die Zeit Eingang **des einen** MLP ist |
+| **O21** | **NEU 23.09.: der BDF-Zähler trägt einen δ-unabhängigen Sprung** | **offen — Schritt 1 im Kopf-Kasten.** (a) lebendes Netz gegen eingefrorenen Puffer, (b) rauer Rollout. Erklärt ≥ 91 % von `L_phys` in Achse 1. Synthetisch nachgestellt, echt noch nicht gemessen. Reparatur für (a) gebaut: `--phys-stencil live` = Modell **P3**, Default aus, **POC ist Priorität 1** (`README_MODELL_P3_POC.md`). §11.10 |
+| **O22** | **NEU 23.09.: der autograd-Laplace sieht den Anker nicht** | **offen — Schritt 1 im Kopf-Kasten.** Die Ortsstruktur kommt über den Historien-Anker, den autograd als Konstante behandelt. Synthetisch sah autograd 0.01 … 9 % der Krümmung. Betrifft auch `L_bc` und jeden Robin-Term (O16). §11.10 |
 
 Die offenen im Detail, nach Dringlichkeit:
 
@@ -704,6 +838,8 @@ Die offenen im Detail, nach Dringlichkeit:
 **Neu am 10.09.:** O17 — aus Achse 0 gefallen, §11.8.
 
 **Neu am 15.09.:** O18 — aus Achse 1 gefallen, §11.9. **Geschlossen am 15.09.:** O8.
+
+**Neu am 23.09.:** O19 (aus GridCNN-Stufe 1, dort als „O17“ geführt), O20, O21, O22 — §11.10. **Ausgesetzt am 23.09.:** O18. **Gesperrt am 23.09.:** O20.
 
 ---
 
@@ -1269,6 +1405,11 @@ Wird beim Abhaken ausgefüllt. Leer = noch nicht gemessen.
 | **V** | **Vorlauf Achse 1** | **alle drei grün 14.09.**: `cuda:0 Tesla T4`; `[CFL WARN]`-Physikzeile weg bei δ = 0.2; `--ema-decay 0.5` greift, gemessene Rate **0.500/Epoche** | **14.09.** |
 | **V** | **Bug gefunden** | `delta=1.0s` stand **hartkodiert** im Startbanner (`train.py:721`) — jedes `train.log` dieses Projekts behauptete δ = 1.0 s, unabhängig von `--delta-phys`. Hätte Achse 1 unlesbar gemacht. Behoben mit Test | **14.09.** |
 | **A0** | **Wanduhr `-j 6` mit MPS** | **9 016.8 s = 2 h 30 min** für sechs 60-Epochen-Läufe auf elf OPs, 6/6 `[ok]`. Summe/Wanduhr 5.46× ist die **Obergrenze**; geschätzt echt **~4.0×**, also ~67 % Effizienz gegen 92 % bei `-j 4`. **Künftig `-j 4`** | **10.09.** |
+| **Z** | **Achse 1 zerlegt: `L = A + B/δ²`** | Fit an die Mediane auf **5 %**; `B/δ²` ist **90.9 / 98.4 / 99.6 %** von `L_phys`. `A = 4.0e3`, `B = 4.0e4`. Der Zähler trägt einen δ-unabhängigen Sprung von **3.65 °C RMS**. Ein räumlicher Term (O18) kann nur in `A` stecken. §11.10 | **23.09.** |
+| **Z** | **synthetisch nachgestellt** (P2-Training, P2.1-Werkzeug, CPU) | geloggtes `L_phys` **5.2× / 25.8×** bei δ = 0.4 / 0.2 (echt 5.5× / 22×). `[STALE]` 2/3, `[JITTER]` 3/3, **`[BLIND]` 3/3** — autograd sah **0.01 … 9 %** der Krümmung. Synthetisch: Mechanismus, keine Ergebnisse | **23.09.** |
+| **Z** | **`--time-deriv autograd`** | trainierte ein **zweites** MLP, das der Rollout nie benutzt. **Gesperrt** (O20) | **23.09.** |
+| **Z** | **`--phys-stencil live`, synthetisch** | `L_phys` **32 … 2 400× kleiner** als mit `buffer`, keine δ-Skalierung zwischen 1.0 und 0.4; val OP06 2.4 / 2.1 / 2.9 gegen 10.4 / 7.6 / 6.3 °C — **1 Seed, synthetisch, kein Ergebnis**. `[BLIND]` unverändert | **23.09.** |
+| **Z** | **POC-Kommando P3, synthetisch** (dt 1 s, 2 Seeds, 12 Epochen, `sweep.py -j 4`, CPU) | val OP06 **3.330 ± 0.264** (`live`) gegen **6.585 ± 0.179 °C** (`buffer`); `L_phys` ~400 gegen 1.2e4 … 3.0e4. Sweep, Checkpoints, Zerlegung laufen durch. **Mechanismus, kein Ergebnis** — der echte POC steht aus | **23.09.** |
 
 Alles läuft aus dem Repo-Wurzelverzeichnis:
 
@@ -2602,6 +2743,11 @@ O(δ·dT/dt) und `L_phys` **δ-unabhängig**. Gemessen geht es mit 1/δ².
 
 ### O18 — die Wärmeleitung steht in der falschen Form (NEU, 15.09.)
 
+> **⏸ 23.09.: ausgesetzt.** Der Befund unten — λ steht außerhalb der Divergenz —
+> ist als Beobachtung richtig. Aber er **erklärt `L_phys ∝ 1/δ²` nicht** (ein
+> räumlicher Term wird nie durch δ geteilt), und der geplante Einbau mit
+> „analytischem `∇λ`" ist auf diesem Gitter nicht wohldefiniert. §11.10.
+
 Die Frage kam von außen und sie trifft: *„wir nehmen λ nicht in die Ableitung,
 wir nehmen eine Konstante — kann das der Grund sein?"* **Ja.**
 
@@ -2720,6 +2866,166 @@ gezählte Division; seit dem 01.09. steht dort `jr1_w / V_JR1`. Danach ging die
 bewegten sich um exakt 121 (§11.1). Eine geschlossene Bilanz ist ein
 unabhängiger Zeuge. **O18 ist ein anderer Fehler als der 121er** — jener war ein
 Faktor in der Quelle, dieser ein fehlender Term im Leitungsanteil.
+
+---
+
+### 11.10 Der Physik-Term misst nicht, was §11.9 annimmt (23.09., P2.1)
+
+**Kurz:** Die 1/δ²-Signatur aus Achse 1 kommt aus dem BDF-**Zähler**, nicht aus
+der Leitungsgleichung — O18 kann sie nicht erzeugen. Auf dem synthetischen
+Cache nachgestellt, trägt sie der **Sprung zwischen lebendem Netz und
+eingefrorenem Rollout** (O21). Und der autograd-Laplace ist für die räumliche
+Struktur, die über den Historien-Anker kommt, **blind** (O22). Beides ist auf
+den echten Checkpoints noch nicht gemessen — das Werkzeug dafür steht
+(`tools/residual_decomposition.py`, Modellstand P2.1).
+
+#### 1. Die Algebra
+
+```
+residual = (3 T − 4 T₁ + T₂) / (2 δ)  −  aniso  −  Qsrc          (physics.py)
+```
+
+`aniso = Fo : ∇²T` wird **addiert**, nie durch δ geteilt. Jeder Fehler darin —
+ein fehlendes `(∇λ)·(∇T)` eingeschlossen — ist δ-unabhängig und landet im
+konstanten Teil `A` von `L = A + B/δ²`. Wie 1/δ² skaliert nur ein Beitrag zum
+Zähler, der nicht mit δ schrumpft.
+
+> Das gilt für die **hybride** Historie, mit der Achse 0 und 1 liefen: ihre
+> Kanäle sitzen bei `delta_grid` und `rate_lags`, nicht bei δ, also ändert δ den
+> Netzeingang nicht. (Im `raw`-Modus ist die Historie selbst der BDF-Stapel,
+> dort verschiebt δ auch `T`.) `test_a_spatial_term_does_not_depend_on_delta`
+> hält es fest.
+
+Fit an die Achse-1-Mediane (`fit_inverse_square` im Werkzeug; der Test
+`test_the_achse1_numbers_are_almost_all_one_over_delta_squared` nagelt ihn fest):
+
+| δ | `L_phys` gemessen | Fit | Anteil `B/δ²` |
+|---|---|---|---|
+| 1.0 s | 4.6e4 | 4.38e4 (−4.8 %) | **90.9 %** |
+| 0.4 s | 2.5e5 | 2.53e5 (+1.1 %) | **98.4 %** |
+| 0.2 s | 1.0e6 | 9.99e5 (−0.1 %) | **99.6 %** |
+
+`A = 4.0e3`, `B = 4.0e4` (δ in s). Nur `A` allein verfehlt um 839 %. Mit
+`phys_scale = 4.582`, `T_span = 1604 s`, `T_sigma = 9.616 °C` heißt `B`: der
+Zähler trägt einen δ-unabhängigen Sprung von **0.38 z = 3.65 °C RMS** im Wert
+`T` — dieselbe Größenordnung wie der Abstand des freien Rollouts zu den Labels
+(Trainings-MAE 2.4 … 2.9 °C, O17).
+
+**Damit ist §11.9s Schluss „der Zähler ist δ-unabhängig ⇒ O18" nicht haltbar.**
+Der erste Teil stimmt, der zweite folgt nicht: O18 sitzt nicht im Zähler.
+
+#### 2. Was in den Zähler kommt — zwei Mechanismen (O21)
+
+**a) Der eingefrorene Puffer (`[STALE]`).** `T` ist das **lebende** Netz,
+`T₁`/`T₂` kommen aus dem Rollout, mit dem die Epoche begann (`train.py`: ein
+Rollout je OP und Epoche, dann `--inner-steps` Updates dagegen). Direkt nach dem
+Rollout ist `T − T_Puffer(t)` an Gitterzeiten exakt null. Jeder Datenschritt
+zieht die Ein-Schritt-Vorhersage aber zum **Label**, während der Puffer auf der
+freien Trajektorie bleibt. Der Sprung ist δ-unabhängig, geht mit Faktor 3 in den
+Zähler und wird durch `2δ` geteilt.
+`test_the_jump_scales_exactly_like_one_over_delta_squared` hält die Skalierung
+fest.
+
+**b) Ein rauer Rollout (`[JITTER]`).** Springt der Rollout selbst von Schritt zu
+Schritt, steht dieses Rauschen in drei Zeilen des Zählers — bei **jedem** δ.
+Gemessen als zweite Differenz des Rollouts gegen die der Labels.
+
+Zeile 0 ist ein Sonderfall: die aufgeprägte Anfangsbedingung, nie eine
+Vorhersage. `train.py` zieht sie für den Physik-Term mit (`pt` ab 0); das Werkzeug
+misst sie getrennt.
+
+#### 3. Der autograd-Laplace ist blind für den Anker (O22, `[BLIND]`)
+
+`heat_residual` leitet nach `xn` ab und nach sonst nichts. Die Historie — im
+hybriden Modus der Anker `T(t − 0.2 s)` **an diesem Punkt** — wird per
+Punktindex aus dem Puffer gelesen und ist für autograd eine Konstante. Ein Netz,
+das `T(t) ≈ T(t − 0.2 s) + klein` gelernt hat, trägt seine Ortsstruktur also
+über einen Eingang, den autograd nicht sieht, und `Fo : ∇²T` wird vom kleinen
+Rest genommen.
+
+> **Das steht schon im Code** — im Docstring von `model.level()`, für den
+> Anker unter `residual_output`: *„A per-point anchor is read from a discrete
+> buffer and is therefore invisible to autograd, so ∇²T would silently come back
+> as the Laplacian of the deviation alone — missing the anchor's own curvature,
+> which is most of it."* Die Begründung trifft den Historien-Anker genauso, und
+> der ist im Default **an**.
+
+Folge: der Leitungsterm ist fast null, und `L_phys` ist praktisch
+`dT/dt − Qsrc`. Dieselbe autograd-Ableitung steckt in `L_bc` (`dT/dx` bei x = 0)
+und stünde in jedem Robin-Term für O16. Gemessen ist es bisher für die zweite
+Ableitung in y und z (`laplacian_visibility`: autograd gegen den Differenzenstern
+auf denselben Feldwerten; `test_laplacian_visibility_tells_explicit_from_carried`
+prüft beide Richtungen).
+
+#### 4. O18 ist in der geplanten Form auf diesem Gitter nicht wohldefiniert
+
+Das Residuum wird **nur an den 363 Knoten** ausgewertet, und jede x-Ebene ist
+genau ein Material. λ ist je Knoten konstant; an den Knoten selbst ist `∇λ = 0`,
+zwischen ihnen ist es eine Dirac-Distribution. „`∇λ` analytisch bekannt"
+(Kasten vom 15.09., Schritt 2) liefert also entweder **null** oder etwas, das an
+keinem Knoten auswertbar ist; der „numerische Gradient auf drei Knoten" war dort
+ausdrücklich ausgeschlossen. Was O18 eigentlich will — **Flusskontinuität über
+die Grenzfläche** — ist die konservative Form `∇·(λ∇T)` mit Leitwerten
+**zwischen** den Knoten. Das ist **Route R4** in `GridCNN/BENCHMARK.md`, die
+bewusst „in beiden Projekten gleichzeitig und als eigene Achse" geändert werden
+soll.
+
+#### 5. Nachgestellt auf dem synthetischen Cache (Training P2, Werkzeug P2.1)
+
+Drei Trainingsläufe, die sich nur in δ unterscheiden: OP01–03, val OP06, 400 s
+je OP, `--epochs 15 --inner-steps 50 --ema-decay 0.5`, Seed 0, CPU der
+Cloud-Sitzung (keine GPU).
+
+| | δ = 1.0 | δ = 0.4 | δ = 0.2 |
+|---|---|---|---|
+| geloggtes `L_phys`, Median Ep 11–15 | 1.55e4 | 8.07e4 (**5.2×**) | 4.00e5 (**25.8×**) |
+| Achse 1, echt, zum Vergleich | 4.6e4 | 2.5e5 (5.5×) | 1.0e6 (22×) |
+
+Die Signatur ist reproduziert. Die Zerlegung je Checkpoint, alle drei δ auf
+denselben Gewichten (`--samples 2048 --stale-steps 50 --warmup-steps 20`):
+
+| trainiert mit | Sprung-Anteil („stale", δ = 0.2) | Sprung RMS | Sichtbarkeit autograd | Rauheit Rollout / Labels | Befund |
+|---|---|---|---|---|---|
+| δ = 1.0 | **100 %** | 2.25 °C | 0.0001 … 0.03 | 57 … 5 000× | `[STALE] [JITTER] [BLIND]` |
+| δ = 0.4 | 46 % | 2.30 °C | 0.04 … 0.07 | 43 … 372× | `[JITTER] [BLIND]` |
+| δ = 0.2 | **100 %** | 1.63 °C | 0.02 … 0.09 | 57 … 1 100× | `[STALE] [JITTER] [BLIND]` |
+
+Zwei Nebenbefunde aus denselben Läufen: der Leitungsterm trägt im
+**Mittelquadrat 1e-8 … 1e-4** zu `L_phys` bei (gegen 1e3 … 1e5 für den
+Zeitanteil) — genau das, was O22 vorhersagt. Und der δ = 0.4-Checkpoint zeigt
+einen Rollout, der **mit Periode 2** alterniert: bei ungeraden Lags (1 und 5
+Schritte) ist der Rest groß, beim geraden (2 Schritte) null.
+
+Mit `--phys-stencil live` (dieselben drei Läufe, nur der Schalter an): geloggtes `L_phys` **129 / 33 / 1.24e4** statt 1.55e4 / 8.07e4 / 4.0e5 — **32 … 2 400× kleiner**, und zwischen δ = 1.0 und 0.4 skaliert nichts mehr; bei δ = 0.2 (eine Datenzeile) bleibt der raue Rollout (`[JITTER]`) sichtbar. val OP06: **2.4 / 2.1 / 2.9 °C** mit `live` gegen 10.4 / 7.6 / 6.3 °C mit `buffer` — in allen drei Paaren besser, aber **ein Seed, synthetisch: ein Hinweis, der Achse 5 rechtfertigt, kein Ergebnis**. `[BLIND]` bleibt (Sichtbarkeit 0.02 … 0.03) — der Schalter behebt O21, nicht O22.
+
+⚠ **Synthetisch.** Der Mechanismus ist damit belegt, die Zahlen sind keine
+Ergebnisse. Die synthetischen Labels sind glatter als echte (daher die großen
+Rauheitsfaktoren), und der „stale"-Zustand ist eine Emulation (nur Datenterm,
+Adam frisch und 20 Schritte aufgewärmt, Gradient bei 1.0 geklemmt), kein
+Nachspielen einer bestimmten Epoche.
+
+#### 6. Was daraus folgt
+
+1. **Erst der POC für P3, dann die Zerlegung** (Kopf-Kästen): `buffer` gegen
+   `live` auf echten Daten, 3 Seeds, dt 1 s, ~1–1.5 h mit `-j 4` und MPS
+   ([`README_MODELL_P3_POC.md`](README_MODELL_P3_POC.md)); danach die POC- und
+   die 15 Achse-0/1-Checkpoints zerlegen. Die Zerlegung kostet keine
+   Trainingszeit.
+2. **Die MLP-Struktur bleibt.** Beide Reparaturen im Kopf-Kasten ändern, **wo**
+   der Physik-Term das MLP auswertet — nicht das MLP. Die für `[STALE]` ist seit
+   23.09. gebaut: `--phys-stencil live` (Default `buffer`, also nichts
+   eingeschaltet). Tests: auf einem frischen Rollout ändert der Schalter nichts,
+   nach verschobenen Gewichten hebt er den Sprung exakt auf
+   (`test_live_stencil_*`). Die für `[BLIND]` ist ein Entwurf mit Designfragen
+   (Rand an der Gehäusewand, Kreuzterm, nicht-äquidistantes x) und wird erst
+   gebaut, wenn die Messung sie verlangt.
+3. **Stufe 6 (GridCNN) betrifft das direkt:** GridCNNs `L_phys` ist `‖g_θ‖²`
+   mit einem Differenzenstern auf dem Zustand — dort gibt es weder den Sprung
+   gegen den Puffer noch die Blindheit, **per Konstruktion**. Bleibt der PINN bei
+   autograd, vergleicht Stufe 6 zwei Physik-Formulierungen, nicht zwei
+   Architekturen.
+4. **O16 (Achse 2) erst danach.** Ein Robin-Term per autograd wäre so blind wie
+   der Laplace.
 
 ---
 
