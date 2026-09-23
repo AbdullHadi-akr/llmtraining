@@ -437,3 +437,177 @@ def test_die_falsche_kartenbreite_faellt_laut_aus(layout):
         M.GridCNN(layout).correction(x)          # erwartet 44, bekommt 42
     with pytest.raises(ValueError, match="n_static"):
         M.GridCNN(layout, n_static=16)
+
+
+# ---------------------------------------------------------------------------
+# PR #51: kompakte Karten, Treiber per FiLM, exakter Physikschritt
+# ---------------------------------------------------------------------------
+def _realistische_materialdaten(layout):
+    """Wie am 22.09. gemessen: rho*Cp je x-Ebene konstant, lam je Ebene
+    konstant bis auf zwei Zeilen am unteren y-Rand."""
+    nx, ny, nz = layout.shape
+    ebene = np.repeat(np.arange(nx), ny * nz)            # Feldreihenfolge
+    zeile = np.tile(np.repeat(np.arange(ny), nz), nx)
+    rand = zeile < 2
+    lam = np.zeros((layout.n_points, 3, 3))
+    for i, (a, b, c) in enumerate(((30., 30., 1.), (20., 20., 2.),
+                                   (15., 15., 15.))):
+        m = ebene == i
+        lam[m, 0, 0], lam[m, 1, 1], lam[m, 2, 2] = a, b, c
+    lam[ebene == 1, 0, 1] = 2.0
+    lam[rand, 1, 1] *= 1.5
+    lam[rand, 2, 2] *= 1.5
+    rho = np.choose(ebene, [2500.0, 2200.0, 2700.0])
+    cp = np.choose(ebene, [900.0, 1000.0, 880.0])
+    # build_static_maps erwartet die Punktreihenfolge des Layouts
+    feld_nach_punkt = layout.flat_index.reshape(-1)
+    umkehr = np.empty_like(feld_nach_punkt)
+    umkehr[feld_nach_punkt] = np.arange(feld_nach_punkt.size)
+    return lam[umkehr], rho[umkehr], cp[umkehr]
+
+
+def test_kompakte_karten_behalten_nur_was_neu_ist(layout):
+    lam, rho, cp = _realistische_materialdaten(layout)
+    voll = M.build_static_maps(layout, lam=lam, rho=rho, cp=cp)
+    kompakt = M.build_static_maps(layout, lam=lam, rho=rho, cp=cp,
+                                  kompakt=True)
+    assert voll.n_channels == 17
+    # y, z und EINE Randmaske -- alles andere ist Bias oder deren Vielfaches
+    assert kompakt.n_channels == 3, kompakt.namen
+    assert {"y", "z"} <= set(kompakt.namen)
+    assert kompakt.hat_koordinatenkarten
+    assert len(kompakt.verworfen) == 14
+    ohne = M.build_static_maps(layout, lam=lam, rho=rho, cp=cp,
+                               kompakt=True, coord_maps=False)
+    assert ohne.n_channels == 1 and not ohne.hat_koordinatenkarten
+
+
+def test_kompakte_karten_verlieren_keine_funktion(layout):
+    """Der Beweis, dass ``kompakt`` keine Modellierungsentscheidung ist.
+
+    Die Gewichte eines vollen Netzes werden auf ein kompaktes umgerechnet:
+    Jede verworfene Karte ist ``sum c_j * behaltene_j + b``, also wandert ihr
+    Kern mit Faktor c_j auf die behaltenen und ``b * sum(Kern)`` in den Bias.
+    Beide Netze muessen dann dasselbe ausgeben.
+    """
+    lam, rho, cp = _realistische_materialdaten(layout)
+    voll = M.build_static_maps(layout, lam=lam, rho=rho, cp=cp)
+    kompakt = M.build_static_maps(layout, lam=lam, rho=rho, cp=cp,
+                                  kompakt=True)
+    torch.manual_seed(0)
+    netz_v = M.GridCNN(layout)
+    netz_k = M.GridCNN(layout, karten="kompakt", n_static=kompakt.n_channels)
+    for p in netz_v.parameters():
+        with torch.no_grad():
+            p.normal_(0.0, 0.1)
+
+    # Jede volle Karte als Linearkombination der kompakten plus Konstante.
+    u = kompakt.maps.reshape(kompakt.n_channels, -1).double()
+    basis = torch.cat([u, torch.ones(1, u.shape[1], dtype=torch.float64)])
+    v = voll.maps.reshape(voll.n_channels, -1).double()
+    koef = torch.linalg.lstsq(basis.T, v.T).solution.T      # (17, k+1)
+    assert torch.allclose(koef @ basis, v, atol=1e-6)
+
+    s0 = M.CH_STATE
+    wv, bv = netz_v.correction.body[0].weight, netz_v.correction.body[0].bias
+    with torch.no_grad():
+        wk = netz_k.correction.body[0].weight
+        wk[:, :s0] = wv[:, :s0]
+        wk[:, s0 + kompakt.n_channels:] = wv[:, s0 + voll.n_channels:]
+        statisch = wv[:, s0:s0 + voll.n_channels].double()   # (16, 17, 3, 3)
+        wk[:, s0:s0 + kompakt.n_channels] = torch.einsum(
+            "ij,oihw->ojhw", koef[:, :-1], statisch).float()
+        netz_k.correction.body[0].bias.copy_(
+            bv + (statisch.sum(dim=(2, 3)) @ koef[:, -1]).float())
+        for a, b in zip(list(netz_v.correction.body[1:]) + [netz_v.correction.head],
+                        list(netz_k.correction.body[1:]) + [netz_k.correction.head]):
+            b.weight.copy_(a.weight)
+            b.bias.copy_(a.bias)
+
+    nx, ny, nz = layout.shape
+    state = M.state_channels(*(torch.randn(3, nx, ny, nz) for _ in range(3)))
+    drv = M.driver_channels(torch.randn(3, 7), torch.randn(3, 11), ny, nz)
+    aus_v = netz_v.correction(M.assemble_input(state, voll, drv))
+    aus_k = netz_k.correction(M.assemble_input(state, kompakt, drv))
+    assert torch.allclose(aus_v, aus_k, atol=1e-4)
+
+
+def test_film_spart_gewichte_und_startet_ohne_treibereinfluss(layout, batch):
+    t0, x, qsrc = batch
+    karte = M.GridCNN(layout)
+    film = M.GridCNN(layout, treiber="film")
+    # 18 x 16 x 9 raus aus der ersten Faltung, 18 -> 2 x 3 x 16 rein
+    assert karte.n_parameters == 11427
+    assert film.n_parameters == 11427 - 18 * 16 * 9 + (18 * 96 + 96) == 10659
+
+    torch.manual_seed(0)
+    for n, p in film.named_parameters():
+        if not n.startswith("correction.film"):
+            with torch.no_grad():
+                p.normal_(0.0, 0.1)
+    anders = x.clone()
+    anders[:, -M.CH_DRIVER:] += 3.0
+    # FiLM steht auf null: die Treiber wirken noch nicht ...
+    assert torch.allclose(film.correction(x), film.correction(anders))
+    # ... und sobald FiLM Gewichte hat, wirken sie.
+    with torch.no_grad():
+        film.correction.film.weight.normal_(0.0, 0.1)
+    assert not torch.allclose(film.correction(x), film.correction(anders))
+
+
+def test_film_liest_die_treiber_als_vektor(layout, batch):
+    """Die gebroadcastete Karte ist konstant, also traegt ein Pixel alles."""
+    t0, x, qsrc = batch
+    film = M.GridCNN(layout, treiber="film")
+    with torch.no_grad():
+        film.correction.film.weight.normal_(0.0, 0.1)
+    d = x[:, -M.CH_DRIVER:, 0, 0]
+    assert torch.equal(d[:, :, None, None].expand(-1, -1, *x.shape[2:]),
+                       x[:, -M.CH_DRIVER:])
+
+
+def test_der_exakte_schritt_ist_bei_g_null_die_physik(layout, batch, fo_field):
+    t0, x, qsrc = batch
+    netz = M.GridCNN(layout, integrator="exp")
+    dt = 50.0 * phys.cfl_limit(layout, fo_field)
+    aus = netz.step(t0, x, dt_n=dt, fo_field=fo_field, qsrc=qsrc,
+                    ghost_hi=M.adiabatic_ghost(t0))
+    ref = netz.physik(fo_field, dt).schritt(t0, qsrc)
+    assert torch.equal(aus, ref)
+    # derselbe Integrator wird wiederverwendet, nicht neu gebaut
+    assert netz.physik(fo_field, dt) is netz.physik(fo_field, dt)
+    # der Euler-Default rechnet wie vorher
+    alt = M.GridCNN(layout)
+    assert alt.integrator == "euler"
+
+
+def test_arm_b_mit_exp_rollt_weit_ueber_cfl_ohne_wegzulaufen(layout, batch,
+                                                             fo_field):
+    """Der Grund fuer PR #51: B mit Euler explodiert bei dt 110x ueber der
+    Schranke, B mit dem exakten Schritt nicht."""
+    t0, x, qsrc = batch
+    dt = 110.0 * phys.cfl_limit(layout, fo_field)
+    kw = dict(dt_n=dt, fo_field=fo_field, qsrc=torch.zeros_like(qsrc))
+    exp, eul = M.GridCNN(layout, integrator="exp"), M.GridCNN(layout)
+    a = b = t0
+    with torch.no_grad():
+        a, b = _rolle_beide(exp, eul, a, b, x, kw)
+    assert float(a.abs().max()) <= float(t0.abs().max()) + 1e-4
+    assert not torch.isfinite(b).all() or float(b.abs().max()) > 1e6
+
+
+def _rolle_beide(exp, eul, a, b, x, kw):
+    """30 Schritte, exakt und Euler nebeneinander."""
+    for _ in range(30):
+        a = exp.step(a, x, ghost_hi=M.adiabatic_ghost(a), **kw)
+        b = eul.step(b, x, ghost_hi=M.adiabatic_ghost(b), **kw)
+    return a, b
+
+
+def test_unbekannte_schalter_fallen_laut_aus(layout):
+    with pytest.raises(ValueError, match="treiber"):
+        M.GridCNN(layout, treiber="bild")
+    with pytest.raises(ValueError, match="integrator"):
+        M.GridCNN(layout, integrator="rk4")
+    with pytest.raises(ValueError, match="n_static fehlt"):
+        M.GridCNN(layout, karten="kompakt", n_static=None)

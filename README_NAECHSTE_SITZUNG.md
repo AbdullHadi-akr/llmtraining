@@ -18,7 +18,7 @@
 | **Ist das Modell jetzt besser?** | **Das eingesetzte nicht** — mit den Defaults rechnet der Code bitgleich wie vorher (P2.1 = P2, per Test). **P3** war auf dem synthetischen Cache besser, zuletzt mit genau dem POC-Kommando: val OP06 **3.330 ± 0.264** gegen **6.585 ± 0.179 °C**, 2 Seeds. Das belegt den Mechanismus, **nicht** das Modell. Auf echten Daten entscheidet es der **POC** |
 | **Fahren wir mit diesem Modell fort?** | **Ja.** Das MLP bleibt (4 × 128, lernbares Swish, hybride Historie). Geändert wird nur, **wo der Physik-Term das MLP auswertet**: P3 (live-Stencil) jetzt im POC, P4 (Ortsableitungen per Differenzenstern) erst, wenn die Zerlegung `[BLIND]` auf echten Daten zeigt |
 | **Wurde die Physik angepasst?** | **Ja, als Schalter — eingeschaltet wird sie im POC.** Der Default bleibt `buffer`, damit jede alte Zahl gültig bleibt und der POC einen sauberen Vergleichsarm hat. P3 wird erst Default, wenn POC **und** Achse 5 es tragen |
-| **Was ist mit GridCNN?** | In dieser Sitzung nicht angefasst, aber in einer anderen weitergekommen (§2). **Lauf 17 ist gelaufen:** 0.62× / 0.79×, kein Ergebnis wegen der Streuung. Als Nächstes kommt Code, keine Maschine: der Integrator für den Physikterm (`GridCNN/FAHRPLAN.md`, Kopf) |
+| **Was ist mit GridCNN?** | In dieser Sitzung nicht angefasst, aber in einer anderen weitergekommen (§2). **Lauf 17 ist gelaufen:** 0.62× / 0.79×, kein Ergebnis wegen der Streuung. Der Integrator ist mit PR #51 gebaut (dazu schlanker Eingang, alles hinter Schaltern). Als Nächstes braucht GridCNN die Karte: erst Minuten für over-/underfit, dann Lauf 18 (B) und Lauf 19 (A schlank) (`GridCNN/FAHRPLAN.md`, Kopf) |
 | **Wo stand ich in den Benchmarks?** | §2 |
 | **Wie läuft es, 1–10?** | **6/10** — §3 |
 

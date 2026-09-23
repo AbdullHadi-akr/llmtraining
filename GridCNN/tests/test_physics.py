@@ -317,3 +317,92 @@ def test_cfl_schranke_faellt_mit_groesserem_fo(layout):
     slow = phys.cfl_limit(layout, fo)
     assert phys.cfl_limit(layout, fo * 10.0) < slow
     assert phys.cfl_limit(layout, fo * 0.0) == float("inf")
+
+
+# ---------------------------------------------------------------------------
+# Der exakte Integrator (Schritt 2, PR #51)
+# ---------------------------------------------------------------------------
+def _diag_fo(layout, xy: float = 0.0):
+    fo = torch.zeros(*layout.shape, 3, 3, dtype=torch.float64)
+    fo[..., 0, 0], fo[..., 1, 1], fo[..., 2, 2] = 3e-3, 2e-3, 2.5e-3
+    fo[1] *= 3.0                                   # Schichten wie im Datensatz
+    if xy:
+        fo[1, ..., 0, 1] = fo[1, ..., 1, 0] = xy
+    return fo
+
+
+def _rk4(layout, fo, t, q, dt, n):
+    """Die Referenz: dieselbe Gleichung, klassisches RK4 in n Unterschritten."""
+    def f(x):
+        b = x.unsqueeze(0)
+        return phys.anisotropic_laplacian(
+            gridmod.pad_all(b, b[:, -2]), layout, fo)[0] + q
+    h = dt / n
+    for _ in range(n):
+        k1 = f(t)
+        k2 = f(t + 0.5 * h * k1)
+        k3 = f(t + 0.5 * h * k2)
+        k4 = f(t + h * k3)
+        t = t + h / 6.0 * (k1 + 2 * k2 + 2 * k3 + k4)
+    return t
+
+
+@pytest.mark.parametrize("xy", [0.0, 4e-4])
+def test_der_exakte_schritt_trifft_rk4_weit_ueber_der_cfl_schranke(
+        layout, random_field, xy):
+    """50x ueber der Euler-Schranke -- dort, wo Euler explodiert -- trifft der
+    exakte Schritt eine fein aufgeloeste RK4-Rechnung derselben Gleichung."""
+    fo = _diag_fo(layout, xy)
+    dt = 50.0 * phys.cfl_limit(layout, fo)
+    torch.manual_seed(1)
+    q = torch.randn(layout.shape, dtype=torch.float64)
+    integ = phys.ExpIntegrator(layout, fo, dt)
+    got = integ.schritt(random_field.unsqueeze(0).float(),
+                        q.unsqueeze(0).float())[0].double()
+    ref = _rk4(layout, fo, random_field, q, dt, n=400)
+    assert torch.allclose(got, ref, atol=2e-5, rtol=1e-4)
+
+
+def test_der_exakte_schritt_bleibt_1000x_ueber_der_schranke_beschraenkt(
+        layout, random_field):
+    """Das Maximumprinzip der Waermeleitung: ohne Quelle waechst kein Wert
+    ueber das Anfangsmaximum. Euler waere nach wenigen Schritten bei inf."""
+    fo = _diag_fo(layout)
+    dt = 1000.0 * phys.cfl_limit(layout, fo)
+    integ = phys.ExpIntegrator(layout, fo, dt)
+    t = random_field.unsqueeze(0).float()
+    null = torch.zeros_like(t)
+    oben = float(t.abs().max())
+    for _ in range(500):
+        t = integ.schritt(t, null)
+    assert float(t.abs().max()) <= oben + 1e-5
+    # Und Euler mit demselben dt laeuft tatsaechlich weg.
+    e = random_field.unsqueeze(0)
+    for _ in range(20):
+        e = e + dt * phys.anisotropic_laplacian(
+            gridmod.pad_all(e, e[:, -2]), layout, fo)
+    assert float(e.abs().max()) > 1e6
+
+
+def test_ein_konstantes_feld_bleibt_ohne_quelle_stehen(layout):
+    fo = _diag_fo(layout, 4e-4)
+    integ = phys.ExpIntegrator(layout, fo, 100.0 * phys.cfl_limit(layout, fo))
+    t = torch.full((2, *layout.shape), 3.25)
+    assert torch.allclose(integ.schritt(t, torch.zeros_like(t)), t, atol=1e-5)
+    assert abs(integ.groesster_eigenwert()) < 1e-8
+
+
+def test_die_sekante_ist_die_rate_des_exakten_schritts(layout, random_field):
+    """schritt = T + dt * sekante -- die Sekante ist ohne Ausloeschung
+    gerechnet, muss aber dieselbe Groesse sein."""
+    fo = _diag_fo(layout)
+    dt = 20.0 * phys.cfl_limit(layout, fo)
+    integ = phys.ExpIntegrator(layout, fo, dt)
+    t = random_field.unsqueeze(0)
+    q = torch.full_like(t, 0.3)
+    integ64 = integ
+    integ64.p, integ64.phi = integ.p.double(), integ.phi.double()
+    integ64.rate_matrix = integ.rate_matrix.double()
+    integ64.quell_matrix = integ.quell_matrix.double()
+    assert torch.allclose(integ64.schritt(t, q), t + dt * integ64.sekante(t, q),
+                          atol=1e-6)

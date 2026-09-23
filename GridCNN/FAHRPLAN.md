@@ -33,7 +33,101 @@ Der Plan ist eine **Leiter mit Toren**, keine gerade Linie. **Ein rotes Tor
 
 ---
 
-## ▶ Das Nächste: **Schritt 2 als Code — ein Integrator für den Physikterm**
+## ▶ Das Nächste: **zuerst messen, ob A over- oder underfittet — dann Lauf 18 (B) und Lauf 19 (A schlank)**
+
+> ## 🛠 23.09. abends, PR #51 — drei Schalter, alle mit dem alten Default
+>
+> | Schalter | was | warum | Test |
+> |---|---|---|---|
+> | `--integrator exp` | `L(T) + Qsrc` **exakt** über den Datenschritt, `g_θ` als Euler-Schritt obendrauf (`physics.ExpIntegrator`) | Schritt 2: B/C/D liefen bei keinem dt (CFL 110x). Jetzt sind sie **unbedingt stabil** | trifft RK4 bei 50x über der Schranke; bleibt bei 1000x beschränkt, wo Euler explodiert |
+> | `--karten kompakt` | nur die statischen Karten, die linear unabhängig von `1` und den übrigen sind | `rho·Cp` ist je Ebene konstant (reiner Bias), `lam` ändert sich nur am Rand. **Dieselbe Funktionsklasse**, weniger Gewichte | ein volles Netz wird auf ein kompaktes umgerechnet, beide geben dasselbe aus |
+> | `--treiber film` | die 18 Treiber als Vektor in **jeden** Block (Skalierung + Verschiebung) | als Karte zählt von 9 Gewichten eins, und nur in der ersten Schicht: 2 592 Gewichte, 288 wirksam | FiLM startet bei null; 10 659 statt 11 427 Parameter |
+>
+> Dazu das **Physik-Residuum zum exakten Schritt**: Mit `--integrator exp`
+> misst `--w-phys` gegen die Sekante des exakten Schritts statt gegen
+> `L(T) + Qsrc`. Ein Netz, das das alte Euler-Residuum bei 110x über der
+> Schranke erfüllt, wäre ein expliziter Euler-Schritt und liefe weg. Das neue
+> **braucht kein Label**, und das ist die Grundlage für Physik dort, wo
+> nicht gemessen wurde (unten, „Virtuelle OPs").
+>
+> Die Artefakte landen jetzt unter `A-kompakt-film/`, `B-exp/` usw. Kein Lauf
+> überschreibt mehr die Gewichte von Lauf 17 unter `A/`. 157 Tests, dazu ein
+> Probelauf von `train.py` und `nachmessen.py` mit allen Schaltern auf einem
+> synthetischen Cache (die Probe `letztes ep` trifft exakt).
+
+### Schritt 1 — over- oder underfit? (Minuten, Gewichte von Lauf 17)
+
+```bash
+python3 GridCNN/tools/nachmessen.py --no-physics --subsample 2 \
+    --device cuda --cache data_cache --laeufe GridCNN/artifacts/A \
+    --val-ops OP01 OP02 OP03 OP04 OP05 OP07 OP08 OP10 OP11 OP12 OP14 \
+    > 17_konfigA_insample.txt 2>&1
+```
+
+Zeigen die **Trainings**-OPs dasselbe Muster (anfangs zu warm, am Ende zu
+kalt), ist es strukturell und underfit: Dann ist die Architektur dran. Sind
+sie sauber, ist es Extrapolation: Dann helfen Physik und Daten, nicht die
+Größe. Achtung: Hinter `split_t` ist auch ein Trainings-OP ungesehen, das
+letzte Stück jedes Profils ist also Extrapolation in der Zeit.
+
+### Schritt 2 — Lauf 18 und Lauf 19, gleiches Protokoll wie Lauf 17
+
+```bash
+# Lauf 18: Arm B zum ersten Mal -- Physik in der Architektur, exakt integriert
+python3 GridCNN/train.py --integrator exp --seeds 3 --epochs 60 \
+    --subsample 2 --inner-steps 25 --tbptt-start 20 --tbptt 80 \
+    --val-every 2 --device cuda --cache data_cache \
+    > 18_konfigB_exp.txt 2>&1
+# Lauf 19: A mit schlankem Eingang
+python3 GridCNN/train.py --no-physics --karten kompakt --treiber film \
+    --seeds 3 --epochs 60 --subsample 2 --inner-steps 25 \
+    --tbptt-start 20 --tbptt 80 --val-every 2 --device cuda \
+    --cache data_cache > 19_konfigA_schlank.txt 2>&1
+```
+
+* **Lauf 18 gegen Lauf 17** ist genau eine Änderung: die Physik in der
+  Architektur. Die Frage: Holt `Qsrc` das „später zu langsam" zurück? Zu lesen
+  am **Bias je Abschnitt**, nicht am Mittelwert. Den Pegel selbst kann B
+  adiabat nicht halten (keine Senke), die Richtung aber schon.
+* **Lauf 19 gegen Lauf 17** sind zwei Änderungen am Eingang, als **eine**
+  Frage gestellt: Braucht das Netz die 2 592 + 2 448 Gewichte der ersten
+  Faltung? Gleiche Güte mit weniger Gewichten heißt ja, und jeder weitere
+  Architekturversuch fängt dann schlank an.
+* Beide sind unabhängig voneinander und können mit MPS parallel laufen.
+
+### Virtuelle OPs — Physik, wo es keine Messung gibt (entworfen, **noch nicht gebaut**)
+
+Die Idee: Das Physik-Residuum braucht kein Label. Man kann es also auf
+Betriebspunkten auswerten, **die nie simuliert wurden**: Treiber setzen,
+das Modell frei rollen lassen, das Residuum entlang der eigenen Trajektorie
+bestrafen. So füllt Physik die Lücken im Envelope, statt dass das Netz dort
+rät.
+
+Welche Lücken, und woher die fehlenden Größen kommen:
+
+| Lücke | virtueller OP | `Qsrc` | welche Physik nötig |
+|---|---|---|---|
+| **O14**: V̇ = 0 nur bei 0 und 10 °C (OP06 sitzt bei 25 °C) | jeder Trainings-OP als **V̇ = 0-Zwilling**: `fluid_mass_flow` auf z(0) | vom Quell-OP (gleicher Strom) | Wand mit `U(0) ≈ 50 W/m²K` und ruhendem Fluid (`capacity`-Modus): Bei ṁ = 0 gehen noch **≈ 27 %** der Wärme in das stehende Kühlmittel (Wandanteil 0.27, Abschnitt 1b) |
+| **T0 = T_fluid** in allen elf Trainings-OPs (OP09 trennt beides) | Zwillinge mit `fluid_inlet_temp` ≠ `solid_initial_temp` | vom Quell-OP | **nur** die Wand verbindet Zelle und Fluid |
+
+**Warum es in PR #51 noch nicht gebaut ist:** Beide Lücken werden von der
+**Wand** entschieden. Das Residuum gibt es bisher nur adiabat. Damit würde
+es dem Modell bei V̇ = 0 beibringen, dass keine Wärme ins Kühlmittel geht
+(statt ≈ 27 %). Bei T0 ≠ T_fluid würde es ihm sagen, dass das Fluid egal ist. Das ist
+falsche Physik mit gutem Gewissen. Die Reihenfolge ist deshalb:
+
+1. ✅ Exakter Schritt und labelfreies Residuum (PR #51)
+2. ⬜ **Wandterm im Integrator.** Der Robin-Rand ist linear in T, also
+   bleibt ein exakter Schritt möglich: `A` hängt dann an `U(V̇)`, der
+   Randbeitrag an `T_fluid`. Bei konstantem V̇ ist das eine Matrix je OP.
+   Dazu `q_wall_meas`, `t_in` und `mdot` in `OPTensors`.
+3. ⬜ Virtuelle OPs als Verlustterm `--w-virt`, Zwillinge wie in der
+   Tabelle. **Regel:** gewählt nach dem Envelope (jeder Trainings-OP bekommt
+   seinen Zwilling), nie nach einem Halte- oder Test-OP.
+
+---
+
+### Was vorher galt: **Schritt 2 als Code — ein Integrator für den Physikterm** (→ PR #51)
 
 > ## 🟡 23.09., Lauf 17 — das Fenster in Sekunden holt OP09 zurück, die Streuung bleibt
 >
