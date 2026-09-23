@@ -7,6 +7,33 @@
 > auf 0.8→3.2 s. Mit `k = 16 < lag2 = 20` bekam die lag2-Rückkopplung **nie**
 > einen Gradienten. Der nächste Lauf korrigiert genau das und sonst nichts.
 
+> ## ✅ Nachtrag, 23.09. mittags — Lauf 17 ist gelaufen, alle Fragen sind beantwortet
+>
+> | | Lauf 16 (k 0.8→3.2 s) | **Lauf 17 (k 4→16 s)** |
+> |---|---|---|
+> | OP06 | 6.64 ± 1.52 · 0.62x · 3/3 | **6.64 ± 1.76 · 0.62x · 3/3** |
+> | OP09 | 8.60 ± 1.76 · 1.11x · 1/3 | **6.16 ± 1.97 · 0.79x · 2/3** |
+>
+> * **Die Fensterhypothese trägt:** OP09 ist zurück, die Frühphase ist
+>   halbiert. **Kein Ergebnis** trotzdem, die Streuung hat zwei Namen: Bei
+>   Seed 2 explodieren die Gradienten ab k ≈ 57, bei Seed 1 läuft OP09 weg.
+> * **Lauf 16 nachgemessen:** Die Probe ist exakt. O13 ist ein **Pegelfehler**:
+>   anfangs zu warm, am Ende zu kalt, in 12/12 bzw. 11/12 Fällen.
+> * **Korrektur:** Der Diffusionskern von Arm B sieht keinen Pegelfehler,
+>   `L(T + c) = L(T)` (neuer Test). Auf den Pegel antwortet nur der
+>   Wandterm.
+> * **4a:** Der erste Prozess wurde bei Seed 2, ep 35 von außen abgebrochen.
+>   Seed 2 lief danach neu mit `--seed 2 --seeds 1 | tee -a`. **4b:** Die
+>   Materialdaten sind echt, CFL ist also echt. Selbst `--subsample 1` läge
+>   55x drüber.
+> * **Das Nächste ist Code, keine Maschine:** ein Integrator für den
+>   Physikterm (exponentiell, adiabat, Test gegen `solve.rollout`), danach der
+>   Wandterm.
+>
+> Bericht: [`TRAININGS_BERICHT_2026-09-23_KonfigA_k_sekunden.md`](TRAININGS_BERICHT_2026-09-23_KonfigA_k_sekunden.md) ·
+> Fahrplan: [`GridCNN/FAHRPLAN.md`](GridCNN/FAHRPLAN.md), Kopf.
+> Die Abschnitte 4–6 unten sind damit **erledigt** und bleiben als Geschichte stehen.
+
 **Branch:** `claude/gracious-wozniak-g9xomm` · **Basis:** `main` nach PR #47
 Für einen Kaltstart zuerst [`UEBERGABE_2026-09-22_ABEND.md`](UEBERGABE_2026-09-22_ABEND.md),
 Abschnitt 0. Diese Seite setzt dort auf.

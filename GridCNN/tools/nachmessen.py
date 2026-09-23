@@ -20,6 +20,10 @@ Gemessen wird je Seed ``model.pt`` (Stand der letzten Epoche) und, falls
 vorhanden, ``model_best.pt``. Die Lags und ``--clamp auto`` loesen sich wie im
 Lauf auf.
 
+Dazu, ohne Rollout: die **Schlusstafel ueber alle Seeds** aus den
+``metrics.json`` (auch wenn die Seeds in getrennten Prozessen liefen) und die
+**Fruehphase** je Seed aus ``history.json``.
+
 Die Probe, dass es dieselbe Messung ist
 ---------------------------------------
 Die MAE von ``model.pt`` muss die Zeile ``letztes ep 60`` aus dem Log treffen
@@ -94,6 +98,29 @@ def main(argv: list | None = None) -> int:
             for z in T.profil_zeilen(profil, einzug=f"[{d.name}]   "):
                 print(z)
 
+    # Die Tafel ueber ALLE Seeds aus den metrics.json -- bei Lauf 16 stand
+    # im Log nur Seed 2, weil die Seeds in zwei Prozessen liefen.
+    metriken = [json.loads((d / "metrics.json").read_text())
+                for d in seeds if (d / "metrics.json").exists()]
+    for d in seeds:
+        h = d / "history.json"
+        if h.exists():
+            f = T.fruehphase(json.loads(h.read_text()))
+            print(f"[{d.name}] FRUEHPHASE: {f['epochen']} Epoche(n) mit mehr "
+                  f"als {100 * f['schwelle']:g} % am Clamp, letzte ep "
+                  f"{f['letzte']}")
+    tafel = None
+    if metriken:
+        alle, latten, protokolle = T.tafel_aus_metrics(metriken)
+        if len(protokolle) > 1:
+            print(f"!! Die Seeds stammen aus verschiedenen Laeufen: "
+                  f"{sorted(map(str, protokolle))}", file=sys.stderr)
+        zeilen, tafel = T.zusammenfassung(alle, latten)
+        print(f"\n[tafel] aus {len(metriken)} metrics.json (berichtete Zahl "
+              f"je Seed, nicht model.pt):")
+        for z in zeilen:
+            print(z)
+
     ueber = T.profil_ueber_seeds(letzte)
     print(f"\n[profil] model.pt, Median ueber {len(letzte)} Seed(s):")
     for z in T.profil_zeilen(ueber, einzug="          "):
@@ -105,7 +132,7 @@ def main(argv: list | None = None) -> int:
         {"konfiguration": T.konfigurationsname(args),
          "subsample": args.subsample, "lag1": args.lag1, "lag2": args.lag2,
          "clamp": float(args.clamp), "je_checkpoint": ergebnis,
-         "median_model_pt": ueber}, indent=2))
+         "median_model_pt": ueber, "tafel": tafel}, indent=2))
     print(f"  -> {ziel}")
     return 0
 

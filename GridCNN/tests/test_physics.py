@@ -154,6 +154,31 @@ def test_konstantes_feld_hat_keine_kruemmung(layout):
     assert float(got.abs().max()) < 1e-9
 
 
+def test_ein_gleichmaessiger_versatz_ist_fuer_den_laplace_unsichtbar(
+        layout, random_field):
+    """Der Diffusionskern sieht keinen Pegelfehler -- er kann ihn also auch
+    nicht zurueckholen.
+
+    Am 22.09. hiess es, Arm B sei "die Behandlung" fuer O13, weil der
+    dissipative Kern das Leck liefere, das der Delta-Form fehlt. Die Laeufe
+    16 und 17 zeigen O13 als **Pegelfehler**: das ganze Feld liegt am Ende
+    zu kalt. Ein gleichmaessiger Versatz aendert den Laplace aber nicht --
+    auch nicht mit raeumlich wechselndem Fo und Kreuzterm, auch nicht am
+    adiabaten Rand, dessen Geisterschicht den Versatz mitspiegelt. Was im
+    Physikteil auf den Pegel reagiert, ist allein der Wandterm.
+    """
+    fo = torch.zeros(*layout.shape, 3, 3, dtype=torch.float64)
+    fo[..., 0, 0], fo[..., 1, 1], fo[..., 2, 2] = 1.0, 0.7, 0.9
+    fo[1] *= 3.0                                  # Schichten wie im Datensatz
+    fo[..., 0, 1] = fo[..., 1, 0] = 0.2
+    versetzt = random_field + 11.5                # der Endversatz vom 22.09.
+    lap = phys.anisotropic_laplacian(
+        gridmod.pad_all(random_field, random_field[-2]), layout, fo)
+    lap_v = phys.anisotropic_laplacian(
+        gridmod.pad_all(versetzt, versetzt[-2]), layout, fo)
+    assert torch.allclose(lap, lap_v, atol=1e-9)
+
+
 # ---------------------------------------------------------------------------
 # U(V_dot) -- und die Regel, dass nie extrapoliert wird
 # ---------------------------------------------------------------------------

@@ -775,25 +775,41 @@ def lade_datensatz(args, device):
     # RICHTGROESSE: der Kreuzterm steckt nicht drin, und das Netz ist nicht
     # der blanke explizite Stern. Deshalb eine Warnung und kein Abbruch.
     dt_max = phys.cfl_limit(layout, train[0].fo)
-    dt_max_s = dt_max * float(bundle.T_span_ref)
-    dt_s = train[0].dtn * float(bundle.T_span_ref)
-    if train[0].dtn > dt_max:
-        print(f"!! [CFL] dt_n={train[0].dtn:.6g} ({dt_s:.4g} s) liegt "
-              f"{train[0].dtn / dt_max:.1f}x UEBER der expliziten Schranke "
-              f"dt_max_n={dt_max:.6g} ({dt_max_s:.4g} s).\n"
-              f"   Laeuft der Rollout weg, ist DAS die erste Erklaerung -- "
-              f"nicht das Netz. Kleineres --subsample, oder pruefen, ob die "
-              f"Materialdaten echt sind: ein synthetisches "
-              f"material_properties/ macht das Problem viel steifer, als es "
-              f"ist. Arm A (--no-physics) ist davon nicht betroffen.",
-              file=sys.stderr)
-    else:
-        print(f"[CFL] dt_n={train[0].dtn:.6g} ({dt_s:.4g} s) unter der "
-              f"Schranke dt_max_n={dt_max:.6g} ({dt_max_s:.4g} s).")
+    print(cfl_text(train[0].dtn, dt_max, float(bundle.T_span_ref),
+                   args.subsample),
+          file=sys.stderr if train[0].dtn > dt_max else sys.stdout)
     if statics.dead:
         print(f"[karten] tot (konstant, auf 0 gezwungen): "
               f"{', '.join(statics.dead)}")
     return bundle, train, val, layout, statics
+
+
+def cfl_text(dtn: float, dt_max: float, T_span_ref: float,
+             subsample: int) -> str:
+    """Die CFL-Zeile -- mit dem Schluss, den die Zahl erlaubt.
+
+    Bis zum 23.09. empfahl sie "kleineres --subsample, oder pruefen, ob die
+    Materialdaten echt sind". Beides ist inzwischen beantwortet: die
+    Materialdaten sind echt (``constants.yaml`` aus dem PDF "Material
+    Properties Gridpoints", Schaefer, 18.06.2026), und selbst die
+    Rohabtastung liegt um ein Vielfaches ueber der Schranke. Ein kleineres
+    ``--subsample`` kann das Problem also gar nicht loesen -- die Zeile sagt
+    das jetzt mit der Zahl dazu, statt einen Weg zu empfehlen, der nicht
+    hinfuehrt.
+    """
+    dt_s, dt_max_s = dtn * T_span_ref, dt_max * T_span_ref
+    if dtn <= dt_max:
+        return (f"[CFL] dt_n={dtn:.6g} ({dt_s:.4g} s) unter der Schranke "
+                f"dt_max_n={dt_max:.6g} ({dt_max_s:.4g} s).")
+    roh = dtn / max(1, int(subsample)) / dt_max
+    return (f"!! [CFL] dt_n={dtn:.6g} ({dt_s:.4g} s) liegt {dtn / dt_max:.1f}x "
+            f"UEBER der expliziten Schranke dt_max_n={dt_max:.6g} "
+            f"({dt_max_s:.4g} s).\n"
+            f"   Auch --subsample 1 laege noch {roh:.1f}x darueber: ein "
+            f"kleineres --subsample loest das NICHT, und die Materialdaten "
+            f"sind echt (23.09.). Fuer B/C/D braucht der Physikterm einen "
+            f"eigenen Integrator (Unterschritte oder implizit). Arm A "
+            f"(--no-physics) ist davon nicht betroffen.")
 
 
 @torch.no_grad()
@@ -1208,6 +1224,10 @@ def fahre_einen_lauf(args, seed: int, device, daten, out_dir: Path,
     print(f"[seed {seed}]   letztes ep {args.epochs}: "
           + "  ".join(f"{k} {v:.4f}" for k, v in sorted(letzte.items()))
           + "   <- eine Lotterie, nicht ablesen (FAHRPLAN)")
+    frueh = fruehphase(verlauf)
+    print(f"[seed {seed}] FRUEHPHASE: {frueh['epochen']} Epoche(n) mit mehr "
+          f"als {100 * frueh['schwelle']:g} % am Clamp, letzte ep "
+          f"{frueh['letzte']}")
 
     # Das Profil ueber die Trajektorie. Ohne es ist "6.57 C" ein Mittelwert
     # ueber 1.1 C in der Mitte und 15 C am Ende -- siehe val_auswertung().
@@ -1229,7 +1249,7 @@ def fahre_einen_lauf(args, seed: int, device, daten, out_dir: Path,
          "val_mae_C_letzte": letzte,
          "val_mae_C_bestes": bestes["mae"],
          "bestes_epoch": bestes["epoch"],
-         "fehlerprofil": profil,
+         "fehlerprofil": profil, "fruehphase": frueh,
          "triviale_latten_C": latten}, indent=2))
     # Berichtet wird der MEDIAN. Bestes und letztes stehen in metrics.json --
     # als Diagnose, nicht als Ergebnis. Begruendung in median_ueber().
@@ -1362,6 +1382,52 @@ def build_argparser() -> argparse.ArgumentParser:
                         "schlechtester Seed um Faktor 5.8 auseinander. Unter "
                         "3 wird gewarnt.")
     return p
+
+
+SAETTIGUNG_SCHWELLE = 0.01    # ab hier zaehlt eine Epoche als "am Clamp"
+
+
+def fruehphase(verlauf: list, schwelle: float = SAETTIGUNG_SCHWELLE) -> dict:
+    """Wie lange lag der Rollout am Clamp? Die Fruehphase als Zahl.
+
+    In Lauf 16 haben sich zwei von drei Seeds erst bei ep 18-19 gefangen --
+    ein Drittel des Laufs, waehrend der Cosine-Plan die Lernrate schon
+    senkt. Das stand nur im Log und war zwischen zwei Laeufen nur durch
+    Zeilenlesen vergleichbar.
+
+    Eine Epoche zaehlt als gesaettigt, wenn mehr als ``schwelle`` aller
+    Rollout-Schritte am Clamp lagen. ``letzte`` ist die spaeteste solche
+    Epoche -- ein spaeter Sturm zeigt sich also auch hier, nicht nur die
+    Fruehphase. Aeltere ``history.json`` ohne ``saturated_max`` zaehlen jede
+    Saettigung.
+    """
+    ep = []
+    for z in verlauf:
+        n, gesamt = z.get("saturated", 0) or 0, z.get("saturated_max", 0) or 0
+        if (n / gesamt > schwelle) if gesamt else n > 0:
+            ep.append(int(z["epoch"]))
+    return {"epochen": len(ep), "letzte": max(ep) if ep else 0,
+            "schwelle": schwelle}
+
+
+def tafel_aus_metrics(metriken: list) -> tuple[dict, dict, set]:
+    """Die Schlusstafel aus den ``metrics.json`` mehrerer Seeds.
+
+    Lauf 16 lief in zwei Prozessen, und die Tafel im Log enthielt nur den
+    letzten Seed. Jede ``metrics.json`` traegt ihre berichtete Zahl und die
+    Latten -- daraus steht die Tafel ueber alle Seeds, ohne Log-Lesen.
+
+    Zurueck kommen ``alle`` und ``latten`` fuer :func:`zusammenfassung` und
+    die Menge der Protokolle. Hat sie mehr als ein Element, werden hier
+    Seeds aus VERSCHIEDENEN Laeufen gemischt -- das muss der Aufrufer sagen.
+    """
+    alle, latten, protokolle = {}, {}, set()
+    for m in metriken:
+        for op_id, v in sorted((m.get("val_mae_C_berichtet") or {}).items()):
+            alle.setdefault(op_id, []).append(float(v))
+        latten.update(m.get("triviale_latten_C") or {})
+        protokolle.add((m.get("konfiguration"), m.get("protokoll")))
+    return alle, latten, protokolle
 
 
 def profil_aus_checkpoint(pfad: Path, layout, net_kwargs: dict, val: list,

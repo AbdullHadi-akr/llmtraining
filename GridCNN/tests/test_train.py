@@ -1098,3 +1098,105 @@ def test_nachmessen_trifft_die_auswertung_im_lauf(tmp_path, layout, net, op,
         assert nach["OP99"][schl] == pytest.approx(vor["OP99"][schl], rel=1e-6)
     assert nach["OP99"]["mae_segmente"] == pytest.approx(
         vor["OP99"]["mae_segmente"], rel=1e-6)
+
+
+def test_die_fruehphase_wird_eine_zahl():
+    """Lauf 16, Seed 0: gesaettigt bis ep 8 (1.4 %), danach nicht mehr."""
+    verlauf = [{"epoch": e, "saturated": s, "saturated_max": 88286}
+               for e, s in [(1, 0), (2, 36379), (3, 54871), (7, 88111),
+                            (8, 1220), (9, 0), (38, 500)]]
+    f = T.fruehphase(verlauf)
+    assert f["epochen"] == 4 and f["letzte"] == 8      # 500/88286 < 1 %
+    # ein spaeter Sturm zeigt sich auch
+    verlauf.append({"epoch": 40, "saturated": 9000, "saturated_max": 88286})
+    assert T.fruehphase(verlauf)["letzte"] == 40
+    # aeltere history.json ohne saturated_max
+    assert T.fruehphase([{"epoch": 3, "saturated": 1}])["letzte"] == 3
+    assert T.fruehphase([])["letzte"] == 0
+
+
+def test_die_tafel_steht_aus_den_metrics_auch_ueber_zwei_prozesse():
+    """Lauf 16: Seeds 0-1 und Seed 2 in zwei Prozessen, die Tafel im Log
+    kannte nur Seed 2. Aus den metrics.json steht sie ueber alle drei."""
+    lat = {"OP06": {"mittelwert": 10.8009, "persistenz": 16.6788},
+           "OP09": {"mittelwert": 7.7625, "persistenz": 18.5493}}
+    metriken = [{"konfiguration": "A", "protokoll": "k=4->16",
+                 "val_mae_C_berichtet": {"OP06": a, "OP09": b},
+                 "triviale_latten_C": lat}
+                for a, b in [(5.5798, 7.3909), (8.3833, 10.6178),
+                             (5.9703, 7.7978)]]
+    alle, latten, protokolle = T.tafel_aus_metrics(metriken)
+    assert alle["OP09"] == [7.3909, 10.6178, 7.7978] and len(protokolle) == 1
+    zeilen, k = T.zusammenfassung(alle, latten)
+    assert k["guete"]["OP06"] == pytest.approx(0.615, abs=1e-3)
+    assert k["guete"]["OP09"] == pytest.approx(1.108, abs=1e-3)
+    assert not k["lesbar"]
+    # gemischte Laeufe fallen auf
+    metriken[2]["protokoll"] = "k=20->80"
+    assert len(T.tafel_aus_metrics(metriken)[2]) == 2
+
+
+def test_nachmessen_laeuft_von_vorn_bis_hinten(tmp_path, monkeypatch, capsys,
+                                               layout, op, statics):
+    """Das Werkzeug einmal ganz, mit dem Datenpfad gestubbt -- es laeuft
+    sonst nur auf der Maschine mit data_cache/, und dort soll es nicht an
+    etwas Banalem scheitern."""
+    import importlib.util
+    import json
+    from pathlib import Path
+    from types import SimpleNamespace
+
+    pfad = Path(T.__file__).resolve().parent / "tools" / "nachmessen.py"
+    spec = importlib.util.spec_from_file_location("nachmessen", pfad)
+    nm = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(nm)
+
+    args = T.build_argparser().parse_args(["--no-physics"])
+    torch.manual_seed(1)
+    net = M.GridCNN(layout, **T.modell_kwargs(args)["net"])
+    lat = {"OP99": {"mittelwert": 9.0, "persistenz": 12.0}}
+    laeufe = tmp_path / "A"
+    for n, mae in enumerate((5.0, 6.0, 7.0)):
+        d = laeufe / f"seed{n}"
+        d.mkdir(parents=True)
+        torch.save(net.state_dict(), d / "model.pt")
+        (d / "metrics.json").write_text(json.dumps(
+            {"konfiguration": "A", "protokoll": "k=20->80",
+             "val_mae_C_berichtet": {"OP99": mae},
+             "triviale_latten_C": lat}))
+        (d / "history.json").write_text(json.dumps(
+            [{"epoch": 1, "saturated": 50, "saturated_max": 100},
+             {"epoch": 2, "saturated": 0, "saturated_max": 100}]))
+
+    bundle = SimpleNamespace(T_sigma=9.602)
+    monkeypatch.setattr(T, "lade_datensatz",
+                        lambda a, dev: (bundle, [op], [op], layout, statics))
+    monkeypatch.setattr(T, "_pinn_module", lambda name: SimpleNamespace(
+        DEFAULT_TRAIN_OPS=["OP99"], DEFAULT_VAL_OPS=["OP99"]))
+    monkeypatch.setattr(T, "resolve_device", lambda spec: torch.device("cpu"))
+
+    rc = nm.main(["--no-physics", "--subsample", "2", "--device", "cpu",
+                  "--cache", str(tmp_path), "--laeufe", str(laeufe)])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert out.count("FRUEHPHASE: 1 Epoche(n)") == 3
+    assert "3/3 Seed(s) unterbieten sie" in out
+    assert "Median ueber 3 Seed(s)" in out
+    erg = json.loads((laeufe / "nachgemessen.json").read_text())
+    assert set(erg["je_checkpoint"]) == {f"seed{n}/model.pt" for n in range(3)}
+    erwartet = T.val_auswertung(net, [op], statics, lag1=5, lag2=20,
+                                clamp=erg["clamp"], T_sigma=9.602)
+    assert erg["median_model_pt"]["OP99"]["mae"] == pytest.approx(
+        erwartet["OP99"]["mae"], rel=1e-6)
+
+
+def test_die_cfl_zeile_empfiehlt_kein_kleineres_subsample_mehr():
+    """Lauf 16/17: 110x ueber der Schranke bei subsample 2 -- und selbst die
+    Rohabtastung (subsample 1) laege 55x darueber. Die Materialdaten sind
+    echt. Ein kleineres --subsample ist also kein Weg, und die Zeile darf ihn
+    nicht mehr empfehlen."""
+    text = T.cfl_text(0.000124595, 1.12998e-06, 1605.2, 2)
+    assert "110.3x" in text and "55.1x" in text
+    assert "loest das NICHT" in text and "Integrator" in text
+    unter = T.cfl_text(1e-7, 1e-6, 1605.2, 2)
+    assert unter.startswith("[CFL]") and "!!" not in unter

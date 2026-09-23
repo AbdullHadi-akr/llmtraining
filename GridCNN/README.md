@@ -470,6 +470,17 @@ sie ist billig zu widerlegen: läuft der Rollout weg, war sie falsch. Der
 `[SATURATED]`-Zähler aus `train.py` wird mitgenommen, damit man es sieht statt
 es zu erraten.
 
+> **23.09. — eingeschränkt.** Der Kern ist dissipativ für **räumliche**
+> Abweichungen, nicht für den Pegel: `L(T + c) = L(T)`, auch mit wechselndem
+> Fo, Kreuzterm und adiabatem Rand
+> (`test_ein_gleichmaessiger_versatz_ist_fuer_den_laplace_unsichtbar`). Die
+> Läufe 16 und 17 zeigen den Spätfehler aber als **Pegelfehler**: am Ende ist
+> das ganze Feld zu kalt. Den sieht der Kern nicht. Auf den Pegel wirken im
+> Physikteil nur `Qsrc` und der Wandterm, und nur der Wandterm reagiert auf
+> ihn. Siehe
+> [`TRAININGS_BERICHT_2026-09-23_KonfigA_k_sekunden.md`](../TRAININGS_BERICHT_2026-09-23_KonfigA_k_sekunden.md),
+> Abschnitt 4.
+
 ### CFL
 
 Die Δ-Form mit explizitem Stencil ist explizites Euler, also CFL-gebunden.

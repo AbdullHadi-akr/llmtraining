@@ -33,7 +33,65 @@ Der Plan ist eine **Leiter mit Toren**, keine gerade Linie. **Ein rotes Tor
 
 ---
 
-## ▶ Das Nächste: **A auf voller Auflösung, mit dem Fenster in Sekunden**
+## ▶ Das Nächste: **Schritt 2 als Code — ein Integrator für den Physikterm**
+
+> ## 🟡 23.09., Lauf 17 — das Fenster in Sekunden holt OP09 zurück, die Streuung bleibt
+>
+> | | Lauf 16 (k 0.8→3.2 s) | **Lauf 17 (k 4→16 s)** | Latte |
+> |---|---|---|---|
+> | **OP06** | 6.64 ± 1.52 · 0.62x · 3/3 | **6.64 ± 1.76 · 0.62x · 3/3** | 10.8009 |
+> | **OP09** | 8.60 ± 1.76 · 1.11x · 1/3 | **6.16 ± 1.97 · 0.79x · 2/3** | 7.7625 |
+>
+> **Kein Ergebnis** (Streuung > ~1 °C), aber drei Befunde:
+>
+> 1. **Die Fensterhypothese trägt.** OP09 fällt von 1.11x auf 0.79x, die
+>    Frühphase halbiert sich (34 → 18 Epochen am Clamp). Seed 0 ist der beste
+>    Einzellauf bisher (0.47x / 0.58x).
+> 2. **Die Streuung hat zwei Namen.** Bei Seed 2 **explodieren die Gradienten**
+>    ab k ≈ 57 (`|g|` bis 1e14, `data` bleibt bei 0.27 stehen): 80
+>    Schritt-Jacobis statt 16. Bei Seed 1 **läuft OP09 in der zweiten Hälfte
+>    weg** (0.75x → 1.11x), während der Trainingsverlust fällt. Das ist die
+>    T0/T_fluid-Lücke.
+> 3. **O13 hat ein Vorzeichen:** in 12 von 12 Fällen am Anfang zu warm, in
+>    11 von 12 am Ende zu kalt. Der zwölfte Fall liegt bei −0.1 °C. Das ist ein
+>    **Pegelfehler**, und den **sieht der Diffusionskern nicht**,
+>    `L(T + c) = L(T)` (neuer Test). Arm B ist also nicht über den Kern „die
+>    Behandlung". Auf den Pegel wirken nur `Qsrc` (Quelle) und der **Wandterm**,
+>    und nur der Wandterm reagiert auf ihn.
+>
+> **CFL ist entschieden:** Die Materialdaten sind echt (PDF Schaefer,
+> 18.06.2026). Selbst `--subsample 1` läge 55x über der Schranke. Ein
+> kleineres `--subsample` ist kein Weg, und die `[CFL]`-Zeile sagt das jetzt
+> selbst.
+>
+> Bericht: **[`TRAININGS_BERICHT_2026-09-23_KonfigA_k_sekunden.md`](../TRAININGS_BERICHT_2026-09-23_KonfigA_k_sekunden.md)** ·
+> Lauf: [`laeufe/17_konfigA_voll_k_sekunden.txt`](laeufe/17_konfigA_voll_k_sekunden.txt) ·
+> Lauf 16 nachgemessen: [`laeufe/16_konfigA_nachgemessen.txt`](laeufe/16_konfigA_nachgemessen.txt)
+
+### Schritt 2 — der Integrator (Code, keine Maschine)
+
+Arm B/C/D kann bei keinem verfügbaren dt explizit laufen. Der Physikterm
+`L(T) + Qsrc` braucht einen eigenen Integrator, `g_θ` bleibt ein Euler-Schritt
+je Datenschritt (Operator-Splitting). Vorschlag, in dieser Reihenfolge:
+
+1. **Exponentieller Integrator, adiabat.** `L` ist linear in T: einmal als
+   363×363-Matrix bauen, `exp(dt·L)` vorab rechnen, dann ein
+   Matrix-Vektor-Produkt je Schritt. Das ist billig und unbedingt stabil.
+   **Test:** gegen `solve.rollout` mit dt unter der Schranke.
+2. Erst dann der **Wandterm** darin (Robin-Rand, linear in T; mit V̇-Profil
+   zeitabhängig). Er ist jetzt **vorrangig**, weil er der einzige
+   physikalische Term ist, der auf einen Pegelfehler antwortet.
+3. Dann Arm B auf der Maschine, **unter demselben Protokoll wie A**, und A
+   dafür neu.
+
+**Was bewusst wartet:** Protokollhebel gegen die zwei Fehlerbilder der
+Streuung (`k` kürzer, eine Schranke je Fenster, EMA). Eine Protokolländerung
+gilt für alle Arme, und A muss mit B ohnehin unter demselben Protokoll neu
+laufen. Sie jetzt nur an A zu tunen, hieße es zweimal zu tunen.
+
+---
+
+### Was vorher galt: **A auf voller Auflösung, mit dem Fenster in Sekunden** (→ Lauf 17, oben)
 
 > ## 🟡 23.09. — volle Auflösung: **OP06 hält, OP09 fällt, und der Lauf war nicht der POC**
 >
@@ -61,7 +119,7 @@ Der Plan ist eine **Leiter mit Toren**, keine gerade Linie. **Ein rotes Tor
 > Lauf: [`laeufe/16_konfigA_voll.txt`](laeufe/16_konfigA_voll.txt) ·
 > Übergabe: **[`UEBERGABE_2026-09-23.md`](../UEBERGABE_2026-09-23.md)**
 
-### Schritt 1a — Lauf 16 nachmessen (Minuten, kein Training)
+### Schritt 1a — Lauf 16 nachmessen (Minuten, kein Training) — erledigt 23.09.
 
 ```bash
 cp -r GridCNN/artifacts/A GridCNN/artifacts/A_16_voll
@@ -73,7 +131,7 @@ python3 GridCNN/tools/nachmessen.py --no-physics --subsample 2 \
 Probe: die MAE je `model.pt` muss `letztes ep 60` im Log treffen. Die Frage:
 ist OP09 ein Spätfehler (`drift > 1.5`), und zu warm oder zu kalt?
 
-### Schritt 1b — Lauf 17: dasselbe Fenster in Sekunden wie der POC, ~1.5–2 h
+### Schritt 1b — Lauf 17: dasselbe Fenster in Sekunden wie der POC, ~1.5–2 h — gelaufen 23.09.
 
 **Eine Änderung gegen Lauf 16:** `--tbptt-start 20 --tbptt 80` (= 4→16 s).
 
@@ -155,7 +213,7 @@ ansetzt.
 Geht es schief: Frühphase instabil → `--tbptt-start 8`; val-Kurve schwankt →
 EMA. Beides begründet, aber **eins nach dem anderen**.
 
-### Schritt 2 — CFL entscheiden (eine Rechnung, kein Lauf)
+### Schritt 2 — CFL entscheiden (eine Rechnung, kein Lauf) — entschieden 23.09.: Integrator, nicht subsample (oben)
 
 110× über der Schranke bei `--subsample 2`, 551× bei 10. Für A egal, für
 B/C/D ein Blocker. Zuerst zu prüfen: sind die Materialdaten echt? Ein

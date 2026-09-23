@@ -18,7 +18,7 @@
 | **Ist das Modell jetzt besser?** | **Das eingesetzte nicht** — mit den Defaults rechnet der Code bitgleich wie vorher (P2.1 = P2, per Test). **P3** war auf dem synthetischen Cache besser, zuletzt mit genau dem POC-Kommando: val OP06 **3.330 ± 0.264** gegen **6.585 ± 0.179 °C**, 2 Seeds. Das belegt den Mechanismus, **nicht** das Modell. Auf echten Daten entscheidet es der **POC** |
 | **Fahren wir mit diesem Modell fort?** | **Ja.** Das MLP bleibt (4 × 128, lernbares Swish, hybride Historie). Geändert wird nur, **wo der Physik-Term das MLP auswertet**: P3 (live-Stencil) jetzt im POC, P4 (Ortsableitungen per Differenzenstern) erst, wenn die Zerlegung `[BLIND]` auf echten Daten zeigt |
 | **Wurde die Physik angepasst?** | **Ja, als Schalter — eingeschaltet wird sie im POC.** Der Default bleibt `buffer`, damit jede alte Zahl gültig bleibt und der POC einen sauberen Vergleichsarm hat. P3 wird erst Default, wenn POC **und** Achse 5 es tragen |
-| **Was ist mit GridCNN?** | **Nicht angefasst.** Andere Sitzungen haben es am 22./23.09. weit gebracht (§2). Sein Lauf 17 läuft **parallel** zum PINN-POC (§4) |
+| **Was ist mit GridCNN?** | In dieser Sitzung nicht angefasst, aber in einer anderen weitergekommen (§2). **Lauf 17 ist gelaufen:** 0.62× / 0.79×, kein Ergebnis wegen der Streuung. Als Nächstes kommt Code, keine Maschine: der Integrator für den Physikterm (`GridCNN/FAHRPLAN.md`, Kopf) |
 | **Wo stand ich in den Benchmarks?** | §2 |
 | **Wie läuft es, 1–10?** | **6/10** — §3 |
 
@@ -65,6 +65,7 @@ pgrep -af "sweep.py|train.py|residual_decomposition" || echo "Karte frei"
 | PINN | 🆕 **P3** | **23.09.** | P2.1 + `--phys-stencil live` — **wartet auf seinen POC** |
 | PINN | *P4* | — | Ortsableitungen per Differenzenstern — nur falls `[BLIND]` |
 | GridCNN | **G4.1** | 22./23.09. | Ladepfad angeschlossen, Stufe 5 (TBPTT) gebaut, Fehlerprofil + `nachmessen.py` |
+| GridCNN | G4.2 | 23.09. | Schlusstafel über alle Seeds, Frühphase als Zahl, `[CFL]`-Zeile korrigiert — Verhalten unverändert |
 | Cache | **Schema v3** | 22.09. | Wandpfad dazu; `T` und `q_source` gleich gebaut |
 
 ### PINN-Achsen
@@ -88,7 +89,7 @@ pgrep -af "sweep.py|train.py|residual_decomposition" || echo "Karte frei"
 | 2 Cache | ✅ **22.09.** — Schema v3 (`8d76084`) |
 | 3 Löser | gebaut, adiabat, nicht als Latte gemessen |
 | 4 CNN | **trainiert**: Lauf 14 (kein Ergebnis) → **Lauf 15 POC**, dt 1 s: **OP06 6.571 ± 0.383 (0.61×), OP09 5.813 ± 0.867 (0.75×)** — erstmals lesbar |
-| 5 TBPTT | ✅ gebaut 22.09.; Lauf 16 (volle Auflösung): 0.62× / 1.11×, Streuung 1.5–1.8 °C → **kein Ergebnis**, `k` stand in Schritten und erreichte `lag2` nie |
+| 5 TBPTT | ✅ gebaut 22.09.; Lauf 16 (volle Auflösung): 0.62× / 1.11×, Streuung 1.5–1.8 °C → **kein Ergebnis**, `k` stand in Schritten und erreichte `lag2` nie. **Lauf 17** (k in Sekunden): **0.62× / 0.79×**, Streuung 1.8–2.0 °C → kein Ergebnis; O13 ist ein Pegelfehler (am Ende zu kalt), den der Diffusionskern nicht sieht |
 | 6 Vergleich mit dem PINN | offen |
 
 > Die Leitertabelle *in* `GridCNN/FAHRPLAN.md` ist an Stufe 2, 4, 5 nicht
@@ -173,7 +174,7 @@ nohup python PINNmodulusTwo/sweep.py --seeds 0 1 2 \
   zwei Arme, nur der Schalter verschieden.
 * Jedes `train.log` des `live`-Arms muss `physics stencil: LIVE -- ... lag = 1
   rows (O21)` zeigen, sonst ist der Code nicht gepullt.
-* **Gleichzeitig** auf dem vierten Kern: GridCNN-Lauf 17 (unten).
+* ~~**Gleichzeitig** auf dem vierten Kern: GridCNN-Lauf 17 (unten).~~ Lauf 17 ist am 23.09. schon gelaufen, der vierte Kern ist frei.
 
 **Urteil** (Einzelheiten `README_MODELL_P3_POC.md` §3):
 
@@ -249,6 +250,14 @@ GridCNN-Route R4) Terme dieses Operators statt autograd-Fragen.
 Rollout auf OP06**, auf den vorhandenen Checkpoints.
 
 ### GridCNN — sein nächster Schritt (aus `UEBERGABE_2026-09-23.md`, hier nicht geändert)
+
+> ✅ **23.09.: erledigt.** `nachmessen.py` und Lauf 17 sind gelaufen. Die beiden
+> offenen Fragen sind beantwortet: Der Prozess wurde bei Seed 2, ep 35 von
+> außen abgebrochen, und die Materialdaten sind echt. Ergebnis und nächster
+> Schritt stehen in
+> [`TRAININGS_BERICHT_2026-09-23_KonfigA_k_sekunden.md`](TRAININGS_BERICHT_2026-09-23_KonfigA_k_sekunden.md).
+> Die Karte braucht GridCNN vorerst **nicht**: Der nächste Schritt ist Code.
+> Die Kommandos unten sind nur noch Geschichte.
 
 ```bash
 cp -r GridCNN/artifacts/A GridCNN/artifacts/A_16_voll        # Gewichte von Lauf 16 sichern

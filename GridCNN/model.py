@@ -413,6 +413,11 @@ class GridCNN(nn.Module):
         dissipative Diffusionskern dieses Leck liefern. Laeuft der Rollout
         trotzdem weg, war die Hypothese falsch -- und das ist billig zu sehen,
         nicht teuer zu uebertuenchen.
+
+        23.09.: Fuer einen PEGELfehler liefert der Kern kein Leck --
+        ``L(T + c) = L(T)``, er daempft nur raeumliche Abweichungen. Was im
+        Physikteil auf den Pegel antwortet, ist allein der Wandterm
+        (``test_ein_gleichmaessiger_versatz_ist_fuer_den_laplace_unsichtbar``).
         """
         return tn_field + dt_n * self.rate(tn_field, x_channels, **kw)
 

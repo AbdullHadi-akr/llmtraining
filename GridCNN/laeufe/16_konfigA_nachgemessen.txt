@@ -1,0 +1,68 @@
+[device] cuda:0 Tesla T4  14.6 GiB  sm_75  torch=2.6.0+cu124 cuda=12.4
+!! [CFL] dt_n=0.000124595 (0.2 s) liegt 110.3x UEBER der expliziten Schranke dt_max_n=1.12998e-06 (0.001814 s).
+   Laeuft der Rollout weg, ist DAS die erste Erklaerung -- nicht das Netz. Kleineres --subsample, oder pruefen, ob die Materialdaten echt sind: ein synthetisches material_properties/ macht das Problem viel steifer, als es ist. Arm A (--no-physics) ist davon nicht betroffen.
+[konfiguration] A (Blackbox, ohne Physik in der Architektur)
+[lags] lag1=5 (1 s), lag2=20 (4 s) bei dt=0.2 s [aus der Zeit]
+[daten] 11 Trainings-OPs, 2 Halte-OPs, subsample=2 -> dt_n=0.000124595, 3.7s
+[gitter] 3 x 11 x 11 = 363 Punkte
+[normierung] T_mu=33 T_sigma=9.602 C L_ref=0.0768039 m T_span_ref=1605.2 s
+[clamp] auto = ceil(3 x max|tn|=3.437) = 11  (±106 C um T_mu; die Labels reichen bis ±33.0 C)
+
+[seed0/model.pt] MAE OP06 5.5153  OP09 6.9282
+[seed0]   OP06  MAE je Abschnitt: 15.09   3.58   1.86   2.71   2.41   7.44
+[seed0]         Bias je Abschnitt: +15.0   -1.5   +0.7   -1.6   -2.0   -7.4   (gesamt +0.53 C)
+[seed0]         Drift 1.35x   Mittel 5.52 C
+[seed0]   OP09  MAE je Abschnitt:  8.02   3.55   3.57   5.15   9.05  12.22
+[seed0]         Bias je Abschnitt:  +7.7   -0.8   -3.6   -4.3   -9.0  -12.2   (gesamt -3.70 C)
+[seed0]         Drift 1.76x   Mittel 6.93 C  <- O13, der Fehler waechst zum Ende
+
+[seed0/model_best.pt] MAE OP06 6.5277  OP09 8.6519
+[seed0]   OP06  MAE je Abschnitt:  1.85   4.22   5.38   7.70   8.70  11.31
+[seed0]         Bias je Abschnitt:  +0.8   -1.7   -4.8   -7.7   -8.7  -11.3   (gesamt -5.55 C)
+[seed0]         Drift 1.73x   Mittel 6.53 C  <- O13, der Fehler waechst zum Ende
+[seed0]   OP09  MAE je Abschnitt:  2.09   5.94   9.23  11.26  12.15  11.26
+[seed0]         Bias je Abschnitt:  -1.4   -4.9   -7.8  -10.2  -12.0  -10.7   (gesamt -7.83 C)
+[seed0]         Drift 1.30x   Mittel 8.65 C
+
+[seed1/model.pt] MAE OP06 7.4229  OP09 10.0384
+[seed1]   OP06  MAE je Abschnitt:  9.60   1.44   6.22   7.77   6.78  12.73
+[seed1]         Bias je Abschnitt:  +9.5   -0.8   -6.2   -7.8   -6.8  -12.7   (gesamt -4.14 C)
+[seed1]         Drift 1.71x   Mittel 7.42 C  <- O13, der Fehler waechst zum Ende
+[seed1]   OP09  MAE je Abschnitt:  6.89   2.38   7.43  11.36  15.11  17.06
+[seed1]         Bias je Abschnitt:  +6.2   -0.9   -7.4  -11.4  -15.1  -17.1   (gesamt -7.61 C)
+[seed1]         Drift 1.70x   Mittel 10.04 C  <- O13, der Fehler waechst zum Ende
+
+[seed1/model_best.pt] MAE OP06 8.9217  OP09 7.5522
+[seed1]   OP06  MAE je Abschnitt:  7.90   2.22   6.12   9.46  11.22  16.61
+[seed1]         Bias je Abschnitt:  +7.9   -1.0   -6.0   -9.4  -11.2  -16.6   (gesamt -6.06 C)
+[seed1]         Drift 1.86x   Mittel 8.92 C  <- O13, der Fehler waechst zum Ende
+[seed1]   OP09  MAE je Abschnitt: 10.65   3.11   5.48   8.20   7.94   9.93
+[seed1]         Bias je Abschnitt: +10.5   -0.2   -5.4   -8.2   -7.7   -9.7   (gesamt -3.44 C)
+[seed1]         Drift 1.31x   Mittel 7.55 C
+
+[seed2/model.pt] MAE OP06 5.7848  OP09 7.8347
+[seed2]   OP06  MAE je Abschnitt: 12.55   1.39   3.32   4.73   3.42   9.30
+[seed2]         Bias je Abschnitt: +12.5   +1.1   -3.3   -4.4   -3.4   -9.3   (gesamt -1.12 C)
+[seed2]         Drift 1.61x   Mittel 5.78 C  <- O13, der Fehler waechst zum Ende
+[seed2]   OP09  MAE je Abschnitt:  3.59   1.82   5.72   8.52  12.18  15.18
+[seed2]         Bias je Abschnitt:  +2.9   -1.5   -5.7   -8.5  -12.2  -15.2   (gesamt -6.70 C)
+[seed2]         Drift 1.94x   Mittel 7.83 C  <- O13, der Fehler waechst zum Ende
+
+[seed2/model_best.pt] MAE OP06 5.6937  OP09 6.8704
+[seed2]   OP06  MAE je Abschnitt: 12.96   2.63   2.84   4.43   2.74   8.56
+[seed2]         Bias je Abschnitt: +13.0   +2.5   -2.5   -3.8   -2.6   -8.6   (gesamt -0.33 C)
+[seed2]         Drift 1.50x   Mittel 5.69 C  <- O13, der Fehler waechst zum Ende
+[seed2]   OP09  MAE je Abschnitt:  3.39   2.08   4.66   7.77  10.10  13.24
+[seed2]         Bias je Abschnitt:  +2.3   -1.4   -4.6   -7.8  -10.1  -13.2   (gesamt -5.80 C)
+[seed2]         Drift 1.93x   Mittel 6.87 C  <- O13, der Fehler waechst zum Ende
+
+[profil] model.pt, Median ueber 3 Seed(s):
+          OP06  MAE je Abschnitt: 12.55   1.44   3.32   4.73   3.42   9.30
+                Bias je Abschnitt: +12.5   -0.8   -3.3   -4.4   -3.4   -9.3   (gesamt -1.12 C)
+                Drift 1.61x   Mittel 5.78 C  <- O13, der Fehler waechst zum Ende
+          OP09  MAE je Abschnitt:  6.89   2.38   5.72   8.52  12.18  15.18
+                Bias je Abschnitt:  +6.2   -0.9   -5.7   -8.5  -12.2  -15.2   (gesamt -6.70 C)
+                Drift 1.76x   Mittel 7.83 C  <- O13, der Fehler waechst zum Ende
+
+Probe: die MAE je model.pt muss die Zeile 'letztes ep ...' im Log treffen.
+  -> GridCNN/artifacts/A_16_voll/nachgemessen.json
