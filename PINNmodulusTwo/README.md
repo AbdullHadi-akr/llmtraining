@@ -131,10 +131,20 @@ feeds the network a more compact feature block:
 Set `history_mode: raw` if you want the original lag stack, or `history_mode:
 hybrid` (the default) for the anchor + rates layout.
 
-The physics term supports `time_deriv: bdf1`, `bdf2`, or `autograd`. `bdf2` is
-the default and remains the recommended choice when the history buffer is long
-enough; `history_at()` always uses raw interpolation so the derivative is not
-coupled to the hybrid feature layout.
+The physics term supports `time_deriv: bdf1` and `bdf2` (the default).
+`history_at()` always uses raw interpolation so the derivative is not coupled to
+the hybrid feature layout. `autograd` is still accepted by the parser but
+`train.py` refuses it: it builds a second MLP that only the physics residual
+evaluates, so the physics term would train a network the rollout never uses
+(FAHRPLAN, O20).
+
+`phys_stencil: buffer` (the default, every run up to 23.09.2026) reads the BDF
+lags `T(t-δ)`, `T(t-2δ)` from the rollout frozen at the start of the epoch,
+while `T(t)` is the live network; `live` evaluates the lags with the live
+network too, so the drift of the weights within an epoch cancels instead of
+being divided by δ (FAHRPLAN §11.10, O21). `live` needs `delta_phys` to be a
+whole number of data steps. `tools/residual_decomposition.py` measures which of
+the two effects a checkpoint shows before anything is switched.
 
 ## Training budget (`--inner-steps`)
 

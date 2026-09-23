@@ -109,8 +109,32 @@ def heat_residual(
     phys_scale: float,
     time_deriv: TimeDerivMethod = "bdf2",
     residual_norm: ResidualNorm = "rms",
-) -> torch.Tensor:
+    return_parts: bool = False,
+    live_lags: dict | None = None,
+):
     """Return the scaled heat-equation residual at the sampled points.
+
+    ``live_lags`` switches the BDF stencil to ``--phys-stencil live`` (O21,
+    FAHRPLAN 11.10). By default ``T_1``/``T_2`` are READ from ``Tn_seq`` -- the
+    rollout frozen at the start of the epoch -- while ``T`` is the LIVE network.
+    Every inner step moves the live network towards the labels and leaves the
+    buffer where it was, and that delta-independent jump sits in the numerator
+    and is divided by delta: ``L_phys ~ 1/delta^2``. With ``live_lags`` the two
+    lags are evaluated by the SAME live network instead, each with its own
+    history from the buffer, so a common offset cancels (3 - 4 + 1 = 0). The
+    dict holds, for n = 1 and 2: ``tq_n`` (normalised time t - n*delta),
+    ``cfg_n``, ``forcing_n`` (the inputs at that row) and ``valid_n`` (bool:
+    the row is a prediction -- row 0 is the imposed initial condition, and
+    before it the buffer is padded; there the buffer value is kept). ``None``
+    is the old stencil, unchanged.
+
+    With ``return_parts=True`` the call returns ``(residual, parts)`` instead,
+    where ``parts`` holds every UNSCALED term the residual was assembled from
+    (``T``, the BDF lags ``T_1``/``T_2``, ``dTdt``, the four pieces of ``aniso``,
+    ``Qsrc``) plus the divisor that was applied. It exists for
+    ``tools/residual_decomposition.py``, which has to split ``L_phys`` into its
+    terms WITHOUT a second copy of this assembly that could drift from it. The
+    residual itself is computed by the same lines either way.
 
     All three terms -- ``dT/dt``, the anisotropic Laplacian ``Fo : grad^2 T`` and
     the source ``Qsrc`` -- are already expressed in the SAME nondimensional units
@@ -135,7 +159,8 @@ def heat_residual(
     xb = xn[p_idx].requires_grad_(True)   # (B, 3); indexing already copies
     hist = model._history(Tn_seq, dtn, tn_q, p_idx)
     level = model.level(Tn_seq, dtn, tn_q)
-    
+    T_1 = T_2 = None
+
     if time_deriv == "autograd":
         # Continuous time derivative via autograd
         # Time as additional input, requires_grad=True for dT/dt
@@ -158,16 +183,30 @@ def heat_residual(
                 return hist[:, n - 1]
             return model.history_at(Tn_seq, dtn, tn_q, p_idx, lag=n)
 
+        def _stencil_lag(n: int) -> torch.Tensor:
+            buffered = _lag(n)
+            if live_lags is None:
+                return buffered
+            # xn WITHOUT grad: only T's own spatial derivatives enter the
+            # conduction term; the lags only enter dT/dt.
+            tq_n = live_lags[f"tq_{n}"]
+            live = model.field(
+                xn[p_idx], static[p_idx], live_lags[f"cfg_{n}"],
+                live_lags[f"forcing_{n}"], model._history(Tn_seq, dtn, tq_n, p_idx),
+                model.level(Tn_seq, dtn, tq_n),
+            )
+            return torch.where(live_lags[f"valid_{n}"], live, buffered)
+
         if time_deriv == "bdf2":
             # BDF2: 2nd-order backward difference, O(Δt²) error
             # dT/dt ≈ (3*T - 4*T_{-1} + T_{-2}) / (2*Δt)
-            T_1 = _lag(1)
-            T_2 = _lag(2)
+            T_1 = _stencil_lag(1)
+            T_2 = _stencil_lag(2)
             dTdt = (3.0 * T - 4.0 * T_1 + T_2) / (2.0 * model.delta + 1e-8)
         else:
             # BDF1: 1st-order backward difference, O(Δt) error
-            T_prev = _lag(1)
-            dTdt = (T - T_prev) / (model.delta + 1e-8)
+            T_1 = _stencil_lag(1)
+            dTdt = (T - T_1) / (model.delta + 1e-8)
 
     # Spatial derivatives via autograd (always continuous)
     grad1 = _grad(T, xb)                           # (B, 3) -> [Tx, Ty, Tz]
@@ -180,10 +219,11 @@ def heat_residual(
     Tzz = Tzz_row[:, 2]
 
     fo = Fo[p_idx]                                 # (B, 3, 3)
-    aniso = (
-        fo[:, 0, 0] * Txx + fo[:, 1, 1] * Tyy + fo[:, 2, 2] * Tzz
-        + 2.0 * (fo[:, 0, 1] * Txy + fo[:, 0, 2] * Txz + fo[:, 1, 2] * Tyz)
-    )
+    aniso_xx = fo[:, 0, 0] * Txx
+    aniso_yy = fo[:, 1, 1] * Tyy
+    aniso_zz = fo[:, 2, 2] * Tzz
+    aniso_cross = 2.0 * (fo[:, 0, 1] * Txy + fo[:, 0, 2] * Txz + fo[:, 1, 2] * Tyz)
+    aniso = aniso_xx + aniso_yy + aniso_zz + aniso_cross
 
     # The nondimensional heat equation, assembled in its own units. The gains are
     # 1.0 unless --learn-gains restores the old free-gain behaviour.
@@ -199,6 +239,16 @@ def heat_residual(
     # restores the old size gap between dTdt / aniso / Qsrc -- it restores only
     # the old OVERALL divisor, ``sqrt(phys_scale)``, which leaves
     # ``mean(res**2) == phys_scale`` instead of 1.
-    if residual_norm == "legacy":
-        return residual / (phys_scale ** 0.5 + 1e-30)
-    return residual / (phys_scale + 1e-30)
+    divisor = (phys_scale ** 0.5 if residual_norm == "legacy" else phys_scale) + 1e-30
+    scaled = residual / divisor
+    if not return_parts:
+        return scaled
+    parts = {
+        "T": T, "T_1": T_1, "T_2": T_2, "dTdt": dTdt,
+        "Txx": Txx, "Tyy": Tyy, "Tzz": Tzz,
+        "aniso_xx": aniso_xx, "aniso_yy": aniso_yy, "aniso_zz": aniso_zz,
+        "aniso_cross": aniso_cross,
+        "diff_gain": model.diff_gain, "src_gain": model.src_gain,
+        "Qsrc": Qsrc, "divisor": divisor,
+    }
+    return scaled, parts

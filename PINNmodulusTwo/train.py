@@ -383,6 +383,14 @@ def parse_args() -> argparse.Namespace:
                         "history uses --delta-grid and --rate-lags), so it is an "
                         "isolated knob there; in raw mode it also spaces the "
                         "history channels and changes the model")
+    p.add_argument("--phys-stencil", choices=["buffer", "live"],
+                   default=d.get("phys_stencil", "buffer"),
+                   help="where the BDF lags T(t-delta), T(t-2*delta) of L_phys "
+                        "come from: 'buffer' reads them from the rollout frozen "
+                        "at the start of the epoch (the behaviour of every run "
+                        "so far), 'live' evaluates them with the current network "
+                        "(O21, FAHRPLAN 11.10). live needs --delta-phys to be a "
+                        "whole number of data steps")
     p.add_argument("--checkpoint-every", type=int,
                    default=d.get("checkpoint_every", 10),
                    help="write the checkpoint every N epochs DURING training, "
@@ -429,6 +437,37 @@ def _to_tensor_ops(bundle, device):
             )
         )
     return packed
+
+
+def phys_lag_rows_for(delta_phys_s: float, dt_s: float) -> int:
+    """``--delta-phys`` in data rows, for ``--phys-stencil live``; refuses a lag
+    that is not a whole number of rows (the live lags are evaluated AT rows)."""
+    ratio = float(delta_phys_s) / float(dt_s)
+    rows = int(round(ratio))
+    if rows < 1 or abs(ratio - rows) > 1e-6:
+        raise SystemExit(
+            f"--phys-stencil live needs --delta-phys to be a whole number of data "
+            f"steps (dt = {dt_s:g} s); got {delta_phys_s:g} s = {ratio:g} steps.")
+    return rows
+
+
+def _live_lag_inputs(op: dict, pt: torch.Tensor, lag_rows: int) -> dict:
+    """Inputs of the live BDF lags for ``--phys-stencil live``.
+
+    Rows ``pt - lag_rows`` and ``pt - 2 * lag_rows``. A lag that lands on row 0
+    (the imposed initial condition) or before it is marked invalid, and
+    ``heat_residual`` keeps the buffer value there -- exactly what the buffer
+    stencil reads at those rows.
+    """
+    out = {}
+    for n in (1, 2):
+        rows = pt - n * lag_rows
+        safe = rows.clamp(min=0)
+        out[f"tq_{n}"] = op["tn"][safe]
+        out[f"cfg_{n}"] = op["cfg"][safe]
+        out[f"forcing_{n}"] = op["forcing"][safe]
+        out[f"valid_{n}"] = rows >= 1
+    return out
 
 
 def _check_finite_inputs(ops) -> None:
@@ -611,6 +650,19 @@ class _LossBalancer:
 
 def fit(args):
     """Train on ``args.ops`` and return ``(model, bundle, ops_packed, dtn, history)``."""
+    # --time-deriv autograd builds a SECOND MLP (``mlp_with_time``) that only the
+    # physics residual ever evaluates. The data term, the rollout and every
+    # reported number go through ``mlp``. The physics term would then train a
+    # network that never predicts anything, and ``mlp`` would get no physics
+    # gradient at all -- a run that looks like "physics on" and is "physics off"
+    # plus a side objective. Refused until the time input is part of the one
+    # network the rollout uses (FAHRPLAN, O20). First, before any data is read.
+    if str(getattr(args, "time_deriv", "bdf2")) == "autograd":
+        raise SystemExit(
+            "--time-deriv autograd is refused: it trains a separate network "
+            "(mlp_with_time) that the rollout never uses, so the physics term "
+            "would not reach the model being evaluated. Use bdf2 (default) or "
+            "bdf1. See FAHRPLAN.md, O20.")
     seed_everything(args.seed)
     device = resolve_device(args.device)
     enable_tf32(getattr(args, "tf32", False))
@@ -638,6 +690,16 @@ def fit(args):
     delta_phys_s = float(getattr(args, "delta_phys", 1.0))
     _check_cfl_stability(bundle, dt_s, device, phys_delta_s=delta_phys_s)
     phys_scale = bundle.phys_scale
+    # --phys-stencil live evaluates T(t - delta) and T(t - 2 delta) with the
+    # live network at the grid rows those times fall on, so delta has to BE a
+    # whole number of rows. Refused otherwise rather than interpolating inputs
+    # (config, forcing) that were never interpolated anywhere else.
+    phys_live = str(getattr(args, "phys_stencil", "buffer")) == "live"
+    phys_lag_rows = 0
+    if phys_live:
+        phys_lag_rows = phys_lag_rows_for(delta_phys_s, dt_s)
+        print(f"physics stencil: LIVE -- T(t-delta), T(t-2 delta) from the current "
+              f"network, lag = {phys_lag_rows} rows (O21)", flush=True)
     rate_lags_s = [float(v) for v in getattr(args, "rate_lags", [])]
     rate_lags_n = [v / bundle.T_span_ref for v in rate_lags_s]
     delta_grid_s = float(getattr(args, "delta_grid", 0.0)) or dt_s
@@ -993,11 +1055,13 @@ def fit(args):
                 if want_phys:
                     pt = torch.randint(0, t_end, (args.batch_phys,), device=device)
                     pp = torch.randint(0, n_pts, (args.batch_phys,), device=device)
+                    live_lags = (_live_lag_inputs(op, pt, phys_lag_rows)
+                                 if phys_live else None)
                     res = heat_residual(
                         model, op["xn"], op["static"], op["cfg"][pt], op["forcing"][pt],
                         op["Fo"], op["Qsrc"][pt, pp], own_hist, dtn, op["tn"][pt], pp,
                         phys_scale, time_deriv=args.time_deriv,
-                        residual_norm=residual_norm,
+                        residual_norm=residual_norm, live_lags=live_lags,
                     )
                     L_phys = torch.mean(res ** 2)
                 else:
@@ -1399,6 +1463,9 @@ def save_checkpoint(model, bundle, args, dtn, history, path: Path) -> None:
                             and not history.get("aborted", False),
                 "aborted": bool(history.get("aborted", False)),
                 "subsample": int(args.subsample),
+                # Training-only, so not in model_config -- but it decides what
+                # L_phys meant during the run (O21), so it travels with it.
+                "phys_stencil": str(getattr(args, "phys_stencil", "buffer")),
                 "seed": int(args.seed),
                 "synthetic_cache": cache_is_synthetic(),
             },

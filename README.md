@@ -1,5 +1,10 @@
 # Battery temperature surrogate
 
+> **Nach einer Pause hier anfangen:** [`README_NAECHSTE_SITZUNG.md`](README_NAECHSTE_SITZUNG.md)
+> (wo du stehst, was als Nächstes kommt). **Welches Modell welche Zahl erzeugt
+> hat:** [`README_MODELLSTAND.md`](README_MODELLSTAND.md) (Modellversionen und
+> Experimente, chronologisch).
+
 ## TODO — the data is missing from a fresh clone
 
 Nothing in `data_cache/`, `data_raw/` or `material_properties/` is tracked in git
