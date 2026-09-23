@@ -1016,6 +1016,43 @@ def lags_aufloesen(subsample: int, lag1: int | None, lag2: int | None
                     f"({l2 * dt_s:.3g} s) bei dt={dt_s:.3g} s [{wie}]")
 
 
+# Das Fenster des POC vom 22.09. (subsample 10, dt = 1 s), in Sekunden. Es ist
+# die einzige Fensterlaenge, fuer die bisher ein Ergebnis vorliegt.
+TBPTT_POC_S = (4.0, 16.0)
+
+
+def fensterwarnung(tbptt_start: int, tbptt: int, lag1: int, lag2: int,
+                   subsample: int) -> str | None:
+    """Erreicht das TBPTT-Fenster die Lags? Wenn nicht, sagen, was fehlt.
+
+    In :func:`rollout_loss` kommt ``t2`` erst ab ``j >= lag2`` aus der eigenen
+    Vorhersage, davor aus dem eingefrorenen Puffer. Ist ``k <= lag2``, laeuft
+    **kein einziges Update** durch die Rueckkopplung ueber ``lag2`` -- das Netz
+    lernt nie, was seine eigenen Vorhersagen von vor 4 s mit ihm anrichten.
+
+    Genau das ist am 23.09. passiert: die Lags wurden auf Sekunden umgestellt,
+    ``k`` nicht. Bei ``--subsample 10`` lag ``lag2 = 4`` im Fenster ``4->16``,
+    bei ``--subsample 2`` liegt ``lag2 = 20`` hinter ``k = 16``. Der Befehl
+    hiess "nur subsample und epochs aendern sich" -- und das Protokoll war
+    trotzdem ein anderes.
+    """
+    dt_s = ROH_DT_S * max(1, int(subsample))
+    k_poc = tuple(max(1, int(round(s / dt_s))) for s in TBPTT_POC_S)
+    if tbptt <= lag2:
+        was = (f"das Fenster k={tbptt} ({tbptt * dt_s:.3g} s) erreicht "
+               f"lag2={lag2} ({lag2 * dt_s:.3g} s) NIE: kein Update laeuft "
+               f"durch die Rueckkopplung ueber lag2.")
+    elif tbptt_start <= lag1:
+        was = (f"das Startfenster k={tbptt_start} erreicht lag1={lag1} "
+               f"nicht: die ersten Epochen trainieren ohne die Rueckkopplung "
+               f"ueber lag1.")
+    else:
+        return None
+    return (f"!! [fenster] {was}\n   Dasselbe Fenster in Sekunden wie der "
+            f"POC vom 22.09. ({TBPTT_POC_S[0]:g}->{TBPTT_POC_S[1]:g} s) waere "
+            f"hier --tbptt-start {k_poc[0]} --tbptt {k_poc[1]}.")
+
+
 def clamp_aufloesen(spec: str, ops: list, *, faktor: float, T_sigma: float
                     ) -> tuple[float, str]:
     """``--clamp`` aufloesen -- ``auto`` heisst: aus den Daten, nicht geerbt.
@@ -1327,6 +1364,29 @@ def build_argparser() -> argparse.ArgumentParser:
     return p
 
 
+def profil_aus_checkpoint(pfad: Path, layout, net_kwargs: dict, val: list,
+                          statics: M.StaticMaps, *, lag1: int, lag2: int,
+                          clamp: float, T_sigma: float, device=None) -> dict:
+    """Ein gespeichertes ``model.pt`` nachmessen, ohne nachzutrainieren.
+
+    Am 23.09. lief der Lauf auf voller Aufloesung mit einem ``train.py`` von
+    VOR dem Fehlerprofil: drei gueltige Seeds, aber kein ``drift`` und kein
+    Bias. Die Gewichte liegen noch da -- das Profil ist eine Minute Rollout,
+    nicht drei Stunden Training.
+
+    Derselbe :func:`val_auswertung` wie im Lauf, also dieselbe Zahl: die MAE
+    hier muss die Zeile ``letztes ep ...`` aus dem Log treffen. Tut sie das
+    nicht, passen Checkpoint und Flags nicht zusammen.
+    """
+    net = M.GridCNN(layout, **net_kwargs)
+    zustand = torch.load(pfad, map_location=device or "cpu")
+    net.load_state_dict(zustand)
+    if device is not None:
+        net = net.to(device)
+    return val_auswertung(net, val, statics, lag1=lag1, lag2=lag2,
+                          clamp=clamp, T_sigma=T_sigma)
+
+
 def profil_ueber_seeds(profile: list) -> dict:
     """Die Fehlerprofile mehrerer Seeds zu einem Median zusammenziehen.
 
@@ -1466,8 +1526,14 @@ def protokollname(args) -> str:
     niemand weiss, ob sie mit k=1 oder k=16 entstanden ist. Das ist derselbe
     Fehler wie eine nackte ``[SATURATED] 88248`` ohne Bezugsgroesse.
     """
-    teile = [f"k={args.tbptt_start}->{args.tbptt}"
-             if args.tbptt_start != args.tbptt else f"k={args.tbptt}",
+    # k in SEKUNDEN daneben: am 23.09. stand in zwei Logs dasselbe "k=4->16",
+    # einmal 4->16 s (subsample 10) und einmal 0.8->3.2 s (subsample 2).
+    dt_s = ROH_DT_S * max(1, int(args.subsample))
+    k_text = (f"k={args.tbptt_start}->{args.tbptt} "
+              f"({args.tbptt_start * dt_s:.3g}->{args.tbptt * dt_s:.3g} s)"
+              if args.tbptt_start != args.tbptt
+              else f"k={args.tbptt} ({args.tbptt * dt_s:.3g} s)")
+    teile = [k_text,
              f"clip={args.clip_grad:g}" if args.clip_grad > 0 else "clip=aus",
              f"lr={args.lr:g}/{args.lr_plan}",
              f"inner={args.inner_steps}x{args.batch_t}",
@@ -1578,6 +1644,10 @@ def main(argv: list | None = None) -> int:
               "Ergebnis geliefert. Absicht? Dann gut -- sonst --tbptt 16.",
               file=sys.stderr)
     print(f"[lags] {lag_text}")
+    warnung = fensterwarnung(args.tbptt_start, args.tbptt, args.lag1,
+                             args.lag2, args.subsample)
+    if warnung and args.tbptt > 1:
+        print(warnung, file=sys.stderr)
     print(f"[modell] {kw['net']['n_static']} statische Karten -> "
           f"{M.CH_STATE + kw['net']['n_static'] + M.CH_DRIVER} Eingangskanaele, "
           f"width={kw['net']['width']} blocks={kw['net']['blocks']}")

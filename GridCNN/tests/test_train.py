@@ -1029,3 +1029,72 @@ def test_die_schlusstafel_nennt_den_spaetfehler_beim_namen():
                                    profil=flach)
     assert "gleichmaessig verteilt" in "\n".join(zeilen2)
     assert "O13" not in "\n".join(zeilen2)
+
+
+def test_das_fenster_muss_lag2_erreichen():
+    """23.09.: k=16 bei subsample 2 liegt hinter lag2=20 -- kein Update lief
+    durch die Rueckkopplung ueber lag2. Im POC (subsample 10) lag lag2=4 im
+    Fenster."""
+    w = T.fensterwarnung(4, 16, 5, 20, subsample=2)
+    assert w and "NIE" in w and "--tbptt-start 20 --tbptt 80" in w
+    assert T.fensterwarnung(4, 16, 1, 4, subsample=10) is None
+    assert T.fensterwarnung(20, 80, 5, 20, subsample=2) is None
+
+
+def test_der_protokollname_nennt_k_in_sekunden():
+    args = T.build_argparser().parse_args(["--subsample", "2"])
+    assert "(0.8->3.2 s)" in T.protokollname(args)
+
+
+def test_nachmessen_trifft_die_auswertung_im_lauf(tmp_path, layout, net, op,
+                                                  statics):
+    """Checkpoint nachgemessen == dieselbe Zahl wie im Lauf."""
+    pfad = tmp_path / "model.pt"
+    torch.save(net.state_dict(), pfad)
+    kw = dict(lag1=5, lag2=20, clamp=10.0, T_sigma=9.602)
+    nach = T.profil_aus_checkpoint(pfad, layout, {}, [op], statics, **kw)
+    vor = T.val_auswertung(net, [op], statics, **kw)
+    assert nach["OP99"]["mae"] == pytest.approx(vor["OP99"]["mae"])
+    assert nach["OP99"]["drift"] == pytest.approx(vor["OP99"]["drift"])
+
+
+# ---------------------------------------------------------------------------
+# 23.09.: das Fenster in Sekunden, und das Nachmessen aus Gewichten
+# ---------------------------------------------------------------------------
+def test_das_fenster_muss_lag2_erreichen():
+    """Lauf 16: k=16 bei subsample 2 liegt hinter lag2=20 -- kein Update lief
+    durch die Rueckkopplung ueber lag2. Im POC (subsample 10) lag lag2=4 im
+    Fenster 4->16, und dort meldet sich nichts."""
+    w = T.fensterwarnung(4, 16, 5, 20, subsample=2)
+    assert w is not None and "NIE" in w
+    assert "--tbptt-start 40 --tbptt 160" not in w       # nicht bei dt=0.1 s
+    assert "--tbptt-start 20 --tbptt 80" in w            # 4->16 s bei dt=0.2 s
+    assert T.fensterwarnung(4, 16, 1, 4, subsample=10) is None
+    assert T.fensterwarnung(20, 80, 5, 20, subsample=2) is None
+    # lag2 erreicht, aber das Startfenster nicht einmal lag1.
+    w = T.fensterwarnung(4, 80, 5, 20, subsample=2)
+    assert w is not None and "lag1" in w
+
+
+def test_der_protokollname_nennt_k_in_sekunden():
+    """Zwei Logs mit 'k=4->16' waren 4->16 s und 0.8->3.2 s -- ohne dass es
+    einer Zeile anzusehen war."""
+    zwei = T.build_argparser().parse_args(["--subsample", "2"])
+    zehn = T.build_argparser().parse_args(["--subsample", "10"])
+    assert "k=4->16 (0.8->3.2 s)" in T.protokollname(zwei)
+    assert "k=4->16 (4->16 s)" in T.protokollname(zehn)
+
+
+def test_nachmessen_trifft_die_auswertung_im_lauf(tmp_path, layout, net, op,
+                                                  statics):
+    """Ein gespeichertes model.pt nachgemessen ist dieselbe Zahl wie im Lauf
+    -- sonst waere das nachgeholte Profil von Lauf 16 nichts wert."""
+    pfad = tmp_path / "model.pt"
+    torch.save(net.state_dict(), pfad)
+    kw = dict(lag1=5, lag2=20, clamp=10.0, T_sigma=9.602)
+    nach = T.profil_aus_checkpoint(pfad, layout, {}, [op], statics, **kw)
+    vor = T.val_auswertung(net, [op], statics, **kw)
+    for schl in ("mae", "bias", "drift"):
+        assert nach["OP99"][schl] == pytest.approx(vor["OP99"][schl], rel=1e-6)
+    assert nach["OP99"]["mae_segmente"] == pytest.approx(
+        vor["OP99"]["mae_segmente"], rel=1e-6)
