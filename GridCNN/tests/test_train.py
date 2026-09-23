@@ -223,9 +223,21 @@ def test_wall_loss_summiert_ueber_die_knotenflaechen():
 
 
 def test_der_wandterm_faellt_laut_aus_statt_zu_raten(net, op, statics):
-    """Stufe 2 ist offen. Ein geratenes U waere ein freier Parameter."""
+    """Ein geratenes U waere ein freier Parameter -- also lieber laut fallen.
+
+    ⚠ Die Begruendung hat sich am 22.09., abends, GEAENDERT, und der Test
+    haelt jetzt die neue fest. Bis dahin stand hier "Stufe 2 ist offen" --
+    das stimmte seit dem Rebuild auf Schema v3 nicht mehr. ``U(V_dot)`` ist
+    kalibriert; was fehlt, ist die Verdrahtung (``q_wall_meas`` bleibt None,
+    ``t_in``/``mdot`` je Zeitschritt fehlen in ``op_tensoren``).
+
+    Der Test prueft deshalb die **Verdrahtung** als Grund, nicht die
+    Kalibrierung -- sonst haelt er eine Behauptung fest, die falsch ist.
+    """
     wall = object()
-    with pytest.raises(NotImplementedError, match="U\\(V_dot\\)"):
+    with pytest.raises(NotImplementedError, match="nicht verdrahtet"):
+        T._wall_ghost(op.tn_ic.unsqueeze(0), wall, op, 0)
+    with pytest.raises(NotImplementedError, match="q_wall_meas"):
         T._wall_ghost(op.tn_ic.unsqueeze(0), wall, op, 0)
 
 
@@ -884,3 +896,136 @@ def test_ohne_latten_sagt_das_verdikt_dass_es_nichts_sagen_kann():
     zeilen, kenn = T.zusammenfassung({"OP06": [4.0, 4.1, 4.2]}, {})
     assert kenn["lesbar"] is False and kenn["guete"] == {}
     assert "keine Latten" in "\n".join(zeilen)
+
+
+# ---------------------------------------------------------------------------
+# Das Fehlerprofil ueber die Trajektorie -- der Befund vom 22.09., abends
+# ---------------------------------------------------------------------------
+def _driftendes_netz(layout, c: float):
+    """Ein Netz, dessen Rollout linear wegdriftet: ``T_k = k * dt * c``.
+
+    Kopfgewichte null, Kopf-Bias ``c``, keine Physik -- also ist die Rate
+    ueberall exakt ``c``, und der Fehler gegen flache Labels waechst linear
+    mit dem Zeitschritt. Genau die Form, die der Plot vom 22.09. auf OP06
+    zeigt, nur in geschlossener Form statt gemessen.
+    """
+    net = M.GridCNN(layout, use_physics=False)
+    with torch.no_grad():
+        net.correction.head.weight.zero_()
+        net.correction.head.bias.fill_(c)
+    return net
+
+
+def _flacher_op(layout, n_t: int = 40, dtn: float = 0.01):
+    nx, ny, nz = layout.shape
+    return T.OPTensors(
+        op_id="OP_FLACH", tn_seq=torch.zeros(n_t, nx, ny, nz),
+        tn_ic=torch.zeros(nx, ny, nz), qsrc=torch.zeros(n_t, nx, ny, nz),
+        fo=torch.zeros(nx, ny, nz, 3, 3), config=torch.zeros(n_t, 7),
+        forcing=torch.zeros(n_t, 11), dtn=dtn, split_t=n_t - 1, n_t=n_t)
+
+
+def test_das_profil_findet_den_spaetfehler_den_der_mittelwert_verdeckt(
+        layout, statics):
+    """Der Befund, wegen dem es diese Messung gibt.
+
+    ``OP06 6.57 C`` sah am 22.09. nach einer Zahl aus. Der Plot ueber
+    dieselbe Trajektorie zeigte 1.1 C in der Mitte und 15 C am Ende. Hier
+    dasselbe in geschlossener Form: der Fehler waechst linear, also ist
+
+        MAE(letztes Viertel) / MAE(gesamt) = 34.5 / 19.5 = 1.769
+
+    und genau das muss ``drift`` melden.
+    """
+    op = _flacher_op(layout)
+    net = _driftendes_netz(layout, 0.25)
+    d = T.val_auswertung(net, [op], statics, lag1=5, lag2=20, clamp=0.0,
+                         T_sigma=10.0, segmente=4)["OP_FLACH"]
+
+    schritt = 0.01 * 0.25 * 10.0                       # dt * c * T_sigma
+    assert d["mae"] == pytest.approx(schritt * 19.5, rel=1e-5)
+    assert d["mae_segmente"][0] == pytest.approx(schritt * 4.5, rel=1e-5)
+    assert d["mae_segmente"][-1] == pytest.approx(schritt * 34.5, rel=1e-5)
+    assert d["drift"] == pytest.approx(34.5 / 19.5, rel=1e-5)
+    assert d["drift"] > T.DRIFT_SCHWELLE, "der Spaetfehler muss auffallen"
+
+
+def test_der_bias_sagt_zu_warm_oder_zu_kalt(layout, statics):
+    """Ohne Vorzeichen ist ein feldweiter Pegelfehler nicht von Streuung zu
+    unterscheiden -- und genau das zeigt der Plot vom 22.09. nicht."""
+    op = _flacher_op(layout)
+    kw = dict(lag1=5, lag2=20, clamp=0.0, T_sigma=10.0, segmente=4)
+    warm = T.val_auswertung(_driftendes_netz(layout, 0.25), [op], statics,
+                            **kw)["OP_FLACH"]
+    kalt = T.val_auswertung(_driftendes_netz(layout, -0.25), [op], statics,
+                            **kw)["OP_FLACH"]
+    assert warm["bias"] > 0 and kalt["bias"] < 0
+    assert warm["bias"] == pytest.approx(-kalt["bias"], rel=1e-5)
+    # Der Betrag ist derselbe -- die MAE allein koennte die beiden nie trennen.
+    assert warm["mae"] == pytest.approx(kalt["mae"], rel=1e-5)
+    assert warm["bias_segmente"][-1] > warm["bias_segmente"][0]
+
+
+def test_ein_gleichmaessiger_fehler_hat_drift_nahe_eins(layout, statics):
+    """Die Gegenprobe: ohne Spaetfehler darf nichts gemeldet werden."""
+    op = _flacher_op(layout)
+    net = _driftendes_netz(layout, 0.0)           # exakt null Rate
+    op.tn_seq = torch.full_like(op.tn_seq, 0.5)   # konstanter Versatz
+    op.tn_ic = torch.full_like(op.tn_ic, 0.5)
+    d = T.val_auswertung(net, [op], statics, lag1=5, lag2=20, clamp=0.0,
+                         T_sigma=10.0, segmente=4)["OP_FLACH"]
+    assert d["mae"] == pytest.approx(0.0, abs=1e-6)
+    assert not np.isfinite(d["drift"]) or d["drift"] <= T.DRIFT_SCHWELLE
+
+
+def test_val_mae_ist_genau_die_mae_aus_der_auswertung(net, op, statics):
+    """Zwei Wege zu derselben Zahl driften auseinander -- also gibt es einen."""
+    kw = dict(lag1=5, lag2=20, clamp=10.0, T_sigma=9.602)
+    schlank = T.val_mae(net, [op], statics, **kw)
+    voll = T.val_auswertung(net, [op], statics, **kw)
+    assert schlank == {k: v["mae"] for k, v in voll.items()}
+
+
+def test_das_profil_wird_ueber_messpunkte_und_seeds_gemedianed():
+    """Ein Ausreisser-Messpunkt darf das Profil nicht kippen."""
+    mach = lambda m, segs: {"mae": m, "bias": -m, "drift": 2.0,            # noqa: E731
+                            "mae_segmente": segs,
+                            "bias_segmente": [-v for v in segs]}
+    # Neun Messpunkte -> das letzte Drittel sind drei. Die Ausreisser liegen
+    # davor und duerfen genau deshalb nichts aendern.
+    punkte = [(e, {"OP06": mach(99.0, [99.0, 99.0])}) for e in (10, 20, 30)]
+    punkte += [(e, {"OP06": mach(0.1, [0.1, 0.1])}) for e in (40, 50, 60)]
+    punkte += [(70, {"OP06": mach(6.0, [3.0, 9.0])}),
+               (80, {"OP06": mach(7.0, [4.0, 10.0])}),
+               (90, {"OP06": mach(8.0, [5.0, 11.0])})]
+    p = T.median_profil(punkte)["OP06"]
+    assert p["mae"] == pytest.approx(7.0)                    # Median von 6,7,8
+    assert p["mae_segmente"] == pytest.approx([4.0, 10.0])
+
+    ueber = T.profil_ueber_seeds([
+        {"OP06": mach(5.0, [2.0, 8.0])},
+        {"OP06": mach(7.0, [4.0, 10.0])},
+        {"OP06": mach(9.0, [6.0, 12.0])}])["OP06"]
+    assert ueber["mae"] == pytest.approx(7.0)
+    assert ueber["mae_segmente"] == pytest.approx([4.0, 10.0])
+    assert T.profil_ueber_seeds([]) == {} and T.median_profil([]) == {}
+
+
+def test_die_schlusstafel_nennt_den_spaetfehler_beim_namen():
+    latten = {"OP06": {"mittelwert": 10.80, "persistenz": 16.67}}
+    profil = {"OP06": {"mae": 6.57, "bias": -3.4, "drift": 2.01,
+                       "mae_segmente": [4.6, 1.7, 4.3, 4.6, 8.1, 13.2],
+                       "bias_segmente": [-1.0, -0.5, -2.0, -3.0, -6.0, -12.9]}}
+    zeilen, kenn = T.zusammenfassung({"OP06": [6.5, 6.6, 6.7]}, latten,
+                                     profil=profil)
+    text = "\n".join(zeilen)
+    assert "O13" in text and "NICHT gleichmaessig" in text
+    assert kenn["drift"]["OP06"] == pytest.approx(2.01)
+
+    # Und die Gegenprobe: ohne Spaetfehler keine Warnung.
+    flach = {"OP06": dict(profil["OP06"], drift=1.02,
+                          mae_segmente=[6.5] * 6, bias_segmente=[-0.1] * 6)}
+    zeilen2, _ = T.zusammenfassung({"OP06": [6.5, 6.6, 6.7]}, latten,
+                                   profil=flach)
+    assert "gleichmaessig verteilt" in "\n".join(zeilen2)
+    assert "O13" not in "\n".join(zeilen2)

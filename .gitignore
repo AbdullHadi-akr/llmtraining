@@ -23,6 +23,13 @@
 # einzige Stelle, an der die Epochenzeilen nachlesbar bleiben.
 !GridCNN/laeufe/*.txt
 
+# Dasselbe Argument fuer die zwei Beilagen eines Laufs: das Parameterblatt
+# (welche Flags genau galten) und den Fehlerplot ueber die Trajektorie. Der
+# Bericht vom 22.09. beruft sich auf beide, und ein Verweis auf eine Datei,
+# die es im Repo nicht gibt, ist keiner. Das PNG ist 60 kB.
+!GridCNN/laeufe/*.md
+!GridCNN/laeufe/*.png
+
 # Keep training reports tracked
 !TRAININGS_BERICHT_*.md
 !**/TRAININGS_BERICHT_*.md

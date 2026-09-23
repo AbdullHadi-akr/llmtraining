@@ -356,17 +356,32 @@ def rollout(net: M.GridCNN, op: OPTensors, statics: M.StaticMaps, *,
 
 def _wall_ghost(t0: torch.Tensor, wall: phys.WallModel, op: OPTensors,
                 k: int) -> torch.Tensor:
-    """Platzhalter fuer den kalibrierten Wandterm -- Stufe 2 fehlt noch.
+    """Der Wandterm -- **nicht mehr blockiert, nur nicht verdrahtet**.
 
-    Die Bruecke zwischen entdimensioniert und SI steht in ``solve.py`` und wird
-    hier nicht ein zweites Mal geschrieben. Solange ``U(V_dot)`` nicht
-    kalibriert ist, gibt es nichts anzuschliessen.
+    ⚠ Der Text hier hat bis zum 22.09., abends, etwas Falsches behauptet: er
+    nannte Stufe 2 als offene Voraussetzung. **Stufe 2 ist durch** (17/17 OPs
+    auf Schema v3), ``U(V_dot)`` ist aus drei Flussleveln kalibriert, und
+    ``physics.UCurve`` wie ``physics.WallModel.ghost`` sind gebaut und
+    getestet. Die Sperre war abgestanden, und ein abgestandener Blocker ist
+    schlimmer als ein offener: niemand sieht nach.
+
+    Was **wirklich** noch fehlt, und nur das:
+
+    1. ``op_tensoren`` fuellt ``OPTensors.q_wall_meas`` nie -- es steht auf
+       ``None``, also kann auch ``wall_loss`` nicht laufen.
+    2. ``WallModel.ghost`` braucht ``t_in`` und ``mdot`` **je Zeitschritt**.
+       Beide liegen seit Stufe 2 im Buendel, sind aber noch nicht in
+       ``OPTensors`` uebernommen.
+
+    Die Bruecke zwischen entdimensioniert und SI steht in ``solve.py`` und
+    wird hier nicht ein zweites Mal geschrieben.
     """
     raise NotImplementedError(
-        "Der Wandterm braucht U(V_dot), und das braucht q_solid_to_fluid, "
-        "mdot, cp_fluid und fluid_out_temp im Buendel -- Stufe 2 des "
-        "Fahrplans. Bis dahin laeuft das Training adiabat, und das ist eine "
-        "Ablation, keine Physik-Latte.")
+        "Der Wandterm ist kalibrierbar, aber nicht verdrahtet: "
+        "OPTensors.q_wall_meas bleibt None, und t_in/mdot je Zeitschritt "
+        "fehlen in op_tensoren. Beides liegt seit Stufe 2 im Buendel. "
+        "Bis das gemacht ist, laeuft das Training adiabat -- eine Ablation, "
+        "keine Physik-Latte. Siehe FAHRPLAN, 'Das Naechste'.")
 
 
 # ---------------------------------------------------------------------------
@@ -808,11 +823,16 @@ def triviale_latten(ops: list, T_sigma: float) -> dict:
     return out
 
 
+SEGMENTE = 6        # in wie viele Abschnitte die Trajektorie zerlegt wird
+DRIFT_SCHWELLE = 1.5    # ab hier heisst "der Fehler waechst zum Ende" (O13)
+
+
 @torch.no_grad()
-def val_mae(net: M.GridCNN, ops: list, statics: M.StaticMaps, *,
-            lag1: int, lag2: int, clamp: float, T_sigma: float,
-            batch: OPBatch | None = None) -> dict:
-    """Freilaufende MAE je Halte-OP, in Grad Celsius.
+def val_auswertung(net: M.GridCNN, ops: list, statics: M.StaticMaps, *,
+                   lag1: int, lag2: int, clamp: float, T_sigma: float,
+                   batch: OPBatch | None = None,
+                   segmente: int = SEGMENTE) -> dict:
+    """Freilaufender Fehler je Halte-OP -- **ueber die Trajektorie aufgeloest**.
 
     ``tn_seq`` ist ``(T - T_mu) / T_sigma``, der Versatz ``T_mu`` faellt in der
     Differenz also heraus und ``T_sigma`` ist der ganze Umrechnungsfaktor --
@@ -821,12 +841,30 @@ def val_mae(net: M.GridCNN, ops: list, statics: M.StaticMaps, *,
     Freilaufend, nicht ein Schritt: gemessen wird, was das Modell allein
     erzeugt. Ein Ein-Schritt-Fehler sieht immer gut aus.
 
+    Warum das nicht eine Zahl ist
+    ------------------------------
+    Am 22.09. stand ``OP06 6.57 C`` da, und der Plot ueber dieselbe
+    Trajektorie zeigte **1.1 C in der Mitte und 15 C am Ende** -- Faktor 14,
+    den der Mittelwert vollstaendig verdeckt. Ein Modell, das die erste
+    Haelfte trifft und die zweite verliert, ist etwas ganz anderes als eines,
+    das ueberall gleich daneben liegt, und beide haetten dieselbe MAE.
+
+    Zurueck kommt je OP:
+
+    ``mae`` / ``bias``
+        ueber die ganze Trajektorie. **``bias`` ist vorzeichenbehaftet**: er
+        beantwortet "zu warm oder zu kalt", und ohne ihn ist ein
+        feldweiter Pegelfehler nicht von Streuung zu unterscheiden.
+    ``mae_segmente`` / ``bias_segmente``
+        dasselbe je Abschnitt, in Laufrichtung.
+    ``drift``
+        ``MAE(letzter Abschnitt) / MAE(gesamt)``. Nahe 1 heisst gleichmaessig
+        verteilt; deutlich darueber heisst **O13**, der Fehler waechst zum
+        Trajektorienende. Die eine Zahl, die am 22.09. gefehlt hat.
+
     **Gebatcht**, aus demselben Grund wie ``train_epoch``: der Rollout ist
-    startlatenz-gebunden, und seit die val-MAE alle paar Epochen faellt statt
-    einmal am Ende, ist sie ein spuerbarer Anteil der Laufzeit. Derselbe
-    ``rollout_batched`` wie im Training -- keine zweite Fassung der Rekurrenz,
-    die wegdriften koennte. ``batch`` darf vorgestapelt hereingereicht werden;
-    das spart je Messung einen Kopiervorgang.
+    startlatenz-gebunden. Derselbe ``rollout_batched`` wie im Training -- keine
+    zweite Fassung der Rekurrenz, die wegdriften koennte.
     """
     b = batch if batch is not None else stack_ops(ops)
     alle, _ = rollout_batched(net, b, statics, lag1=lag1, lag2=lag2,
@@ -836,9 +874,39 @@ def val_mae(net: M.GridCNN, ops: list, statics: M.StaticMaps, *,
         # Nur der eigene, gueltige Teil: kuerzere OPs sind bis n_max mit ihrer
         # letzten Treiberzeile aufgefuellt und rollen darueber hinaus weiter.
         traj = alle[:op.n_t, i]
-        out[op.op_id] = float(
-            (traj - op.tn_seq).abs().mean().item() * T_sigma)
+        fehler = (traj - op.tn_seq) * T_sigma        # mit Vorzeichen, in C
+        mae = float(fehler.abs().mean())
+
+        grenzen = np.linspace(0, op.n_t, max(1, segmente) + 1)
+        grenzen = np.unique(np.round(grenzen).astype(int))
+        mae_seg, bias_seg = [], []
+        for a, z in zip(grenzen[:-1], grenzen[1:]):
+            teil = fehler[int(a):int(z)]
+            if teil.numel() == 0:
+                continue
+            mae_seg.append(float(teil.abs().mean()))
+            bias_seg.append(float(teil.mean()))
+        out[op.op_id] = {
+            "mae": mae, "bias": float(fehler.mean()),
+            "mae_segmente": mae_seg, "bias_segmente": bias_seg,
+            "drift": (mae_seg[-1] / mae) if (mae_seg and mae > 0)
+                     else float("nan"),
+        }
     return out
+
+
+def val_mae(net: M.GridCNN, ops: list, statics: M.StaticMaps, *,
+            lag1: int, lag2: int, clamp: float, T_sigma: float,
+            batch: OPBatch | None = None) -> dict:
+    """Nur die eine Zahl je OP -- duenner Aufsatz auf :func:`val_auswertung`.
+
+    Bewusst keine zweite Rechnung: zwei Wege zu derselben MAE driften
+    auseinander, und genau das hat dieses Projekt bei ``rollout`` schon
+    einmal bewusst vermieden.
+    """
+    return {k: v["mae"] for k, v in val_auswertung(
+        net, ops, statics, lag1=lag1, lag2=lag2, clamp=clamp,
+        T_sigma=T_sigma, batch=batch).items()}
 
 
 def median_ueber(punkte: list, anteil: float = 1.0 / 3.0) -> dict:
@@ -864,6 +932,56 @@ def median_ueber(punkte: list, anteil: float = 1.0 / 3.0) -> dict:
     op_ids = sorted(letzte[-1][1])
     return {k: float(np.median([p[1][k] for p in letzte if k in p[1]]))
             for k in op_ids}
+
+
+def median_profil(punkte: list, anteil: float = 1.0 / 3.0) -> dict:
+    """Dasselbe fuer die vollen Auswertungen aus :func:`val_auswertung`.
+
+    Elementweiser Median ueber dieselben Messpunkte, aus denen der berichtete
+    Mittelwert kommt -- damit Profil und Kopfzahl vom selben Stand reden und
+    nicht aus zwei verschiedenen Epochen stammen.
+
+    ``punkte`` ist ``[(epoch, {op_id: {...}}), ...]``.
+    """
+    if not punkte:
+        return {}
+    m = max(1, int(round(anteil * len(punkte))))
+    letzte = punkte[-m:]
+    out = {}
+    for op_id in sorted(letzte[-1][1]):
+        reihen = [p[1][op_id] for p in letzte if op_id in p[1]]
+        n_seg = min(len(r["mae_segmente"]) for r in reihen)
+        med = lambda schl: float(np.median([r[schl] for r in reihen]))  # noqa: E731
+        med_seg = lambda schl: [                                        # noqa: E731
+            float(np.median([r[schl][j] for r in reihen]))
+            for j in range(n_seg)]
+        out[op_id] = {"mae": med("mae"), "bias": med("bias"),
+                      "drift": med("drift"),
+                      "mae_segmente": med_seg("mae_segmente"),
+                      "bias_segmente": med_seg("bias_segmente")}
+    return out
+
+
+def profil_zeilen(profil: dict, *, einzug: str = "") -> list:
+    """Das Fehlerprofil als Textzeilen -- die Kurve, die sonst ein Plot waere.
+
+    Am 22.09. musste ein Plot von Hand gebaut werden, um zu sehen, dass der
+    Fehler auf OP06 von 1.1 C in der Mitte auf 15 C am Ende laeuft. Diese
+    Zeilen stehen jetzt unter jedem Lauf.
+    """
+    zeilen = []
+    for op_id, p in sorted(profil.items()):
+        segs = "  ".join(f"{v:5.2f}" for v in p["mae_segmente"])
+        zeilen.append(f"{einzug}{op_id}  MAE je Abschnitt: {segs}")
+        bias = "  ".join(f"{v:+5.1f}" for v in p["bias_segmente"])
+        marke = ("  <- O13, der Fehler waechst zum Ende"
+                 if np.isfinite(p["drift"]) and p["drift"] > DRIFT_SCHWELLE
+                 else "")
+        zeilen.append(f"{einzug}{' ' * len(op_id)}  Bias je Abschnitt: {bias}"
+                      f"   (gesamt {p['bias']:+.2f} C)")
+        zeilen.append(f"{einzug}{' ' * len(op_id)}  Drift "
+                      f"{p['drift']:.2f}x   Mittel {p['mae']:.2f} C{marke}")
+    return zeilen
 
 
 # ---------------------------------------------------------------------------
@@ -975,7 +1093,7 @@ def fahre_einen_lauf(args, seed: int, device, daten, out_dir: Path,
     batch = stack_ops(train)
     val_batch = stack_ops(val)
     verlauf = []
-    val_punkte = []
+    val_punkte, detail_punkte = [], []
     bestes = {"epoch": -1, "mittel": float("inf"), "mae": {}}
 
     for epoch in range(1, args.epochs + 1):
@@ -1005,11 +1123,14 @@ def fahre_einen_lauf(args, seed: int, device, daten, out_dir: Path,
         faellig = (epoch % max(1, args.val_every) == 0
                    or epoch == args.epochs or epoch == 1)
         if faellig:
-            mae = val_mae(net, val, statics, lag1=args.lag1, lag2=args.lag2,
-                          clamp=args.clamp, T_sigma=bundle.T_sigma,
-                          batch=val_batch)
+            detail = val_auswertung(net, val, statics, lag1=args.lag1,
+                                    lag2=args.lag2, clamp=args.clamp,
+                                    T_sigma=bundle.T_sigma, batch=val_batch)
+            mae = {k: v["mae"] for k, v in detail.items()}
             zeile["val_mae_C"] = mae
+            zeile["val_detail"] = detail
             val_punkte.append((epoch, mae))
+            detail_punkte.append((epoch, detail))
             mittel = float(np.mean(list(mae.values())))
             marke = ""
             if mittel < bestes["mittel"]:
@@ -1027,11 +1148,15 @@ def fahre_einen_lauf(args, seed: int, device, daten, out_dir: Path,
         if plan is not None:
             plan.step()
 
-    letzte = val_mae(net, val, statics, lag1=args.lag1, lag2=args.lag2,
-                     clamp=args.clamp, T_sigma=bundle.T_sigma, batch=val_batch)
+    letzt_detail = val_auswertung(net, val, statics, lag1=args.lag1,
+                                  lag2=args.lag2, clamp=args.clamp,
+                                  T_sigma=bundle.T_sigma, batch=val_batch)
+    letzte = {k: v["mae"] for k, v in letzt_detail.items()}
     if not val_punkte or val_punkte[-1][0] != args.epochs:
         val_punkte.append((args.epochs, letzte))
+        detail_punkte.append((args.epochs, letzt_detail))
     median = median_ueber(val_punkte)
+    profil = median_profil(detail_punkte)
     m_anz = max(1, int(round(len(val_punkte) / 3.0)))
 
     # Die berichtete Zahl steht OBEN und heisst, wie sie zustande kam. Die
@@ -1047,6 +1172,15 @@ def fahre_einen_lauf(args, seed: int, device, daten, out_dir: Path,
           + "  ".join(f"{k} {v:.4f}" for k, v in sorted(letzte.items()))
           + "   <- eine Lotterie, nicht ablesen (FAHRPLAN)")
 
+    # Das Profil ueber die Trajektorie. Ohne es ist "6.57 C" ein Mittelwert
+    # ueber 1.1 C in der Mitte und 15 C am Ende -- siehe val_auswertung().
+    if profil:
+        n_seg = len(next(iter(profil.values()))["mae_segmente"])
+        print(f"[seed {seed}] FEHLERPROFIL ({n_seg} gleich lange Abschnitte "
+              f"in Laufrichtung, Grad C):")
+        for z in profil_zeilen(profil, einzug=f"[seed {seed}]   "):
+            print(z)
+
     torch.save(net.state_dict(), out_dir / "model.pt")
     (out_dir / "history.json").write_text(json.dumps(verlauf, indent=2))
     (out_dir / "metrics.json").write_text(json.dumps(
@@ -1058,10 +1192,11 @@ def fahre_einen_lauf(args, seed: int, device, daten, out_dir: Path,
          "val_mae_C_letzte": letzte,
          "val_mae_C_bestes": bestes["mae"],
          "bestes_epoch": bestes["epoch"],
+         "fehlerprofil": profil,
          "triviale_latten_C": latten}, indent=2))
     # Berichtet wird der MEDIAN. Bestes und letztes stehen in metrics.json --
     # als Diagnose, nicht als Ergebnis. Begruendung in median_ueber().
-    return median or letzte
+    return (median or letzte), profil
 
 
 def _mit_latte(op_id: str, wert: float, latten: dict) -> str:
@@ -1192,7 +1327,39 @@ def build_argparser() -> argparse.ArgumentParser:
     return p
 
 
-def zusammenfassung(alle: dict, latten: dict) -> tuple[list, dict]:
+def profil_ueber_seeds(profile: list) -> dict:
+    """Die Fehlerprofile mehrerer Seeds zu einem Median zusammenziehen.
+
+    Derselbe Median wie ueberall sonst in diesem Modul, nur eine Achse
+    weiter aussen. Ein Seed weniger oder mehr darf das Profil nicht kippen --
+    am 22.09. lagen bester und schlechtester Seed um Faktor 5.8 auseinander.
+    """
+    vorhanden = [p for p in profile if p]
+    if not vorhanden:
+        return {}
+    op_ids = sorted(set().union(*(set(p) for p in vorhanden)))
+    out = {}
+    for op_id in op_ids:
+        reihen = [p[op_id] for p in vorhanden if op_id in p]
+        if not reihen:
+            continue
+        n_seg = min(len(r["mae_segmente"]) for r in reihen)
+        out[op_id] = {
+            "mae": float(np.median([r["mae"] for r in reihen])),
+            "bias": float(np.median([r["bias"] for r in reihen])),
+            "drift": float(np.median([r["drift"] for r in reihen])),
+            "mae_segmente": [float(np.median([r["mae_segmente"][j]
+                                              for r in reihen]))
+                             for j in range(n_seg)],
+            "bias_segmente": [float(np.median([r["bias_segmente"][j]
+                                               for r in reihen]))
+                              for j in range(n_seg)],
+        }
+    return out
+
+
+def zusammenfassung(alle: dict, latten: dict,
+                    profil: dict | None = None) -> tuple[list, dict]:
     """Die Schlusstafel und das Verdikt -- als Text, nicht als ``print``.
 
     Am 22.09. musste man drei Dokumente lesen, um zu sehen, dass
@@ -1262,8 +1429,34 @@ def zusammenfassung(alle: dict, latten: dict) -> tuple[list, dict]:
                       "OP liegt auf oder ueber der Latte. Dort hat das Modell "
                       "nichts gelernt, was ueber Raten hinausgeht -- und die "
                       "Streuung ist lesbar, der Befund also echt.")
+
+    # Das Profil ueber die Trajektorie gehoert NEBEN das Verdikt, nicht in
+    # einen Anhang: ein Mittelwert von 6.57 C ueber 1.1 C in der Mitte und
+    # 15 C am Ende ist eine andere Aussage als 6.57 C ueberall.
+    profil = profil or {}
+    driften = {}
+    if profil:
+        zeilen.append("")
+        zeilen.append("[profil] Fehler ueber die Trajektorie (Median ueber "
+                      "die Seeds):")
+        zeilen.extend(profil_zeilen(profil, einzug="          "))
+        driften = {k: v["drift"] for k, v in profil.items()}
+        schlimm = {k: v for k, v in driften.items()
+                   if np.isfinite(v) and v > DRIFT_SCHWELLE}
+        if schlimm:
+            zeilen.append(
+                f"          ⚠ Der Fehler ist NICHT gleichmaessig verteilt: "
+                f"{', '.join(f'{k} {v:.2f}x' for k, v in sorted(schlimm.items()))}. "
+                f"Das ist O13 -- der Spaetfehler. Die Kopfzahl oben ist ein "
+                f"Mittelwert ueber einen guten Anfang und ein schlechtes Ende, "
+                f"und Arm A hat keinen dissipativen Term, der den Pegel "
+                f"zurueckholt (README Sec. 4).")
+        else:
+            zeilen.append("          Der Fehler ist ueber die Trajektorie "
+                          "gleichmaessig verteilt -- kein Spaetfehler.")
     return zeilen, {"guete": {k: v[0] for k, v in guete.items()},
-                    "seed_streuung_C": streuungen, "lesbar": lesbar}
+                    "seed_streuung_C": streuungen, "lesbar": lesbar,
+                    "drift": driften}
 
 
 def protokollname(args) -> str:
@@ -1423,14 +1616,17 @@ def main(argv: list | None = None) -> int:
 
     wurzel = args.artifacts_dir / konfigurationsname(args).split()[0]
     alle: dict[str, list] = {}
+    profile: list = []
     for n in range(args.seeds):
         seed = args.seed + n
-        mae = fahre_einen_lauf(args, seed, device, daten,
-                               wurzel / f"seed{seed}", latten=latten)
+        mae, profil = fahre_einen_lauf(args, seed, device, daten,
+                                       wurzel / f"seed{seed}", latten=latten)
+        profile.append(profil)
         for op_id, v in mae.items():
             alle.setdefault(op_id, []).append(v)
 
-    zeilen, kennzahlen = zusammenfassung(alle, latten)
+    ueber_seeds = profil_ueber_seeds(profile)
+    zeilen, kennzahlen = zusammenfassung(alle, latten, profil=ueber_seeds)
     print(f"\n{'=' * 70}")
     print(f"{konfigurationsname(args)}  --  {args.seeds} Seed(s), "
           f"{args.epochs} Epochen")
@@ -1448,7 +1644,7 @@ def main(argv: list | None = None) -> int:
          "protokoll": protokollname(args), "seeds": args.seeds,
          "epochs": args.epochs, "ops": list(args.ops),
          "val_ops": list(args.val_ops), "val_mae_C": alle,
-         "triviale_latten_C": latten,
+         "fehlerprofil": ueber_seeds, "triviale_latten_C": latten,
          "clamp": float(args.clamp), "lag1": args.lag1, "lag2": args.lag2,
          "T_sigma": float(bundle.T_sigma), **kennzahlen}, indent=2))
     print(f"  -> {zus}")

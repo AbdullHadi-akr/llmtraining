@@ -32,6 +32,43 @@ Epochen darunter.
 | `[UEBERSPRUNGEN] n` | Updates mit nicht-endlichem Verlust, verworfen | ein NaN vergiftet sonst still den ganzen Lauf |
 | `(0.79x Latte)` | val-MAE geteilt durch die beste triviale Latte | **< 1 heißt gelernt** — die Zahl und ihr Maßstab in einer Zeile |
 | `[SATURATED] n/max = x %` | Sättigung als **Anteil** | „88248" ohne Bezugsgröße ist unlesbar |
+| `FEHLERPROFIL` | MAE und **Bias** je Sechstel der Trajektorie | ein Mittelwert über 1.1 °C und 15 °C ist keine Zahl — siehe unten |
+
+---
+
+## Das Fehlerprofil — warum eine val-MAE nicht reicht
+
+Am Ende jedes Seeds steht:
+
+```
+[seed 0] FEHLERPROFIL (6 gleich lange Abschnitte in Laufrichtung, Grad C):
+[seed 0]   OP06  MAE je Abschnitt:   4.62   1.71   4.28   4.55   8.11  13.20
+[seed 0]         Bias je Abschnitt:  +4.6   +1.0   -2.1   -3.5   -7.8  -13.1   (gesamt -3.48 C)
+[seed 0]         Drift 2.01x   Mittel 6.57 C  <- O13, der Fehler waechst zum Ende
+```
+
+**Warum es das gibt.** Am 22.09. stand `OP06 6.57 C` da und sah nach einer
+Zahl aus. Ein von Hand gebauter Plot über dieselbe Trajektorie zeigte
+**1.1 °C bei 394 s und 15 °C bei 1444 s** — Faktor 14, den der Mittelwert
+vollständig verdeckt. Ein Modell, das die erste Hälfte trifft und die zweite
+verliert, ist etwas ganz anderes als eines, das überall gleich daneben liegt,
+und beide hätten dieselbe MAE.
+
+| Feld | Lesart |
+|---|---|
+| **MAE je Abschnitt** | in Laufrichtung. Steigt die Reihe, wächst der Fehler zum Trajektorienende |
+| **Bias je Abschnitt** | **mit Vorzeichen.** Positiv = zu warm, negativ = zu kalt. Ohne ihn ist ein feldweiter Pegelfehler nicht von Streuung zu unterscheiden — ein Betragsplot kann das nie entscheiden |
+| **Drift** | `MAE(letzter Abschnitt) / MAE(gesamt)`. Nahe **1** heißt gleichmäßig verteilt; ab **1.5** meldet der Lauf **O13**, den Spätfehler |
+
+> ⚠ **Ein `\|Bias\|` nahe der MAE ist der ernstere Befund.** Er heißt: das
+> *ganze Feld* liegt in dieselbe Richtung daneben — ein Pegelfehler, keine
+> Streuung. Arm A hat keinen dissipativen Term, der den Pegel zurückholt
+> (`--no-physics` setzt `rate = g_θ`, ohne Laplace). `model.py` nennt die
+> Delta-Form deshalb ausdrücklich eine **Hypothese**: läuft der Rollout weg,
+> war sie falsch.
+
+Dasselbe Profil steht am Ende des Laufs noch einmal als Median über alle
+Seeds, und vollständig in `metrics.json` / `zusammenfassung.json`.
 
 ---
 
