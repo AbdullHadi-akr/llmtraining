@@ -1200,3 +1200,102 @@ def test_die_cfl_zeile_empfiehlt_kein_kleineres_subsample_mehr():
     assert "loest das NICHT" in text and "Integrator" in text
     unter = T.cfl_text(1e-7, 1e-6, 1605.2, 2)
     assert unter.startswith("[CFL]") and "!!" not in unter
+
+
+# ---------------------------------------------------------------------------
+# PR #51: Schalter, Laufname, Physik-Residuum zum exakten Schritt
+# ---------------------------------------------------------------------------
+def test_der_laufname_ueberschreibt_lauf_17_nicht():
+    """Bis PR #51 hiess jedes Verzeichnis nur nach dem Arm -- ein Lauf mit
+    kompakten Karten haette die Gewichte von Lauf 17 ueberschrieben."""
+    assert T.laufname(_args("--no-physics")) == "A"
+    assert T.laufname(_args()) == "B"
+    assert T.laufname(_args("--no-physics", "--karten", "kompakt",
+                            "--treiber", "film")) == "A-kompakt-film"
+    assert T.laufname(_args("--integrator", "exp")) == "B-exp"
+    assert T.laufname(_args("--no-physics", "--integrator", "exp",
+                            "--w-phys", "0.1")) == "A-exp-wphys0.1"
+
+
+def test_kompakte_karten_kennen_ihre_breite_erst_nach_dem_bauen(layout):
+    n = layout.n_points
+    rng = np.random.default_rng(0)
+    args = _args("--karten", "kompakt", "--treiber", "film",
+                 "--integrator", "exp")
+    vorher = T.modell_kwargs(args)
+    assert vorher["static"]["kompakt"] is True
+    assert vorher["net"]["n_static"] is None
+    statics = M.build_static_maps(
+        layout, lam=rng.random((n, 3, 3)) + 1.0, rho=np.full(n, 2500.0),
+        cp=np.full(n, 900.0), **vorher["static"])
+    kw = T.modell_kwargs(args, statics)
+    assert kw["net"]["n_static"] == statics.n_channels
+    netz = M.GridCNN(layout, **kw["net"])
+    nx, ny, nz = layout.shape
+    state = M.state_channels(*(torch.randn(2, nx, ny, nz) for _ in range(3)))
+    drv = M.driver_channels(torch.randn(2, 7), torch.randn(2, 11), ny, nz)
+    x = M.assemble_input(state, statics, drv)
+    assert netz.correction(x).shape == (2, nx, ny, nz)
+
+
+def test_das_physik_residuum_zum_exakten_schritt(layout, op, statics):
+    """B/C/D: das Residuum ist genau g -- bei Kopf null also null.
+    A: g minus die Sekante des exakten Schritts -- braucht kein Label."""
+    b = M.GridCNN(layout, integrator="exp")
+    a = M.GridCNN(layout, use_physics=False, integrator="exp")
+    traj = op.tn_seq.clone()
+    idx = torch.arange(5, 13)
+    kw = dict(lag1=2, lag2=4)
+    verlust_b, _ = T.physics_loss(b, op, statics, traj, idx, **kw)
+    assert float(verlust_b.detach()) == 0.0
+    verlust_a, _ = T.physics_loss(a, op, statics, traj, idx, **kw)
+    sek = a.physik(op.fo, op.dtn).sekante(traj[idx], op.qsrc[idx])
+    assert float(verlust_a.detach()) == pytest.approx(float((sek ** 2).mean()),
+                                             rel=1e-5)
+    # Der Euler-Default bleibt, wie er war.
+    alt = M.GridCNN(layout)
+    verlust_alt, _ = T.physics_loss(alt, op, statics, traj, idx, **kw)
+    assert float(verlust_alt.detach()) == 0.0
+
+
+@pytest.mark.parametrize("argv", [
+    ("--integrator", "exp"),
+    ("--no-physics", "--integrator", "exp", "--w-phys", "0.1"),
+    ("--no-physics", "--treiber", "film"),
+])
+def test_eine_epoche_laeuft_mit_den_neuen_schaltern(layout, op, statics, argv):
+    args = _args(*argv)
+    netz = M.GridCNN(layout, **T.modell_kwargs(args, statics)["net"])
+    with torch.no_grad():
+        netz.correction.head.weight.normal_(0.0, 0.05)
+    vorher = [p.detach().clone() for p in netz.parameters()]
+    opt = torch.optim.Adam(netz.parameters(), lr=1e-3)
+    st = T.train_epoch(netz, T.stack_ops([op]), statics, opt, inner_steps=2,
+                       batch_t=4, lag1=2, lag2=4, w_data=1.0,
+                       w_phys=args.w_phys, w_wall=0.0, clamp=10.0,
+                       rng=np.random.default_rng(0), tbptt=3, clip_grad=1.0)
+    assert np.isfinite(st.data)
+    assert any(not torch.equal(v, p) for v, p in zip(vorher, netz.parameters()))
+
+
+def test_die_kartenschalter_kommen_beim_laden_an(monkeypatch, layout):
+    """Der Probelauf vom 23.09. abends: ``--karten kompakt`` stand im Log,
+    aber ``statics_aus_bundle`` reichte nur ``coord_maps`` weiter -- das Netz
+    bekam weiter 17 Karten. Jeder Schluessel aus modell_kwargs()["static"]
+    muss bei build_static_maps ankommen."""
+    from types import SimpleNamespace
+    gesehen = {}
+
+    def fang(layout_, **kw):
+        gesehen.update(kw)
+        return "statics"
+
+    monkeypatch.setattr(M, "build_static_maps", fang)
+    monkeypatch.setattr(T, "_pinn_module", lambda name: SimpleNamespace(
+        load_material_properties=lambda layer: {"lambda_tensor": None}))
+    bundle = SimpleNamespace(region=np.zeros(layout.n_points), rho=None,
+                             Cp=None)
+    kw = T.modell_kwargs(_args("--karten", "kompakt", "--no-coord-maps"))
+    T.statics_aus_bundle(bundle, layout, device=None, **kw["static"])
+    for schluessel, wert in kw["static"].items():
+        assert gesehen[schluessel] == wert

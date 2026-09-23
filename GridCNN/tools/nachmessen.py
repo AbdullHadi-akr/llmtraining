@@ -11,7 +11,9 @@ Rollout je Seed, kein Lauf.
 
 Aufruf
 ------
-**Dieselben Flags wie der Lauf**, plus ``--laeufe``::
+**Dieselben Flags wie der Lauf**, plus ``--laeufe``. Das gilt auch fuer
+``--karten``, ``--treiber`` und ``--integrator`` (PR #51): Sie bestimmen die
+Form der Gewichte, und ein falscher Schalter faellt beim Laden laut aus::
 
     python3 GridCNN/tools/nachmessen.py --no-physics --subsample 2 \\
         --device cuda --cache data_cache --laeufe GridCNN/artifacts/A
@@ -77,7 +79,7 @@ def main(argv: list | None = None) -> int:
         args.clamp, train + val, faktor=args.clamp_faktor,
         T_sigma=bundle.T_sigma)
     print(f"[clamp] {clamp_text}")
-    net_kw = T.modell_kwargs(args)["net"]
+    net_kw = T.modell_kwargs(args, statics)["net"]
     kw = dict(lag1=args.lag1, lag2=args.lag2, clamp=args.clamp,
               T_sigma=bundle.T_sigma, device=device)
 

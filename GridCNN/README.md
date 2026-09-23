@@ -358,6 +358,14 @@ Alles liegt in `data._grid_arrays` schon vor:
 
 ### 3d. Globale Treiber — 18 Skalare
 
+> **23.09. abends (PR #51):** FiLM gibt es jetzt als Schalter,
+> `--treiber film`. Grund: Eine konstante Karte durch einen 3×3-Kern
+> ergibt nur (Summe der 9 Gewichte) × Wert. Die 2 592 Treibergewichte der
+> ersten Faltung (23 % des Netzes) haben also nur 288 wirksame. Mit FiLM
+> wirken die Treiber in **jedem** Block. Dazu `--karten kompakt` (nur linear
+> unabhängige statische Karten, dieselbe Funktionsklasse) und
+> `--integrator exp`, siehe `GridCNN/FAHRPLAN.md`, Kopf.
+
 Unverändert aus `data.py` übernommen:
 
 | Block | Kanäle | was |

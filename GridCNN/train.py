@@ -487,6 +487,21 @@ def physics_loss(net: M.GridCNN, op: OPTensors, statics: M.StaticMaps,
     x = M.assemble_input(
         M.state_channels(t0, t1, t2), statics,
         M.driver_channels(op.config[idx], op.forcing[idx], ny, nz))
+    if net.integrator == "exp":
+        # Das Residuum, das zu dt passt: gemessen wird gegen die Sekantenrate
+        # des EXAKTEN Physikschritts, nicht gegen L(T) + Qsrc. Bei 110x ueber
+        # der CFL-Schranke waere ein Netz, das das Euler-Residuum erfuellt,
+        # ein expliziter Euler-Schritt -- und liefe im Rollout weg.
+        #   B/C/D: Schritt = exakt + dt*g, das Residuum ist genau g.
+        #   A:     Schritt = T + dt*g,     das Residuum ist g - Sekante.
+        # Braucht KEIN Label: es laesst sich auf jedem Zustand und jedem
+        # Treibersatz auswerten -- die Grundlage fuer Physik dort, wo es keine
+        # Messung gibt (FAHRPLAN, "virtuelle OPs").
+        g = net.correction(x)
+        physik = net.physik(op.fo, op.dtn).sekante(t0, op.qsrc[idx])
+        res = g if net.use_physics else g - physik
+        verhaeltnis = res.std() / (physik.std() + 1e-12)
+        return torch.mean(res ** 2), verhaeltnis.detach()
     ghost = M.adiabatic_ghost(t0)
     padded = gridmod.pad_all(t0, ghost)
     physik = phys.anisotropic_laplacian(padded, net.layout, op.fo) + op.qsrc[idx]
@@ -686,7 +701,7 @@ def layout_aus_bundle(bundle) -> GridLayout:
 
 
 def statics_aus_bundle(bundle, layout: GridLayout, *, coord_maps: bool,
-                       device) -> M.StaticMaps:
+                       device, kompakt: bool = False) -> M.StaticMaps:
     """Die 17 (bzw. 15) ortsfesten Karten aus den Materialdaten.
 
     ``lam`` steht **nicht** im Buendel -- dort liegt nur ``Fo``, in das es
@@ -703,7 +718,7 @@ def statics_aus_bundle(bundle, layout: GridLayout, *, coord_maps: bool,
     props = materials.load_material_properties(layer=layer)
     return M.build_static_maps(
         layout, lam=props["lambda_tensor"], rho=bundle.rho, cp=bundle.Cp,
-        device=device, coord_maps=coord_maps)
+        device=device, coord_maps=coord_maps, kompakt=kompakt)
 
 
 def op_tensoren(op, layout: GridLayout, device) -> OPTensors:
@@ -754,9 +769,8 @@ def lade_datensatz(args, device):
 
     layout = layout_aus_bundle(bundle)
     kw = modell_kwargs(args)
-    statics = statics_aus_bundle(bundle, layout,
-                                 coord_maps=kw["static"]["coord_maps"],
-                                 device=device)
+    statics = statics_aus_bundle(bundle, layout, device=device,
+                                 **kw["static"])
 
     train = [op_tensoren(o, layout, device) for o in bundle.ops]
     val = [op_tensoren(o, layout, device) for o in held]
@@ -781,6 +795,10 @@ def lade_datensatz(args, device):
     if statics.dead:
         print(f"[karten] tot (konstant, auf 0 gezwungen): "
               f"{', '.join(statics.dead)}")
+    if statics.kompakt:
+        print(f"[karten] kompakt: {statics.n_channels} von "
+              f"{statics.n_channels + len(statics.verworfen)} behalten "
+              f"({', '.join(statics.namen)})")
     return bundle, train, val, layout, statics
 
 
@@ -1128,7 +1146,7 @@ def fahre_einen_lauf(args, seed: int, device, daten, out_dir: Path,
         torch.cuda.manual_seed_all(seed)
     rng = np.random.default_rng(seed)
 
-    kw = modell_kwargs(args)
+    kw = modell_kwargs(args, statics)
     net = M.GridCNN(layout, **kw["net"]).to(device)
     n_par = sum(p.numel() for p in net.parameters())
     print(f"\n[seed {seed}] {n_par} Parameter -> {out_dir}")
@@ -1242,6 +1260,9 @@ def fahre_einen_lauf(args, seed: int, device, daten, out_dir: Path,
     (out_dir / "history.json").write_text(json.dumps(verlauf, indent=2))
     (out_dir / "metrics.json").write_text(json.dumps(
         {"seed": seed, "konfiguration": konfigurationsname(args),
+         "laufname": laufname(args),
+         "modell": {k: kw["net"][k] for k in ("karten", "treiber",
+                                              "integrator", "n_static")},
          "parameter": n_par, "epochs": args.epochs,
          "protokoll": protokollname(args),
          "val_mae_C_berichtet": median,
@@ -1341,6 +1362,21 @@ def build_argparser() -> argparse.ArgumentParser:
                         "(11 427 Parameter); die Praesentation sah 64 vor "
                         "(mit --blocks 4 dann 137 923).")
     p.add_argument("--blocks", type=int, default=3)
+    p.add_argument("--karten", choices=M.KARTEN_MODI, default="voll",
+                   help="'kompakt' behaelt nur die statischen Karten, die "
+                        "der ersten Faltung etwas Neues sagen (linear "
+                        "unabhaengig von 1 und den uebrigen). Dieselbe "
+                        "Funktionsklasse, weniger Gewichte (PR #51).")
+    p.add_argument("--treiber", choices=M.TREIBER_MODI, default="karte",
+                   help="'film' fuehrt die 18 Treiber als Vektor in jeden "
+                        "Block (Skalierung + Verschiebung) statt als "
+                        "konstante Karten in die erste Faltung (PR #51).")
+    p.add_argument("--integrator", choices=M.INTEGRATOR_MODI, default="euler",
+                   help="'exp' integriert L(T) + Qsrc exakt ueber den "
+                        "Datenschritt (adiabat, unbedingt stabil). Ohne ihn "
+                        "laufen B/C/D bei keinem verfuegbaren dt (CFL 110x). "
+                        "Fuer A aendert er nur das Physik-Residuum "
+                        "(--w-phys), nicht den Schritt (PR #51).")
     p.add_argument("--no-physics", action="store_true",
                    help="Konfiguration A der Ablation: reine Blackbox, "
                         "f = g_theta ohne den Physik-Term in der Architektur.")
@@ -1628,7 +1664,7 @@ def resolve_device(spec: str):
     return device_utils.resolve_device(spec)
 
 
-def modell_kwargs(args) -> dict:
+def modell_kwargs(args, statics: M.StaticMaps | None = None) -> dict:
     """Die Ablationsflags in die Argumente von ``model.py`` uebersetzen.
 
     Steht als eigene Funktion da, obwohl ``main`` sie heute nur ausgibt: der
@@ -1642,16 +1678,49 @@ def modell_kwargs(args) -> dict:
     an der ersten Faltung -- und genau deshalb kommen beide aus diesem einen
     Aufruf.
     """
+    karten = getattr(args, "karten", "voll")
+    if karten == "kompakt":
+        # Wie viele Karten bleiben, entscheiden die Daten. Ohne die gebauten
+        # Karten ist die Breite der ersten Faltung nicht zu kennen.
+        # Vor dem Bauen (lade_datensatz braucht nur "static") steht hier
+        # None, und GridCNN faellt damit laut aus.
+        n_static = statics.n_channels if statics is not None else None
+    else:
+        n_static = (M.CH_STATIC_OHNE_KOORD if args.no_coord_maps
+                    else M.CH_STATIC)
     return {
-        "static": {"coord_maps": not args.no_coord_maps},
+        "static": {"coord_maps": not args.no_coord_maps,
+                   "kompakt": karten == "kompakt"},
         "net": {
             "width": args.width,
             "blocks": args.blocks,
             "use_physics": not args.no_physics,
-            "n_static": (M.CH_STATIC_OHNE_KOORD if args.no_coord_maps
-                         else M.CH_STATIC),
+            "n_static": n_static,
+            "karten": karten,
+            "treiber": getattr(args, "treiber", "karte"),
+            "integrator": getattr(args, "integrator", "euler"),
         },
     }
+
+
+def laufname(args) -> str:
+    """Der Verzeichnisname unter ``--artifacts-dir``: der Arm plus alles, was
+    vom Default abweicht.
+
+    Bis PR #51 hiess das Verzeichnis nur ``A``/``B``/... -- ein Lauf mit
+    kompakten Karten haette also die Gewichte von Lauf 17 ueberschrieben.
+    Mit Defaults bleibt der Name, was er war.
+    """
+    teile = [konfigurationsname(args).split()[0]]
+    if getattr(args, "karten", "voll") != "voll":
+        teile.append(args.karten)
+    if getattr(args, "treiber", "karte") != "karte":
+        teile.append(args.treiber)
+    if getattr(args, "integrator", "euler") != "euler":
+        teile.append(args.integrator)
+    if args.no_physics and args.w_phys > 0.0:
+        teile.append(f"wphys{args.w_phys:g}")
+    return "-".join(teile)
 
 
 def konfigurationsname(args) -> str:
@@ -1701,7 +1770,6 @@ def main(argv: list | None = None) -> int:
     args.lag1, args.lag2, lag_text = lags_aufloesen(
         args.subsample, args.lag1, args.lag2)
 
-    kw = modell_kwargs(args)
     print(f"[konfiguration] {konfigurationsname(args)}")
     print(f"[protokoll] {protokollname(args)}")
     if args.tbptt <= 1:
@@ -1714,9 +1782,6 @@ def main(argv: list | None = None) -> int:
                              args.lag2, args.subsample)
     if warnung and args.tbptt > 1:
         print(warnung, file=sys.stderr)
-    print(f"[modell] {kw['net']['n_static']} statische Karten -> "
-          f"{M.CH_STATE + kw['net']['n_static'] + M.CH_DRIVER} Eingangskanaele, "
-          f"width={kw['net']['width']} blocks={kw['net']['blocks']}")
     if args.w_wall > 0.0:
         print("!! --w-wall > 0, aber der Wandterm haengt an den vier "
               "Cache-Groessen aus Stufe 2. Ist der Cache aelter, wirft "
@@ -1731,6 +1796,12 @@ def main(argv: list | None = None) -> int:
     # und sie je Seed neu zu bauen kostet Minuten und aendert nichts.
     daten = lade_datensatz(args, device)
     bundle, _train, _val = daten[0], daten[1], daten[2]
+    kw = modell_kwargs(args, daten[4])
+    print(f"[modell] {kw['net']['n_static']} statische Karten -> "
+          f"{M.CH_STATE + kw['net']['n_static'] + M.CH_DRIVER} Eingangskanaele, "
+          f"width={kw['net']['width']} blocks={kw['net']['blocks']}, "
+          f"karten={kw['net']['karten']} treiber={kw['net']['treiber']} "
+          f"integrator={kw['net']['integrator']}")
 
     # Die Latte unter der Latte, VOR dem ersten Lauf. Ein Modell, das sie
     # nicht schlaegt, hat nichts gelernt -- und ohne sie ist keine val-MAE
@@ -1750,7 +1821,8 @@ def main(argv: list | None = None) -> int:
         T_sigma=bundle.T_sigma)
     print(f"[clamp] {clamp_text}")
 
-    wurzel = args.artifacts_dir / konfigurationsname(args).split()[0]
+    wurzel = args.artifacts_dir / laufname(args)
+    print(f"[artefakte] {wurzel}")
     alle: dict[str, list] = {}
     profile: list = []
     for n in range(args.seeds):

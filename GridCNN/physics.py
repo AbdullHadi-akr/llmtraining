@@ -422,3 +422,102 @@ def cfl_limit(layout: GridLayout, fo: torch.Tensor) -> float:
            + fo[..., 2, 2] / layout.dz ** 2)
     worst = float(inv.max().item())
     return float("inf") if worst <= 0 else 1.0 / (2.0 * worst)
+
+
+class ExpIntegrator:
+    """``L(T) + Qsrc`` **exakt** ueber einen Datenschritt -- Schritt 2 des Fahrplans.
+
+    Warum es das gibt
+    -----------------
+    Am 23.09. war klar: Die Materialdaten sind echt, und der explizite Stern
+    liegt bei ``--subsample 2`` 110x ueber seiner Schranke, bei den Rohdaten
+    noch 55x. Arm B/C/D konnte mit Euler bei **keinem** verfuegbaren dt
+    laufen. Ein kleineres ``--subsample`` ist kein Ausweg.
+
+    Der Ausweg ist, dass ``L`` bei adiabatem Rand **linear** in T ist: Die
+    Spiegel-Geisterschicht und der Reflect-Rand in (y, z) sind lineare
+    Abbildungen, der Stern auch. Also ist ``L`` eine feste ``n x n``-Matrix
+    ``A`` mit ``n = 363``, und die lineare Gleichung ``dT/dt = A T + q`` hat
+    bei ueber den Schritt konstanter Quelle die exakte Loesung::
+
+        T(t + dt)  =  e^{A dt} T(t)  +  (int_0^dt e^{A s} ds) q
+                   =  P T  +  Phi q
+
+    Das ist **unbedingt stabil** und bei konstanter Quelle ohne
+    Diskretisierungsfehler in der Zeit. Beide Matrizen kommen aus **einer**
+    Exponentialfunktion der erweiterten Matrix ``[[A, I], [0, 0]] * dt``.
+
+    ``A`` wird nicht hingeschrieben, sondern **gemessen**: ``L`` wird auf alle
+    363 Einheitsvektoren angewandt, mit genau dem Stern, den der Rest des
+    Projekts benutzt. Es gibt also keine zweite Fassung von ``L``.
+
+    Was es NICHT kann
+    -----------------
+    * **Nur adiabat.** Die Geisterschicht ist die Spiegelung (wie
+      ``model.adiabatic_ghost``). Mit dem Wandterm wird der Rand affin und,
+      bei einem V̇-Profil wie in OP15, zeitabhaengig. Dann aendern sich ``A``
+      und ein Randbeitrag zur Quelle. Das ist der naechste Schritt, nicht
+      dieser.
+    * Die Quelle gilt als konstant ueber den Schritt (``q = Qsrc_t``), wie
+      beim Euler-Schritt auch.
+
+    ``rate_matrix`` und ``quell_matrix`` sind ``(P - I)/dt`` und ``Phi/dt``,
+    die **Sekantenrate** des exakten Schritts. Damit laesst sich das
+    Physik-Residuum ohne Ausloeschung rechnen: ``(P T + Phi q - T)/dt`` in
+    float32 verloere bei ``dt_n ~ 1e-4`` drei Stellen.
+    """
+
+    def __init__(self, layout: GridLayout, fo: torch.Tensor, dt_n: float
+                 ) -> None:
+        import grid as gridmod          # hier, damit physics.py leicht bleibt
+
+        n = layout.n_points
+        nx, ny, nz = layout.shape
+        dev = fo.device
+        fo64 = fo.detach().to(torch.float64)
+        eins = torch.eye(n, dtype=torch.float64, device=dev)
+        basis = eins.reshape(n, nx, ny, nz)
+        antwort = anisotropic_laplacian(
+            gridmod.pad_all(basis, basis[:, -2]), layout, fo64)
+        a = antwort.reshape(n, n).T          # a[:, j] = L(e_j)
+
+        z = torch.zeros(2 * n, 2 * n, dtype=torch.float64, device=dev)
+        z[:n, :n] = a * dt_n
+        z[:n, n:] = eins * dt_n
+        ez = torch.linalg.matrix_exp(z)
+        p, phi = ez[:n, :n], ez[:n, n:]
+
+        self.layout = layout
+        self.dt_n = float(dt_n)
+        self.n = n
+        self.a = a                            # float64, fuer Diagnose und Tests
+        self.p = p.to(torch.float32)
+        self.phi = phi.to(torch.float32)
+        self.rate_matrix = ((p - eins) / dt_n).to(torch.float32)
+        self.quell_matrix = (phi / dt_n).to(torch.float32)
+
+    def _flach(self, feld: torch.Tensor) -> torch.Tensor:
+        return feld.reshape(feld.shape[0], self.n)
+
+    def schritt(self, tn: torch.Tensor, qsrc: torch.Tensor) -> torch.Tensor:
+        """``P T + Phi q`` -- ``(B, nx, ny, nz)`` hin und zurueck."""
+        p, phi = self.p.to(tn.dtype), self.phi.to(tn.dtype)
+        aus = self._flach(tn) @ p.T + self._flach(qsrc) @ phi.T
+        return aus.reshape(tn.shape)
+
+    def sekante(self, tn: torch.Tensor, qsrc: torch.Tensor) -> torch.Tensor:
+        """``(P T + Phi q - T) / dt`` -- die Rate, die der exakte Schritt hat.
+
+        Fuer einen Blackbox-Schritt ``T + dt*g`` ist ``g - sekante`` das
+        Physik-Residuum, das zu dt passt. Das Euler-Residuum ``g - (L T + q)``
+        tut das bei 110x ueber der Schranke nicht: ein Netz, das es erfuellt,
+        waere ein expliziter Euler-Schritt und liefe im Rollout weg.
+        """
+        r, s = self.rate_matrix.to(tn.dtype), self.quell_matrix.to(tn.dtype)
+        aus = self._flach(tn) @ r.T + self._flach(qsrc) @ s.T
+        return aus.reshape(tn.shape)
+
+    def groesster_eigenwert(self) -> float:
+        """Realteil des groessten Eigenwerts von ``A`` -- ueber null waechst
+        der Operator selbst, und dann ist es kein Integratorfehler."""
+        return float(torch.linalg.eigvals(self.a).real.max().item())

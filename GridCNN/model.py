@@ -80,6 +80,12 @@ CH_STATIC_OHNE_KOORD = CH_STATIC - CH_COORD   # 15
 CH_DRIVER = 18    # 7 config + 11 forcing, gebroadcastet
 CH_IN = CH_STATE + CH_STATIC + CH_DRIVER   # 44
 
+# Die drei Schalter vom 23.09. abends (PR #51). Der jeweils erste ist der
+# Default und rechnet bitgleich wie vorher.
+KARTEN_MODI = ("voll", "kompakt")
+TREIBER_MODI = ("karte", "film")
+INTEGRATOR_MODI = ("euler", "exp")
+
 
 # ---------------------------------------------------------------------------
 # Die statischen Karten
@@ -94,8 +100,15 @@ class StaticMaps:
 
     maps: torch.Tensor          # (17, ny, nz)
     dead: tuple = ()            # Namen der Groessen, die konstant und damit tot sind
+    namen: tuple = ()           # je Kanal, gesetzt von build_static_maps
+    kompakt: bool = False       # nur die linear unabhaengigen Kanaele (s. dort)
+    verworfen: tuple = ()       # bei kompakt: was als Bias/Linearkombination fiel
 
     def __post_init__(self) -> None:
+        if self.kompakt:
+            if self.namen and len(self.namen) != self.maps.shape[0]:
+                raise ValueError("kompakte Karten: je Kanal ein Name")
+            return
         if self.maps.shape[0] not in (CH_STATIC, CH_STATIC_OHNE_KOORD):
             raise ValueError(
                 f"StaticMaps braucht {CH_STATIC} Kanaele (oder "
@@ -108,6 +121,8 @@ class StaticMaps:
 
     @property
     def hat_koordinatenkarten(self) -> bool:
+        if self.kompakt:
+            return "y" in self.namen or "z" in self.namen
         return self.n_channels == CH_STATIC
 
     def expand(self, batch: int) -> torch.Tensor:
@@ -122,6 +137,14 @@ class StaticMaps:
         Kanal -- er kostet Parameter in der ersten Faltung und verschleiert,
         wie viel Information wirklich hineingeht.
         """
+        if self.kompakt:
+            zeile = (f"{self.n_channels} statische Karten (kompakt: "
+                     f"{', '.join(self.namen)})\n  verworfen, weil Bias oder "
+                     f"Linearkombination der uebrigen: "
+                     f"{len(self.verworfen)} Kanaele")
+            if not self.hat_koordinatenkarten:
+                zeile += "\n  ARM D: y/z-Karten GEZOGEN."
+            return zeile
         lebt = self.n_channels - 3 * len(self.dead)
         zeile = f"{self.n_channels} statische Karten, davon {lebt} mit Struktur"
         if not self.hat_koordinatenkarten:
@@ -167,7 +190,8 @@ def _zscore(a: torch.Tensor) -> torch.Tensor:
 
 def build_static_maps(layout: GridLayout, *, lam: np.ndarray, rho: np.ndarray,
                       cp: np.ndarray, device=None, dtype=torch.float32,
-                      coord_maps: bool = True) -> StaticMaps:
+                      coord_maps: bool = True,
+                      kompakt: bool = False) -> StaticMaps:
     """Baut die 17 Karten aus den Rohgroessen von ``data._grid_arrays``.
 
     ``lam`` ist ``(n_points, 3, 3)``, ``rho`` und ``cp`` sind ``(n_points,)``.
@@ -222,8 +246,12 @@ def build_static_maps(layout: GridLayout, *, lam: np.ndarray, rho: np.ndarray,
     # hergeben: region/rho/Cp sind je x-Ebene KONSTANT, und ``lam`` variiert nur
     # in zwei Zeilen am unteren y-Rand (22 von 121 Punkten). D ist damit ein
     # fairer Test und kein Strohmann -- aber ein enger.
+    namen = [f"{name}@x{i}" for name, _ in roh for i in range(nx)]
     if not coord_maps:
-        return StaticMaps(maps=stacked.contiguous(), dead=tuple(dead))
+        if kompakt:
+            return _kompakt(stacked, namen, dead)
+        return StaticMaps(maps=stacked.contiguous(), dead=tuple(dead),
+                          namen=tuple(namen))
 
     yv = torch.as_tensor(layout.yu, dtype=dtype, device=device)
     zv = torch.as_tensor(layout.zu, dtype=dtype, device=device)
@@ -231,7 +259,62 @@ def build_static_maps(layout: GridLayout, *, lam: np.ndarray, rho: np.ndarray,
     z_map = _zscore(zv).reshape(1, nz).expand(ny, nz)
 
     maps = torch.cat([stacked, y_map.unsqueeze(0), z_map.unsqueeze(0)], dim=0)
-    return StaticMaps(maps=maps.contiguous(), dead=tuple(dead))
+    if kompakt:
+        return _kompakt(maps, namen + ["y", "z"], dead)
+    return StaticMaps(maps=maps.contiguous(), dead=tuple(dead),
+                      namen=tuple(namen + ["y", "z"]))
+
+
+KOMPAKT_TOL = 1e-6
+
+
+def _kompakt(maps: torch.Tensor, namen: list, dead: list) -> StaticMaps:
+    """Nur die Kanaele behalten, die der ersten Faltung etwas Neues sagen.
+
+    Warum das **keine** Modellierungsentscheidung ist
+    ------------------------------------------------
+    Die erste Schicht ist eine Faltung, also **linear** in ihren Eingaengen,
+    und Reflect-Padding ist linear und erhaelt Konstanten. Ist ein Kanal
+    punktweise ``C = a_1 C_1 + ... + b`` aus anderen Kanaelen, dann ist
+    ``conv(C; w) = sum a_i conv(C_i; w) + b * sum(w)``: Sein Beitrag laesst
+    sich in die Kerne der uebrigen und in den Bias schieben. Das Netz kann
+    mit und ohne ihn **exakt dieselben Funktionen** darstellen. Er kostet nur
+    ``width * 9`` Gewichte, die nichts Neues koennen.
+
+    Genau das trifft hier fast alle Karten: Am 22.09. gemessen, ist
+    ``rho*Cp`` je x-Ebene konstant (reiner Bias), und ``lam`` variiert nur in
+    zwei Zeilen am unteren y-Rand. Die Karten sind ausserdem in jedem OP
+    gleich, tragen also nichts ueber den Betriebspunkt.
+
+    Gewaehlt wird gierig in der Reihenfolge **y, z, dann das Material**, damit
+    die lesbaren Koordinatenkarten stehen bleiben. Behalten wird, wessen Rest
+    nach Projektion auf ``span{1, bisher Behaltene}`` mehr als ``KOMPAKT_TOL``
+    der eigenen Norm traegt. Der Test ``test_kompakte_karten_verlieren_keine
+    _funktion`` rechnet die Gewichte eines vollen Netzes auf ein kompaktes um
+    und prueft, dass beide dasselbe ausgeben.
+    """
+    ny, nz = maps.shape[1:]
+    flach = maps.reshape(maps.shape[0], -1).to(torch.float64)
+    eins = torch.ones(ny * nz, dtype=torch.float64, device=maps.device)
+    basis = [eins / eins.norm()]
+    reihenfolge = [i for i, n in enumerate(namen) if n in ("y", "z")]
+    reihenfolge += [i for i, n in enumerate(namen) if n not in ("y", "z")]
+    behalten = []
+    for i in reihenfolge:
+        v = flach[i]
+        norm = float(v.norm())
+        if norm <= 0.0:
+            continue
+        b = torch.stack(basis)
+        rest = v - b.T @ (b @ v)
+        if float(rest.norm()) > KOMPAKT_TOL * norm:
+            behalten.append(i)
+            basis.append(rest / rest.norm())
+    behalten.sort()                     # Reihenfolge wie im vollen Stapel
+    verworfen = [namen[i] for i in range(len(namen)) if i not in behalten]
+    return StaticMaps(maps=maps[behalten].contiguous(), dead=tuple(dead),
+                      namen=tuple(namen[i] for i in behalten), kompakt=True,
+                      verworfen=tuple(verworfen))
 
 
 # ---------------------------------------------------------------------------
@@ -323,16 +406,31 @@ class ConvCorrection(nn.Module):
     """
 
     def __init__(self, in_ch: int = CH_IN, width: int = 16, blocks: int = 3,
-                 out_ch: int = 3) -> None:
+                 out_ch: int = 3, treiber: str = "karte") -> None:
         super().__init__()
         if blocks < 1:
             raise ValueError("mindestens ein Block")
-        chans = [in_ch] + [width] * blocks
+        if treiber not in TREIBER_MODI:
+            raise ValueError(f"treiber ist einer von {TREIBER_MODI}, "
+                             f"nicht {treiber!r}")
+        self.treiber = treiber
+        self.width, self.blocks = width, blocks
+        # Bei FiLM gehen die Treiber NICHT durch die erste Faltung, sondern
+        # als Vektor in jeden Block -- die Faltung sieht nur Zustand + Karten.
+        erste = in_ch - CH_DRIVER if treiber == "film" else in_ch
+        chans = [erste] + [width] * blocks
         self.body = nn.ModuleList(
             nn.Conv2d(chans[i], chans[i + 1], kernel_size=3, padding=0)
             for i in range(blocks))
         self.act = nn.SiLU()
         self.head = nn.Conv2d(width, out_ch, kernel_size=3, padding=0)
+        self.film = None
+        if treiber == "film":
+            self.film = nn.Linear(CH_DRIVER, 2 * blocks * width)
+            # Null: am Start skaliert FiLM mit 1 und verschiebt um 0, die
+            # Treiber wirken also erst, wenn der Gradient es will.
+            nn.init.zeros_(self.film.weight)
+            nn.init.zeros_(self.film.bias)
 
         # Start exakt auf der Physik: g_theta(X) = 0 fuer jeden Eingang.
         nn.init.zeros_(self.head.weight)
@@ -344,7 +442,26 @@ class ConvCorrection(nn.Module):
         Gepadded wird vor **jeder** Faltung einzeln, nicht einmal breit am
         Anfang: ein 3x3-Kern verbraucht je Schicht einen Ring, und ein einmal
         angelegter Rand waere nach der zweiten Schicht aufgebraucht.
+
+        ``treiber="film"``: Die 18 Treiberkanaele kommen weiter gebroadcastet
+        herein (``assemble_input`` bleibt, wie es ist). Sie sind raeumlich
+        konstant, also ist ihr Wert an **einem** Pixel der ganze Vektor. Er
+        setzt je Block eine Skalierung ``1 + gamma`` und eine Verschiebung
+        ``beta`` je Kanal. Warum: Eine konstante Karte durch einen 3x3-Kern
+        ergibt nur ``(Summe der 9 Gewichte) * Wert`` -- von 9 Gewichten zaehlt
+        eins, und das nur in der ersten Schicht. 18 x 16 x 9 = 2 592 Gewichte,
+        23 % des Netzes, davon 288 wirksam.
         """
+        if self.film is not None:
+            d = x[:, -CH_DRIVER:, 0, 0]
+            x = x[:, :-CH_DRIVER]
+            gb = self.film(d).view(-1, self.blocks, 2, self.width)
+            for i, conv in enumerate(self.body):
+                h = conv(F.pad(x, (1, 1, 1, 1), mode="reflect"))
+                gamma = gb[:, i, 0, :, None, None]
+                beta = gb[:, i, 1, :, None, None]
+                x = self.act(h * (1.0 + gamma) + beta)
+            return self.head(F.pad(x, (1, 1, 1, 1), mode="reflect"))
         for conv in self.body:
             x = self.act(conv(F.pad(x, (1, 1, 1, 1), mode="reflect")))
         return self.head(F.pad(x, (1, 1, 1, 1), mode="reflect"))
@@ -369,18 +486,51 @@ class GridCNN(nn.Module):
     """
 
     def __init__(self, layout: GridLayout, *, width: int = 16, blocks: int = 3,
-                 use_physics: bool = True, n_static: int = CH_STATIC) -> None:
+                 use_physics: bool = True, n_static: int = CH_STATIC,
+                 karten: str = "voll", treiber: str = "karte",
+                 integrator: str = "euler") -> None:
         super().__init__()
-        if n_static not in (CH_STATIC, CH_STATIC_OHNE_KOORD):
+        if karten not in KARTEN_MODI:
+            raise ValueError(f"karten ist einer von {KARTEN_MODI}")
+        if integrator not in INTEGRATOR_MODI:
+            raise ValueError(f"integrator ist einer von {INTEGRATOR_MODI}")
+        if karten == "voll" and n_static not in (CH_STATIC,
+                                                 CH_STATIC_OHNE_KOORD):
             raise ValueError(
                 f"n_static ist {CH_STATIC} oder {CH_STATIC_OHNE_KOORD} "
                 f"(Ablationsarm D), nicht {n_static}")
+        if n_static is None:
+            raise ValueError(
+                "n_static fehlt: bei --karten kompakt ist die Breite erst "
+                "bekannt, wenn die Karten gebaut sind (modell_kwargs(args, "
+                "statics))")
+        if karten == "kompakt" and not 0 <= n_static <= CH_STATIC:
+            raise ValueError(f"n_static bei kompakten Karten: 0..{CH_STATIC}")
         self.layout = layout
         self.use_physics = use_physics
         self.n_static = n_static
+        self.karten, self.treiber, self.integrator = karten, treiber, integrator
         self.correction = ConvCorrection(
             in_ch=CH_STATE + n_static + CH_DRIVER,
-            width=width, blocks=blocks, out_ch=layout.shape[0])
+            width=width, blocks=blocks, out_ch=layout.shape[0],
+            treiber=treiber)
+        # Kein Parameter und kein Puffer: der Integrator haengt an fo und dt,
+        # die von aussen kommen, und gehoert nicht in den state_dict.
+        self._physik: dict = {}
+
+    def physik(self, fo_field: torch.Tensor, dt_n: float) -> phys.ExpIntegrator:
+        """Der exakte Physikschritt fuer dieses ``fo`` und dieses dt.
+
+        Einmal je (fo, dt) gebaut und gemerkt -- ``fo`` ist ueber alle OPs
+        identisch (``OPBatch.fo``), in der Praxis also einer je Lauf.
+        """
+        schluessel = (fo_field.data_ptr(), str(fo_field.device),
+                      float(dt_n))
+        integ = self._physik.get(schluessel)
+        if integ is None:
+            integ = phys.ExpIntegrator(self.layout, fo_field, dt_n)
+            self._physik[schluessel] = integ
+        return integ
 
     @property
     def n_parameters(self) -> int:
@@ -405,7 +555,15 @@ class GridCNN(nn.Module):
 
     def step(self, tn_field: torch.Tensor, x_channels: torch.Tensor, *,
              dt_n: float, **kw) -> torch.Tensor:
-        """Ein Euler-Schritt in Delta-Form: ``T + dt * f``.
+        """Ein Schritt in Delta-Form: ``T + dt * f`` -- oder, mit
+        ``integrator="exp"`` und Physik, ``exakt(T, Qsrc) + dt * g``.
+
+        ``exp`` (PR #51): Der Physikteil ``L(T) + Qsrc`` wird ueber den
+        Datenschritt exakt integriert (``physics.ExpIntegrator``, adiabat),
+        die gelernte Korrektur kommt als ein Euler-Schritt obendrauf. Bei 110x
+        ueber der CFL-Schranke ist das der einzige Weg, auf dem B/C/D
+        ueberhaupt rollen. Fuer A (ohne Physik) aendert sich der Schritt
+        nicht.
 
         Die Delta-Form ist eine **Hypothese**, keine Messung (README Sec. 4):
         ``residual_output`` ist in ``PINNmodulusTwo`` aus, weil es den Level
@@ -419,6 +577,13 @@ class GridCNN(nn.Module):
         Physikteil auf den Pegel antwortet, ist allein der Wandterm
         (``test_ein_gleichmaessiger_versatz_ist_fuer_den_laplace_unsichtbar``).
         """
+        if self.integrator == "exp" and self.use_physics:
+            # Operator-Splitting: die Physik exakt, die Korrektur als ein
+            # Euler-Schritt obendrauf. Die Geisterschicht steckt adiabat in
+            # der Matrix; ghost_hi wird hier nicht gebraucht.
+            g = self.correction(x_channels)
+            integ = self.physik(kw["fo_field"], dt_n)
+            return integ.schritt(tn_field, kw["qsrc"]) + dt_n * g
         return tn_field + dt_n * self.rate(tn_field, x_channels, **kw)
 
     def forward(self, tn_field: torch.Tensor, x_channels: torch.Tensor, *,

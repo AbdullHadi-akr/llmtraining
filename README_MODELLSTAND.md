@@ -81,6 +81,7 @@ angefasst. Quelle: Commits und Berichte auf `main`.*
 | **G4** | 22.09. | `bcb6c00` (PR #46) | **Stufe 5: truncated BPTT**, Gradient über `k` Schritte; Lags in Sekunden |
 | G4.1 | 22.09. / 23.09. | `f93bebe` (PR #47), `5e23eaf` (PR #48) | Fehlerprofil über die Trajektorie, `!! [fenster]`-Warnung, `tools/nachmessen.py` |
 | G4.2 | 23.09. | `fdb9bba` + PR #50 | Schlusstafel über alle Seeds und Frühphase als Zahl (`tafel_aus_metrics`, `fruehphase`), `[CFL]`-Zeile ohne „kleineres subsample", Test `L(T + c) = L(T)`. **Verhalten unverändert**, nur Ausgabe (138 Tests) |
+| G4.3 | 23.09. abends | PR #51 | Drei Schalter, **Defaults bitgleich**: `--integrator exp` (`L + Qsrc` exakt über den Datenschritt, unbedingt stabil; Physik-Residuum gegen die Sekante des exakten Schritts, ohne Label), `--karten kompakt` (nur linear unabhängige Karten, dieselbe Funktionsklasse), `--treiber film` (Treiber in jeden Block). Artefakte je Variante in eigenem Verzeichnis. 157 Tests. **Arm B/C/D mit `exp` ist neues Verhalten** und läuft zum ersten Mal in Lauf 18 |
 
 ### 1c · Daten (der Cache)
 
@@ -118,7 +119,9 @@ angefasst. Quelle: Commits und Berichte auf `main`.*
 | ***als Nächstes — Prio 1*** | PINN | **POC P3**: `buffer` gegen `live`, echte Daten | P2.1 gegen **P3**, Cache v3 | `--subsample 10 --delta-grid 1.0 --delta-phys 1.0 --epochs 40 --ema-decay 0.5`, 3 Seeds, `sweep.py -j 3` (+ GridCNN-Lauf 17 parallel) | **T4 + MPS**, ~1–1.5 h (geschätzt) | 🟢 / 🟡 / 🔴 nach `README_MODELL_P3_POC.md` §3 | `README_MODELL_P3_POC.md` |
 | *direkt danach* | PINN | **Zerlegung** der 6 POC- und der 15 Achse-0/1-Checkpoints | P2 / P3 (Checkpoints), Werkzeug P2.1, Cache v3 | `residual_decomposition.py … -j 4 --device cuda` | **T4 + MPS** | `[BLIND]` auf echten Daten? entscheidet über P4 | PINN-FAHRPLAN, Kopf |
 | *bei 🟢 im POC* | PINN | **Achse 5**: `--phys-stencil live`, 3 Seeds, volle Auflösung | **P3** | `--epochs 60 --ema-decay 0.5 --delta-phys 0.2`, `sweep.py -j 3`; Vergleichsarm = Achse 1, δ = 0.2 | **T4 + MPS**, ~2 h | gegen 4.868 ± 0.650 und die Nullmessung 5.248 ± 0.518 | Übergabe §4 |
-| *als Nächstes* | GridCNN | **Schritt 2: Integrator für den Physikterm** (exponentiell, adiabat; Test gegen `solve.rollout`), danach Wandterm | wird G5 (neues Verhalten für B/C/D) | — | ohne GPU (Code) | — | GridCNN-FAHRPLAN, Kopf |
+| *als Nächstes* | GridCNN | **over-/underfit**: `nachmessen.py` auf Lauf 17 mit den Trainings-OPs | G4.1-Gewichte, Werkzeug G4.3 | `--val-ops` = 11 Trainings-OPs | **T4**, Minuten | — | GridCNN-FAHRPLAN, Kopf |
+| *dann* | GridCNN | **Lauf 18**: Arm B, `--integrator exp` / **Lauf 19**: A `--karten kompakt --treiber film` | G4.3 | Protokoll wie Lauf 17 (k 20→80) | **T4 + MPS**, je ~1 h 45 min | — | GridCNN-FAHRPLAN, Kopf |
+| *danach* | GridCNN | Wandterm im exakten Integrator, dann **virtuelle OPs** (Physik-Residuum ohne Label in den Envelope-Lücken) | wird G5 | — | Code | — | GridCNN-FAHRPLAN, „Virtuelle OPs" |
 
 ---
 
