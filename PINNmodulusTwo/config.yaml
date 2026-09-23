@@ -138,6 +138,13 @@ time_deriv: bdf2           # bdf1 | bdf2 | autograd
 # axis for a sweep. In raw mode it also spaces the history channels and changes
 # the model.
 delta_phys: 1.0
+# Where the BDF lags of L_phys come from (O21, FAHRPLAN 11.10). "buffer" reads
+# them from the rollout frozen at the start of the epoch -- every run up to
+# 23.09.2026. "live" evaluates them with the current network, so the jump
+# between live network and frozen buffer cancels. live needs delta_phys to be a
+# whole number of data steps. Stays "buffer" until the decomposition on the real
+# checkpoints says [STALE]; switching it is model version P3.
+phys_stencil: buffer
 use_static: true
 use_forcing: true
 
