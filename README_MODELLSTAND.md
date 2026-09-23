@@ -80,7 +80,7 @@ angefasst. Quelle: Commits und Berichte auf `main`.*
 | **G3** | 22.09. | `f295898` (PR #44) | **Ladepfad angeschlossen** — `train.py` trainiert auf dem Cache |
 | **G4** | 22.09. | `bcb6c00` (PR #46) | **Stufe 5: truncated BPTT**, Gradient über `k` Schritte; Lags in Sekunden |
 | G4.1 | 22.09. / 23.09. | `f93bebe` (PR #47), `5e23eaf` (PR #48) | Fehlerprofil über die Trajektorie, `!! [fenster]`-Warnung, `tools/nachmessen.py` |
-| G4.2 | 23.09. | `fdb9bba` + PR #PRNR | Schlusstafel über alle Seeds und Frühphase als Zahl (`tafel_aus_metrics`, `fruehphase`), `[CFL]`-Zeile ohne „kleineres subsample", Test `L(T + c) = L(T)`. **Verhalten unverändert**, nur Ausgabe (138 Tests) |
+| G4.2 | 23.09. | `fdb9bba` + PR #50 | Schlusstafel über alle Seeds und Frühphase als Zahl (`tafel_aus_metrics`, `fruehphase`), `[CFL]`-Zeile ohne „kleineres subsample", Test `L(T + c) = L(T)`. **Verhalten unverändert**, nur Ausgabe (138 Tests) |
 
 ### 1c · Daten (der Cache)
 
