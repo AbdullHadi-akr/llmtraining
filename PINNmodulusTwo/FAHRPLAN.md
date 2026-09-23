@@ -31,14 +31,18 @@
 >
 > ### Schritt 1 — die 15 Checkpoints zerlegen (T4 + MPS, keine Trainingszeit)
 >
-> **Vor** dem Cache-Umbau aus GridCNN-Stufe 2: das Werkzeug baut die Normierung
-> aus dem Cache nach und verweigert, wenn sie nicht mehr zum Checkpoint passt.
+> Der Cache ist seit dem 22.09. auf **Schema v3** neu gebaut (GridCNN-Stufe 2,
+> `8d76084`). v3 fügt den Wandpfad hinzu; `T` und `q_source` werden gleich
+> gebaut (am Code gelesen). Das Werkzeug rechnet die Normierung der Checkpoints
+> trotzdem aus dem Cache nach und **verweigert**, wenn sie nicht mehr passt —
+> dann ist das selbst ein Befund und gehört hierher.
 >
 > ```bash
 > cd ~/llmtraining && git checkout main && git pull
 > source modulus_env/bin/activate          # python, nicht python3
-> nvidia-cuda-mps-control -d               # nach JEDEM Neustart; pruefen: pgrep -x nvidia-cuda-mps
-> pgrep -af "sweep.py|PINNmodulusTwo/train.py" || echo frei
+> systemctl is-active nvidia-mps           # "active" -- seit 22.09. als Unit, README_GPU_SERVER §6.4
+> pgrep -x nvidia-cuda-mps || nvidia-cuda-mps-control -d   # Notnagel ohne Unit
+> pgrep -af "sweep.py|train.py" || echo frei
 > nohup python PINNmodulusTwo/tools/residual_decomposition.py \
 >     artifacts/achse0/*/model.pt artifacts/achse1/*/model.pt \
 >     -j 4 --device cuda > zerlegung.log 2>&1 &
