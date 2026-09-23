@@ -775,25 +775,41 @@ def lade_datensatz(args, device):
     # RICHTGROESSE: der Kreuzterm steckt nicht drin, und das Netz ist nicht
     # der blanke explizite Stern. Deshalb eine Warnung und kein Abbruch.
     dt_max = phys.cfl_limit(layout, train[0].fo)
-    dt_max_s = dt_max * float(bundle.T_span_ref)
-    dt_s = train[0].dtn * float(bundle.T_span_ref)
-    if train[0].dtn > dt_max:
-        print(f"!! [CFL] dt_n={train[0].dtn:.6g} ({dt_s:.4g} s) liegt "
-              f"{train[0].dtn / dt_max:.1f}x UEBER der expliziten Schranke "
-              f"dt_max_n={dt_max:.6g} ({dt_max_s:.4g} s).\n"
-              f"   Laeuft der Rollout weg, ist DAS die erste Erklaerung -- "
-              f"nicht das Netz. Kleineres --subsample, oder pruefen, ob die "
-              f"Materialdaten echt sind: ein synthetisches "
-              f"material_properties/ macht das Problem viel steifer, als es "
-              f"ist. Arm A (--no-physics) ist davon nicht betroffen.",
-              file=sys.stderr)
-    else:
-        print(f"[CFL] dt_n={train[0].dtn:.6g} ({dt_s:.4g} s) unter der "
-              f"Schranke dt_max_n={dt_max:.6g} ({dt_max_s:.4g} s).")
+    print(cfl_text(train[0].dtn, dt_max, float(bundle.T_span_ref),
+                   args.subsample),
+          file=sys.stderr if train[0].dtn > dt_max else sys.stdout)
     if statics.dead:
         print(f"[karten] tot (konstant, auf 0 gezwungen): "
               f"{', '.join(statics.dead)}")
     return bundle, train, val, layout, statics
+
+
+def cfl_text(dtn: float, dt_max: float, T_span_ref: float,
+             subsample: int) -> str:
+    """Die CFL-Zeile -- mit dem Schluss, den die Zahl erlaubt.
+
+    Bis zum 23.09. empfahl sie "kleineres --subsample, oder pruefen, ob die
+    Materialdaten echt sind". Beides ist inzwischen beantwortet: die
+    Materialdaten sind echt (``constants.yaml`` aus dem PDF "Material
+    Properties Gridpoints", Schaefer, 18.06.2026), und selbst die
+    Rohabtastung liegt um ein Vielfaches ueber der Schranke. Ein kleineres
+    ``--subsample`` kann das Problem also gar nicht loesen -- die Zeile sagt
+    das jetzt mit der Zahl dazu, statt einen Weg zu empfehlen, der nicht
+    hinfuehrt.
+    """
+    dt_s, dt_max_s = dtn * T_span_ref, dt_max * T_span_ref
+    if dtn <= dt_max:
+        return (f"[CFL] dt_n={dtn:.6g} ({dt_s:.4g} s) unter der Schranke "
+                f"dt_max_n={dt_max:.6g} ({dt_max_s:.4g} s).")
+    roh = dtn / max(1, int(subsample)) / dt_max
+    return (f"!! [CFL] dt_n={dtn:.6g} ({dt_s:.4g} s) liegt {dtn / dt_max:.1f}x "
+            f"UEBER der expliziten Schranke dt_max_n={dt_max:.6g} "
+            f"({dt_max_s:.4g} s).\n"
+            f"   Auch --subsample 1 laege noch {roh:.1f}x darueber: ein "
+            f"kleineres --subsample loest das NICHT, und die Materialdaten "
+            f"sind echt (23.09.). Fuer B/C/D braucht der Physikterm einen "
+            f"eigenen Integrator (Unterschritte oder implizit). Arm A "
+            f"(--no-physics) ist davon nicht betroffen.")
 
 
 @torch.no_grad()

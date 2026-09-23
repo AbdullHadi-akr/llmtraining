@@ -8,6 +8,14 @@
 > nicht in Sekunden. Es schrumpfte von 4→16 s auf 0.8→3.2 s und erreichte
 > `lag2` nie.
 
+> **Nachtrag, 23.09. mittags:** Abschnitt 4 und 5 sind beantwortet.
+> Nachgemessen ist O13 hier ein **Pegelfehler** (anfangs zu warm, am Ende zu
+> kalt, drift 1.61x / 1.76x). Lauf 17 holt OP09 auf 0.79x zurück, aber die
+> Streuung bleibt, also ist er ebenfalls kein Ergebnis. Die Zeile „Arm B ist die
+> Behandlung" in der Tabelle von Abschnitt 5 ist **überholt**: Der
+> Diffusionskern sieht keinen Pegelfehler. →
+> [`TRAININGS_BERICHT_2026-09-23_KonfigA_k_sekunden.md`](TRAININGS_BERICHT_2026-09-23_KonfigA_k_sekunden.md)
+
 **Lauf:** [`GridCNN/laeufe/16_konfigA_voll.txt`](GridCNN/laeufe/16_konfigA_voll.txt) ·
 **Parameter:** [`16_konfigA_parameter.md`](GridCNN/laeufe/16_konfigA_parameter.md) ·
 **Vorgänger:** [`TRAININGS_BERICHT_2026-09-22_KonfigA_POC.md`](TRAININGS_BERICHT_2026-09-22_KonfigA_POC.md)

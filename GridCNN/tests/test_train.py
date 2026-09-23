@@ -1188,3 +1188,15 @@ def test_nachmessen_laeuft_von_vorn_bis_hinten(tmp_path, monkeypatch, capsys,
                                 clamp=erg["clamp"], T_sigma=9.602)
     assert erg["median_model_pt"]["OP99"]["mae"] == pytest.approx(
         erwartet["OP99"]["mae"], rel=1e-6)
+
+
+def test_die_cfl_zeile_empfiehlt_kein_kleineres_subsample_mehr():
+    """Lauf 16/17: 110x ueber der Schranke bei subsample 2 -- und selbst die
+    Rohabtastung (subsample 1) laege 55x darueber. Die Materialdaten sind
+    echt. Ein kleineres --subsample ist also kein Weg, und die Zeile darf ihn
+    nicht mehr empfehlen."""
+    text = T.cfl_text(0.000124595, 1.12998e-06, 1605.2, 2)
+    assert "110.3x" in text and "55.1x" in text
+    assert "loest das NICHT" in text and "Integrator" in text
+    unter = T.cfl_text(1e-7, 1e-6, 1605.2, 2)
+    assert unter.startswith("[CFL]") and "!!" not in unter
