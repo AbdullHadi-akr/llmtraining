@@ -1,18 +1,63 @@
 # Fahrplan — OP01–OP16 trainiert, OP19 als Messvergleich
 
+> ## 🆕 Neues Modell P3 — Priorität 1: sein POC auf der T4 (23.09.)
+>
+> **Beschreibung, vorher/nachher, Kommando, Lesart, was danach geschrieben wird:
+> [`README_MODELL_P3_POC.md`](README_MODELL_P3_POC.md).** Hier nur das Wichtigste.
+>
+> **P3 = P2.1 mit `--phys-stencil live`.** Das MLP ist **dasselbe** (4 × 128,
+> lernbares Swish, hybride Historie). Anders ist nur, woher der Physik-Term
+> `T(t−δ)` und `T(t−2δ)` seiner Zeitableitung nimmt: bisher aus dem zu
+> Epochenbeginn **eingefrorenen** Rollout, in P3 aus dem **lebenden** Netz. Damit
+> fällt der Sprung weg, der laut §11.10 ≥ 91 % von `L_phys` in Achse 1 ausmacht
+> (O21). P3 existiert als Schalter (PR #49), ist **nicht** Default und ist auf
+> echten Daten **noch nie gelaufen**.
+>
+> | | P2 (alle Läufe bis 23.09.) | **P3** |
+> |---|---|---|
+> | MLP, Historie, Datenterm | — | unverändert |
+> | `T(t−δ)`, `T(t−2δ)` im Physik-Term | eingefrorener Rollout | **lebendes Netz** |
+> | synthetisch, POC-Kommando, 2 Seeds | val OP06 6.585 ± 0.179 °C | **3.330 ± 0.264 °C** — *Mechanismus, kein Ergebnis* |
+> | echte Daten | Achse 1: 4.868 ± 0.650 (δ = 0.2) | **offen — der POC** |
+>
+> **Der POC:** `buffer` gegen `live`, 3 Seeds, dt = 1 s, 40 Epochen, sonst wie
+> Achse 1 — **6 Läufe, `-j 3` mit MPS, geschätzt ~1–1.5 h**. `-j 3` statt `-j 4`
+> kostet nichts (6 Läufe sind so oder so zwei Wellen) und lässt den vierten Kern
+> für GridCNN-Lauf 17 frei, der **gleichzeitig** laufen kann.
+>
+> ```bash
+> cd ~/llmtraining && git checkout main && git pull
+> source modulus_env/bin/activate                          # python, nicht python3
+> systemctl is-active nvidia-mps                           # "active"; sonst README_GPU_SERVER §6.4
+> pgrep -x nvidia-cuda-mps || nvidia-cuda-mps-control -d   # Notnagel ohne Unit
+> pgrep -af "sweep.py|train.py|residual_decomposition" || echo "Karte frei"
+> nohup python PINNmodulusTwo/sweep.py --seeds 0 1 2 \
+>     --vary phys-stencil buffer live -j 3 \
+>     --out artifacts/poc_p3 --csv artifacts/poc_p3.csv \
+>     -- --subsample 10 --delta-grid 1.0 --delta-phys 1.0 \
+>        --epochs 40 --ema-decay 0.5 --device cuda > poc_p3.log 2>&1 &
+> ```
+>
+> **Urteil:** `L_phys` von `live` ≥ 10× kleiner **und** `live` vorn um ≥ ~1 °C
+> über der Seed-Streuung → 🟢 Achse 5 (P3 auf voller Auflösung).
+> `[NOT SEPARATED]` → 🟡 P3 nicht Default, weiter mit dem Kasten darunter.
+> `buffer` vorn oder Rollout läuft weg → 🔴 P3 verworfen. Danach
+> `TRAININGS_BERICHT_<datum>_PINN_P3_POC.md`, Zeilen in `README_MODELLSTAND.md`,
+> Stand-Tabelle hier.
+
 > **Modellstand und alle Experimente, chronologisch:**
 > [`README_MODELLSTAND.md`](../README_MODELLSTAND.md) — welche Modellversion
-> (P1, P2, P2.1) es gibt, was sich an ihr geändert hat, und welcher Lauf auf
-> welcher lief. **Aktuell: P2.1 seit 23.09.** — Verhalten bitgleich zu P2, neu
-> ist das Messwerkzeug, gesperrt ist `--time-deriv autograd` (O20).
+> (P1, P2, P2.1, P3) es gibt, was sich an ihr geändert hat, und welcher Lauf auf
+> welcher lief. **Im Code seit 23.09.: P2.1** (Default = P2 bitgleich); **P3**
+> ist der Schalter, den der POC prüft.
 
-> ## ▶ Das Nächste (23.09.): erst messen — O18 ist ausgesetzt
+> ## ▶ Nach dem POC (23.09.): die Checkpoints zerlegen — O18 ist ausgesetzt
 >
 > **Vorweg, damit nichts falsch verstanden wird: das Modell ist seit dem 23.09.
 > nicht besser.** P2.1 rechnet mit den Defaults **bitgleich** wie P2 (Test).
 > Besser geworden ist die **Diagnose**: der Plan „O18 einbauen" hätte an der
-> falschen Stelle repariert. Weiter geht es **mit diesem Modell** (MLP
-> unverändert) — erst messen, dann die passende Reparatur als P3 einschalten.
+> falschen Stelle repariert. Weiter geht es **mit diesem MLP** — P3 wird erst
+> Default, wenn POC und Achse 5 es tragen.
 >
 > **Die Achse-1-Signatur `L_phys ∝ 1/δ²` kann O18 gar nicht erzeugen.**
 > `heat_residual` rechnet `(3T − 4T₁ + T₂)/(2δ) − aniso − Qsrc`. Ein räumlicher
@@ -29,7 +74,10 @@
 > Krümmung. Dann wirkt **keine** Änderung *im* Leitungsterm — weder O18 noch ein
 > Robin-Term für O16.
 >
-> ### Schritt 1 — die 15 Checkpoints zerlegen (T4 + MPS, keine Trainingszeit)
+> ### Schritt 2 — die Checkpoints zerlegen (T4 + MPS, keine Trainingszeit)
+>
+> Die 6 aus dem POC (`artifacts/poc_p3/*/model.pt`, Minuten) und die 15 aus
+> Achse 0/1. Die POC-Checkpoints sagen, ob `[BLIND]` auch auf echten Daten gilt.
 >
 > Der Cache ist seit dem 22.09. auf **Schema v3** neu gebaut (GridCNN-Stufe 2,
 > `8d76084`). v3 fügt den Wandpfad hinzu; `T` und `q_source` werden gleich
@@ -44,7 +92,7 @@
 > pgrep -x nvidia-cuda-mps || nvidia-cuda-mps-control -d   # Notnagel ohne Unit
 > pgrep -af "sweep.py|train.py" || echo frei
 > nohup python PINNmodulusTwo/tools/residual_decomposition.py \
->     artifacts/achse0/*/model.pt artifacts/achse1/*/model.pt \
+>     artifacts/poc_p3/*/model.pt artifacts/achse0/*/model.pt artifacts/achse1/*/model.pt \
 >     -j 4 --device cuda > zerlegung.log 2>&1 &
 > tail -f zerlegung.log                    # am Ende: eine Tabelle, eine Zeile je Checkpoint
 > ```
@@ -52,20 +100,23 @@
 > Die Pfade sind die `--out`-Ordner der beiden Sweeps (§11.8, §11.9); liegen sie
 > woanders, `ls artifacts/*/*/model.pt`. Jeder Checkpoint bekommt
 > `residual_decomposition.txt` und `.json` daneben. Laufzeit **nicht gemessen**;
-> Schätzung aus 7.4 s Rollout je OP auf der T4: ~10 min je Checkpoint seriell,
-> also rund 40 min für alle 15 bei `-j 4`.
+> Schätzung aus 7.4 s Rollout je OP auf der T4: ~10 min je Checkpoint seriell
+> bei dt 0.2 s, also rund 40 min für die 15 aus Achse 0/1 bei `-j 4`; die
+> POC-Checkpoints (dt 1 s) gehen schneller. ⚠ Auch `live`-Checkpoints zeigen
+> `[STALE]` — das Werkzeug misst, was der alte Stencil loggen würde.
 >
-> ### Schritt 2 — die Tabelle entscheidet, die MLP-Struktur bleibt
+> ### Schritt 3 — die Tabelle entscheidet, die MLP-Struktur bleibt
 >
 > | Befund auf den echten Checkpoints | Folge |
 > |---|---|
 > | **`[BLIND]`** (autograd sieht < 10 % der Krümmung) | Der Physik-Term braucht Ortsableitungen, die das Feld sehen: das **MLP unverändert** an allen 363 Punkten des gezogenen Zeitpunkts auswerten und die Ableitungen **per Differenzenstern auf dem Gitter** bilden — derselbe Operator wie `GridCNN/physics.py`. Dann werden O16 und O18 zu wohldefinierten Rand- und Grenzflächentermen dieses Operators (GridCNN R4), und Stufe 6 vergleicht zwei Architekturen statt zwei Physik-Formulierungen. Als Flag, Default aus, gemessen gegen die Nullmessung |
-> | **`[STALE]`** (Sprung ≥ 50 % des geloggten `L_phys`) | **Schon gebaut (P2.1): `--phys-stencil live`.** `T₁`, `T₂` kommen dann aus dem **lebenden** Netz (Historien aus dem eingefrorenen Puffer) statt aus dem Puffer; ein gemeinsamer Versatz hebt sich auf (3 − 4 + 1 = 0). Zwei Vorwärtsläufe mehr, keine weitere Hesse-Matrix. Default `buffer`. Als Achse gegen die Nullmessung: `sweep.py --vary phys-stencil buffer live` (Kommando in der Übergabe) |
+> | **`[STALE]`** (Sprung ≥ 50 % des geloggten `L_phys`) | **Schon gebaut und im POC:** P3 = `--phys-stencil live`. `T₁`, `T₂` kommen dann aus dem **lebenden** Netz (Historien aus dem eingefrorenen Puffer); ein gemeinsamer Versatz hebt sich auf (3 − 4 + 1 = 0). Zwei Vorwärtsläufe mehr, keine weitere Hesse-Matrix. Bei 🟢 im POC: Achse 5 auf voller Auflösung ([`README_MODELL_P3_POC.md`](README_MODELL_P3_POC.md) §4) |
 > | **`[JITTER]`** (Rollout rau von Schritt zu Schritt) | ein Rollout-Problem, kein Gleichungsproblem — gehört zu O17 und Achse 4 |
 > | keins davon | Achse 1 ist auf diesen Gewichten nicht reproduziert; dann ist O18 wieder offen, mit `A` und der Aufteilung je x-Ebene als Ausgangspunkt |
 >
-> Jede dieser Änderungen ist eine neue Modellversion (**P3**) und bekommt vor
-> dem ersten Lauf eine Zeile in [`README_MODELLSTAND.md`](../README_MODELLSTAND.md).
+> Jede dieser Änderungen ist eine neue Modellversion (`live` ist **P3**, der
+> Differenzenstern wäre **P4**) und bekommt vor dem ersten Lauf eine Zeile in
+> [`README_MODELLSTAND.md`](../README_MODELLSTAND.md).
 > Die Latte bleibt **~1 °C** gegen die Nullmessung **5.248 ± 0.518**, 3 Seeds,
 > 60 Epochen, `sweep.py -j 4` mit MPS (Kasten unten, unverändert gültig).
 
@@ -762,7 +813,7 @@ Seeds → keine Rangfolge · **kein Befund aus der letzten Epoche** (neu 02.09.,
 | **O17** | **NEU 10.09.: der freilaufende Rollout hat einen OP-unabhängigen Fixpunkt** | **offen — Achse 4, läuft parallel.** `peak_pred` bei 45–50 C, egal welcher Betriebspunkt. Braucht `evaluate.py` und keine GPU-Stunden. §11.8 ⚠ *Nicht verwechseln:* der GridCNN-Fahrplan nennt die unvollständige Quelle ebenfalls „O17" (die GridCNN-Dokumente bleiben unangetastet) — im PINN-Index ist das **O19**. |
 | **O19** | **NEU 23.09. (belegt 22.09., GridCNN Stufe 1): die Modellquelle ist unvollständig** | **offen.** `tot/jr1 = 2.99 … 3.44` bei `jr2/jr1 = 1.000` — ⅓ bis 40 % der Erzeugung liegt außerhalb der Wickel, `q_dot` deckt nur JR1. `total_w` liegt **schon** im Cache (`q_source[:, 2]`; `data.py:421` liest nur Spalte 0) — messbar ohne Rebuild. GridCNN-FAHRPLAN 1d |
 | **O20** | **NEU 23.09.: `--time-deriv autograd` trainiert ein zweites Netz** | ✅ **gesperrt 23.09.** `mlp_with_time` wird nur im Physik-Term ausgewertet, der Rollout benutzt `mlp`. `train.py` verweigert die Option jetzt, bevor Daten gelesen werden. Freigabe erst, wenn die Zeit Eingang **des einen** MLP ist |
-| **O21** | **NEU 23.09.: der BDF-Zähler trägt einen δ-unabhängigen Sprung** | **offen — Schritt 1 im Kopf-Kasten.** (a) lebendes Netz gegen eingefrorenen Puffer, (b) rauer Rollout. Erklärt ≥ 91 % von `L_phys` in Achse 1. Synthetisch nachgestellt, echt noch nicht gemessen. Reparatur für (a) gebaut: `--phys-stencil live`, Default aus. §11.10 |
+| **O21** | **NEU 23.09.: der BDF-Zähler trägt einen δ-unabhängigen Sprung** | **offen — Schritt 1 im Kopf-Kasten.** (a) lebendes Netz gegen eingefrorenen Puffer, (b) rauer Rollout. Erklärt ≥ 91 % von `L_phys` in Achse 1. Synthetisch nachgestellt, echt noch nicht gemessen. Reparatur für (a) gebaut: `--phys-stencil live` = Modell **P3**, Default aus, **POC ist Priorität 1** (`README_MODELL_P3_POC.md`). §11.10 |
 | **O22** | **NEU 23.09.: der autograd-Laplace sieht den Anker nicht** | **offen — Schritt 1 im Kopf-Kasten.** Die Ortsstruktur kommt über den Historien-Anker, den autograd als Konstante behandelt. Synthetisch sah autograd 0.01 … 9 % der Krümmung. Betrifft auch `L_bc` und jeden Robin-Term (O16). §11.10 |
 
 Die offenen im Detail, nach Dringlichkeit:
@@ -1358,6 +1409,7 @@ Wird beim Abhaken ausgefüllt. Leer = noch nicht gemessen.
 | **Z** | **synthetisch nachgestellt** (P2-Training, P2.1-Werkzeug, CPU) | geloggtes `L_phys` **5.2× / 25.8×** bei δ = 0.4 / 0.2 (echt 5.5× / 22×). `[STALE]` 2/3, `[JITTER]` 3/3, **`[BLIND]` 3/3** — autograd sah **0.01 … 9 %** der Krümmung. Synthetisch: Mechanismus, keine Ergebnisse | **23.09.** |
 | **Z** | **`--time-deriv autograd`** | trainierte ein **zweites** MLP, das der Rollout nie benutzt. **Gesperrt** (O20) | **23.09.** |
 | **Z** | **`--phys-stencil live`, synthetisch** | `L_phys` **32 … 2 400× kleiner** als mit `buffer`, keine δ-Skalierung zwischen 1.0 und 0.4; val OP06 2.4 / 2.1 / 2.9 gegen 10.4 / 7.6 / 6.3 °C — **1 Seed, synthetisch, kein Ergebnis**. `[BLIND]` unverändert | **23.09.** |
+| **Z** | **POC-Kommando P3, synthetisch** (dt 1 s, 2 Seeds, 12 Epochen, `sweep.py -j 4`, CPU) | val OP06 **3.330 ± 0.264** (`live`) gegen **6.585 ± 0.179 °C** (`buffer`); `L_phys` ~400 gegen 1.2e4 … 3.0e4. Sweep, Checkpoints, Zerlegung laufen durch. **Mechanismus, kein Ergebnis** — der echte POC steht aus | **23.09.** |
 
 Alles läuft aus dem Repo-Wurzelverzeichnis:
 
@@ -2954,8 +3006,11 @@ Nachspielen einer bestimmten Epoche.
 
 #### 6. Was daraus folgt
 
-1. **Messen, bevor gebaut wird:** Zerlegung der 15 Checkpoints auf der T4 mit
-   MPS und `-j 4` (Kopf-Kasten, Schritt 1). Kostet keine Trainingszeit.
+1. **Erst der POC für P3, dann die Zerlegung** (Kopf-Kästen): `buffer` gegen
+   `live` auf echten Daten, 3 Seeds, dt 1 s, ~1–1.5 h mit `-j 4` und MPS
+   ([`README_MODELL_P3_POC.md`](README_MODELL_P3_POC.md)); danach die POC- und
+   die 15 Achse-0/1-Checkpoints zerlegen. Die Zerlegung kostet keine
+   Trainingszeit.
 2. **Die MLP-Struktur bleibt.** Beide Reparaturen im Kopf-Kasten ändern, **wo**
    der Physik-Term das MLP auswertet — nicht das MLP. Die für `[STALE]` ist seit
    23.09. gebaut: `--phys-stencil live` (Default `buffer`, also nichts

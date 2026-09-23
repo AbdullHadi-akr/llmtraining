@@ -58,12 +58,13 @@ und `UEBERGABE_*.md` im Wurzelverzeichnis
 | P2 | 14.09. | `496a1da` | Startbanner meldete δ = 1.0 s hartkodiert | nur Log | Test im Commit |
 | P2 | 22.09. | `c795912` | `data._assert_shared_geometry` prüft, dass alle OPs dieselbe Punktreihenfolge haben | unverändert bei gültigem Cache | Test in beide Richtungen |
 | **P2.1** | **23.09.** | PR #49 | **(1)** `heat_residual(..., return_parts=True)` gibt die Terme des Residuums mit heraus. **(2)** Schalter **`--phys-stencil {buffer,live}`** (`config.yaml: phys_stencil`), Default **`buffer`** = bisheriges Verhalten; `live` wertet die BDF-Lags mit dem lebenden Netz aus (O21). Steht im Checkpoint unter `run.phys_stencil`. **(3)** `train.py` **verweigert** `--time-deriv autograd` (O20). **(4)** Werkzeug `tools/residual_decomposition.py` | **unverändert** mit den Defaults — also für jeden bisherigen Lauf | `test_return_parts_leaves_the_default_call_bit_for_bit_unchanged`, `test_live_stencil_equals_the_buffer_stencil_on_a_fresh_rollout`, `test_train_refuses_the_autograd_time_derivative_before_reading_data` |
-| *P3* | *nächste* | — | *P2.1 mit `--phys-stencil live`* (Achse 5) — **oder** Ortsableitungen per Differenzenstern (`[BLIND]`, Übergabe §4 Schritt 3), je nachdem, was die Zerlegung sagt | geändert | — |
+| **P3** | *im POC* | PR #49 (Schalter) | **P2.1 mit `--phys-stencil live`**: `T(t−δ)`, `T(t−2δ)` im Physik-Term aus dem lebenden Netz statt aus dem eingefrorenen Rollout. MLP unverändert. **Beschreibung und POC: [`PINNmodulusTwo/README_MODELL_P3_POC.md`](PINNmodulusTwo/README_MODELL_P3_POC.md)** | **geändert** | `test_live_stencil_cancels_the_drift_the_buffer_stencil_amplifies` |
+| *P4* | *falls `[BLIND]`* | — | Ortsableitungen per Differenzenstern auf dem Gitter (Übergabe §4 Schritt 4); MLP unverändert | geändert | — |
 
 > **Die MLP-Struktur ist seit P2 unverändert** — `ModulusMLP` (4 × 128,
 > lernbares Swish je Schicht, Weight-Norm), hybride Historie `[T(t−0.2 s),
-> Rate 5 s, Rate 20 s]`, `residual_output: false`. Sie bleibt es mit P2.1 und
-> mit beiden P3-Kandidaten.
+> Rate 5 s, Rate 20 s]`, `residual_output: false`. Sie bleibt es mit P2.1, P3
+> und P4.
 
 ### 1b · GridCNN (Faltungsstapel in Δ-Form auf dem 3 × 11 × 11-Gitter)
 
@@ -109,9 +110,11 @@ angefasst. Quelle: Commits und Berichte auf `main`.*
 | 22.09. | GridCNN | Lauf 15, Konfig A POC | G4, Cache v3 | `--subsample 10` (dt 1 s), `--tbptt-start 4 --tbptt 16`, 40 Epochen | **T4** | **6.571 ± 0.383 / 5.813 ± 0.867 °C**, Güte 0.61× / 0.75× — erstmals lesbar | `TRAININGS_BERICHT_2026-09-22_KonfigA_POC.md` |
 | 23.09. | GridCNN | Lauf 16, Konfig A voll | G4 (Code vor PR #47) | `--subsample 2`, `k` 4→16 **Schritte** (= 0.8→3.2 s) | **T4** | 6.64 ± 1.52 / 8.60 ± 1.76 °C, 0.62× / 1.11× — **kein Ergebnis**; `k < lag2` | `TRAININGS_BERICHT_2026-09-23_KonfigA_voll.md` |
 | **23.09.** | PINN | **Residuenzerlegung, synthetisch** | P2-Training, Werkzeug P2.1 | synthetischer Cache (400 s, OP01–03 Training, OP06 val), `--epochs 15 --inner-steps 50 --ema-decay 0.5`, δ = 1.0 / 0.4 / 0.2, Seed 0 | CPU (Cloud-Sitzung) | geloggtes `L_phys` **5.2× / 25.8×** (Achse 1 echt: 5.5× / 22×). `[STALE]` 2/3, `[JITTER]` 3/3, **`[BLIND]` 3/3** (autograd sieht 0.01 … 9 % der Krümmung). **Mechanismus belegt, Zahlen keine Ergebnisse** | PINN-FAHRPLAN §11.10 |
-| **23.09.** | PINN | **`--phys-stencil live`, synthetisch** | P2.1, Schalter an (= P3-Kandidat) | wie die Zeile darüber, zusätzlich `--phys-stencil live` | CPU (Cloud-Sitzung) | geloggtes `L_phys` 129 / 33 / 1.24e4 (statt 1.55e4 / 8.07e4 / 4.0e5); val OP06 **2.4 / 2.1 / 2.9 °C** gegen 10.4 / 7.6 / 6.3 °C mit `buffer` — **1 Seed, synthetisch, kein Ergebnis**; `[BLIND]` bleibt | PINN-FAHRPLAN §11.10 |
-| *als Nächstes* | PINN | **Zerlegung der 15 echten Checkpoints** (6 × Achse 0, 9 × Achse 1) | P2 (Checkpoints), Werkzeug P2.1, Cache v3 | `residual_decomposition.py … -j 4 --device cuda` | **T4 + MPS** | entscheidet §11.10: `[STALE]` / `[JITTER]` / `[BLIND]` | Übergabe §4 |
-| *danach* | PINN | **Achse 5**: `--phys-stencil live`, 3 Seeds | **P3** (= P2.1 + live) | `--epochs 60 --ema-decay 0.5 --delta-phys 0.2`, `sweep.py -j 3`; Vergleichsarm = Achse 1, δ = 0.2 | **T4 + MPS**, ~2 h | gegen 4.868 ± 0.650 und die Nullmessung 5.248 ± 0.518 | Übergabe §4 |
+| **23.09.** | PINN | **`--phys-stencil live`, synthetisch** | **P3** (P2.1, Schalter an) | wie die Zeile darüber, zusätzlich `--phys-stencil live` | CPU (Cloud-Sitzung) | geloggtes `L_phys` 129 / 33 / 1.24e4 (statt 1.55e4 / 8.07e4 / 4.0e5); val OP06 **2.4 / 2.1 / 2.9 °C** gegen 10.4 / 7.6 / 6.3 °C mit `buffer` — **1 Seed, synthetisch, kein Ergebnis**; `[BLIND]` bleibt | PINN-FAHRPLAN §11.10 |
+| **23.09.** | PINN | **POC-Kommando P3, synthetisch** (Trockenlauf des echten POC) | P2.1 (`buffer`) gegen **P3** (`live`) | synthetischer Cache, `--subsample 10 --delta-grid 1.0 --delta-phys 1.0 --epochs 12 --ema-decay 0.5`, 2 Seeds, `sweep.py -j 4` | CPU (Cloud-Sitzung) | val OP06 **3.330 ± 0.264** (`live`) gegen **6.585 ± 0.179 °C** (`buffer`); `L_phys` ~400 gegen 1.2e4 … 3.0e4. Kommandos, Checkpoints, Zerlegung laufen durch. **Mechanismus, kein Ergebnis** | `README_MODELL_P3_POC.md` §2 |
+| ***als Nächstes — Prio 1*** | PINN | **POC P3**: `buffer` gegen `live`, echte Daten | P2.1 gegen **P3**, Cache v3 | `--subsample 10 --delta-grid 1.0 --delta-phys 1.0 --epochs 40 --ema-decay 0.5`, 3 Seeds, `sweep.py -j 3` (+ GridCNN-Lauf 17 parallel) | **T4 + MPS**, ~1–1.5 h (geschätzt) | 🟢 / 🟡 / 🔴 nach `README_MODELL_P3_POC.md` §3 | `README_MODELL_P3_POC.md` |
+| *direkt danach* | PINN | **Zerlegung** der 6 POC- und der 15 Achse-0/1-Checkpoints | P2 / P3 (Checkpoints), Werkzeug P2.1, Cache v3 | `residual_decomposition.py … -j 4 --device cuda` | **T4 + MPS** | `[BLIND]` auf echten Daten? entscheidet über P4 | PINN-FAHRPLAN, Kopf |
+| *bei 🟢 im POC* | PINN | **Achse 5**: `--phys-stencil live`, 3 Seeds, volle Auflösung | **P3** | `--epochs 60 --ema-decay 0.5 --delta-phys 0.2`, `sweep.py -j 3`; Vergleichsarm = Achse 1, δ = 0.2 | **T4 + MPS**, ~2 h | gegen 4.868 ± 0.650 und die Nullmessung 5.248 ± 0.518 | Übergabe §4 |
 | *als Nächstes* | GridCNN | `nachmessen.py` für Lauf 16, dann **Lauf 17** (`--tbptt-start 20 --tbptt 80` = 4→16 s) | G4.1 | wie Lauf 16 | **T4** | — | `UEBERGABE_2026-09-23.md` |
 
 ---
@@ -133,9 +136,11 @@ liegt bereit.
 | Plan | „Das Nächste: O18 einbauen" | **O18 ausgesetzt**, erst die Zerlegung auf den echten Checkpoints (§11.10) |
 | offene Punkte | O1 … O18 | O1 … **O22** (O19 Quelle unvollständig, O20 autograd-Zeit, O21 BDF-Zähler, O22 autograd blind) |
 
-**Ist das Modell damit besser? Nein.** Es rechnet dasselbe. Besser ist, was man
-über den Physik-Term weiß — und dass die erste Reparatur schaltfertig daliegt.
-Ob sie auf echten Daten etwas bringt, sagt erst Achse 5 auf der T4.
+**Ist das Modell damit besser? Nein — das eingesetzte nicht.** Es rechnet mit den
+Defaults dasselbe. Neu ist das **Modell P3** (der Schalter `live`), beschrieben
+in [`PINNmodulusTwo/README_MODELL_P3_POC.md`](PINNmodulusTwo/README_MODELL_P3_POC.md).
+Ob es auf echten Daten besser ist, sagt **sein POC** — Priorität 1 der nächsten
+Sitzung an der T4.
 
 **GridCNN: nicht angefasst**, weder Code noch Dokumente. Seine Versionen und
 Läufe stehen oben nur, damit die Chronologie vollständig ist. Eine Zuordnung

@@ -625,7 +625,10 @@ def _summary_table(rows: list[dict]) -> None:
     print("\n" + "=" * 78)
     print(f"  {'checkpoint':<44} {'trained':>7} {'jump':>6} {'vis':>7} {'rough':>7}  tags")
     for r in rows:
-        name = r["checkpoint"][-44:]
+        # "<sweep>/<run>" -- the part of the path that says which run it was;
+        # the leading artifacts/... is the same for every row.
+        ck = Path(r["checkpoint"])
+        name = f"{ck.parent.parent.name}/{ck.parent.name}"[-44:]
         print(f"  {name:<44} {r['trained_delta_s']:>6g}s "
               f"{100 * r['stale_jump_share_at_min_delta']:>5.0f}% "
               f"{r['visibility_min']:>7.3g} {r['roughness_ratio_max']:>7.3g}  "
