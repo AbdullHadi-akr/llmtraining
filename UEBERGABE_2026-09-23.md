@@ -1,3 +1,5 @@
+> ➡ **Neuerer Stand:** [`UEBERGABE_2026-09-23_ABEND.md`](UEBERGABE_2026-09-23_ABEND.md) (nach PR #51). Hier steht der Vormittag.
+
 # Übergabe — Sitzung vom 23.09.2026
 
 > **Wenn du nur eine Sache liest:** Konfiguration A lief auf voller Auflösung

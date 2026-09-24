@@ -6,7 +6,7 @@
 > * 🆕 [`PINNmodulusTwo/README_MODELL_P3_POC.md`](PINNmodulusTwo/README_MODELL_P3_POC.md) — **das neue Modell P3 und sein POC: Priorität 1**
 > * [`README_MODELLSTAND.md`](README_MODELLSTAND.md) — jede Modellversion und jedes Experiment, chronologisch, mit der Version, auf der es lief
 > * [`PINNmodulusTwo/FAHRPLAN.md`](PINNmodulusTwo/FAHRPLAN.md) — ganz oben der POC, darunter die Zerlegung, **§11.10** die Herleitung
-> * GridCNN: [`GridCNN/FAHRPLAN.md`](GridCNN/FAHRPLAN.md) und [`UEBERGABE_2026-09-23.md`](UEBERGABE_2026-09-23.md) — **in dieser Sitzung nicht angefasst**
+> * GridCNN: **[`UEBERGABE_2026-09-23_ABEND.md`](UEBERGABE_2026-09-23_ABEND.md)** (Neustart nach PR #51), [`GridCNN/FAHRPLAN.md`](GridCNN/FAHRPLAN.md) und [`UEBERGABE_2026-09-23.md`](UEBERGABE_2026-09-23.md) — **in dieser Sitzung nicht angefasst**
 
 ---
 
