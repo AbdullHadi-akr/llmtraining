@@ -1168,7 +1168,7 @@ def test_nachmessen_laeuft_von_vorn_bis_hinten(tmp_path, monkeypatch, capsys,
             [{"epoch": 1, "saturated": 50, "saturated_max": 100},
              {"epoch": 2, "saturated": 0, "saturated_max": 100}]))
 
-    bundle = SimpleNamespace(T_sigma=9.602)
+    bundle = SimpleNamespace(T_sigma=9.602, T_mu=33.0, T_span_ref=1605.2)
     monkeypatch.setattr(T, "lade_datensatz",
                         lambda a, dev: (bundle, [op], [op], layout, statics))
     monkeypatch.setattr(T, "_pinn_module", lambda name: SimpleNamespace(
@@ -1188,6 +1188,17 @@ def test_nachmessen_laeuft_von_vorn_bis_hinten(tmp_path, monkeypatch, capsys,
                                 clamp=erg["clamp"], T_sigma=9.602)
     assert erg["median_model_pt"]["OP99"]["mae"] == pytest.approx(
         erwartet["OP99"]["mae"], rel=1e-6)
+    # Die Zeitreihen fuer tools/bilder.py stehen mit drin (25.09.).
+    k = erg["je_checkpoint"]["seed0/model.pt"]["OP99"]["kurve"]
+    assert len(k["t_s"]) == op.n_t and "abs_q75" in k and "karte_mae" in k
+
+    # --json: eine zweite Messung (z. B. in-sample) ueberschreibt die erste
+    # nicht.
+    ziel = laeufe / "nachgemessen_insample.json"
+    assert nm.main(["--no-physics", "--subsample", "2", "--device", "cpu",
+                    "--cache", str(tmp_path), "--laeufe", str(laeufe),
+                    "--json", str(ziel)]) == 0
+    assert ziel.exists() and (laeufe / "nachgemessen.json").exists()
 
 
 def test_die_cfl_zeile_empfiehlt_kein_kleineres_subsample_mehr():
@@ -1198,6 +1209,14 @@ def test_die_cfl_zeile_empfiehlt_kein_kleineres_subsample_mehr():
     text = T.cfl_text(0.000124595, 1.12998e-06, 1605.2, 2)
     assert "110.3x" in text and "55.1x" in text
     assert "loest das NICHT" in text and "Integrator" in text
+
+
+def test_mit_exaktem_schritt_warnt_die_cfl_zeile_nicht_mehr():
+    """Lauf 18 hat --integrator exp. Die Zeile darf dort nicht mehr "B/C/D
+    braucht einen eigenen Integrator" sagen -- er ist ja da."""
+    text = T.cfl_text(0.000124595, 1.12998e-06, 1605.2, 2, integrator="exp")
+    assert "110.3x" in text and "exakt" in text
+    assert not text.startswith("!!") and "eigenen Integrator" not in text
     unter = T.cfl_text(1e-7, 1e-6, 1605.2, 2)
     assert unter.startswith("[CFL]") and "!!" not in unter
 
@@ -1299,3 +1318,73 @@ def test_die_kartenschalter_kommen_beim_laden_an(monkeypatch, layout):
     T.statics_aus_bundle(bundle, layout, device=None, **kw["static"])
     for schluessel, wert in kw["static"].items():
         assert gesehen[schluessel] == wert
+
+
+# ---------------------------------------------------------------------------
+# 25.09.: die Zeitreihe fuer die Bilder
+# ---------------------------------------------------------------------------
+def test_ohne_kurven_bleibt_die_auswertung_wie_sie_war(net, op, statics):
+    """Das Training ruft ``val_auswertung`` ohne ``kurven`` -- dort darf sich
+    nichts aendern, sonst sind Lauf 17 und Lauf 18/19 nicht mehr dieselbe
+    Messung."""
+    kw = dict(lag1=5, lag2=20, clamp=10.0, T_sigma=9.602)
+    ohne = T.val_auswertung(net, [op], statics, **kw)["OP99"]
+    mit = T.val_auswertung(net, [op], statics, kurven=True, T_mu=33.0,
+                           T_span_ref=1605.2, **kw)["OP99"]
+    assert "kurve" not in ohne
+    for schl in ("mae", "bias", "drift", "mae_segmente", "bias_segmente"):
+        assert mit[schl] == ohne[schl]
+
+
+def test_die_zeitreihe_trifft_die_zahlen_aus_dem_log(net, op, statics):
+    """Die Kurve ist dieselbe Messung wie die Zeile im Log, nur aufgeloest:
+    ihr Mittel ist die MAE, die Quantile liegen in der richtigen Reihenfolge,
+    und die Karte je Punkt mittelt auf dieselbe Zahl."""
+    kw = dict(lag1=5, lag2=20, clamp=10.0, T_sigma=9.602, kurven=True,
+              T_mu=33.0, T_span_ref=1605.2)
+    p = T.val_auswertung(net, [op], statics, **kw)["OP99"]
+    k = p["kurve"]
+    assert len(k["t_s"]) == op.n_t               # 40 < KURVE_PUNKTE: alle
+    assert k["t_s"][1] == pytest.approx(op.dtn * 1605.2, rel=1e-4)
+    assert k["split_t_s"] == pytest.approx(op.split_t * op.dtn * 1605.2,
+                                           rel=1e-4)
+    assert np.mean(k["mae"]) == pytest.approx(p["mae"], abs=1e-3)
+    assert np.mean(k["bias"]) == pytest.approx(p["bias"], abs=1e-3)
+    assert np.mean(k["karte_mae"]) == pytest.approx(p["mae"], abs=1e-3)
+    assert k["karte_form"] == list(op.tn_ic.shape)
+    reihe = np.array([k[s] for s in ("abs_min", "abs_q25", "abs_q50",
+                                     "abs_q75", "abs_max")])
+    assert np.all(np.diff(reihe, axis=0) >= -1e-4)
+    reihe = np.array([k[s] for s in ("fehler_min", "fehler_q25",
+                                     "fehler_q75", "fehler_max")])
+    assert np.all(np.diff(reihe, axis=0) >= -1e-4)
+    # Daten in C: der Versatz T_mu kommt zurueck, die Differenz ist der Bias.
+    diff = np.subtract(k["T_modell_mittel"], k["T_wahr_mittel"])
+    assert diff == pytest.approx(k["bias"], abs=1e-3)
+
+
+def test_lange_trajektorien_werden_ausgeduennt(net, layout, statics):
+    """8040 Schritte bei subsample 2: die JSON bekommt hoechstens
+    KURVE_PUNKTE Stuetzstellen je Reihe, nicht jeden Schritt."""
+    nx, ny, nz = layout.shape
+    n_t = 3 * T.KURVE_PUNKTE + 7
+    lang = T.OPTensors(
+        op_id="OPLANG", tn_seq=torch.zeros(n_t, nx, ny, nz),
+        tn_ic=torch.zeros(nx, ny, nz), qsrc=torch.zeros(n_t, nx, ny, nz),
+        fo=torch.zeros(nx, ny, nz, 3, 3), config=torch.zeros(n_t, 7),
+        forcing=torch.zeros(n_t, 11), dtn=0.01, split_t=n_t // 2, n_t=n_t)
+    k = T.val_auswertung(net, [lang], statics, lag1=5, lag2=20, clamp=10.0,
+                         T_sigma=1.0, kurven=True)["OPLANG"]["kurve"]
+    assert len(k["t_s"]) <= T.KURVE_PUNKTE
+    assert all(len(k[s]) == len(k["t_s"]) for s in ("mae", "abs_max",
+                                                    "T_wahr_mittel"))
+
+
+def test_nachmessen_reicht_die_kurven_durch(tmp_path, layout, net, op,
+                                            statics):
+    pfad = tmp_path / "model.pt"
+    torch.save(net.state_dict(), pfad)
+    p = T.profil_aus_checkpoint(pfad, layout, {}, [op], statics, lag1=5,
+                                lag2=20, clamp=10.0, T_sigma=9.602,
+                                kurven=True, T_mu=33.0, T_span_ref=1.0)
+    assert "kurve" in p["OP99"]

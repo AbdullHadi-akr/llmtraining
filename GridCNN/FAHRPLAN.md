@@ -35,6 +35,35 @@ Der Plan ist eine **Leiter mit Toren**, keine gerade Linie. **Ein rotes Tor
 
 ## ▶ Das Nächste: **zuerst messen, ob A over- oder underfittet — dann Lauf 18 (B) und Lauf 19 (A schlank)**
 
+> ## 🖼 25.09. — alles in einem Skript, mit Bildern
+>
+> Schritt 1 und 2 unten laufen jetzt als **ein** Skript, unter NVIDIA MPS:
+>
+> ```bash
+> python3 -m pip install matplotlib        # einmal, falls es fehlt
+> nohup bash GridCNN/tools/lauf_18_19.sh > auswertung_18_19.txt 2>&1 &
+> ```
+>
+> Es startet MPS, Lauf 18 und 19 parallel und misst währenddessen Lauf 17
+> nach, auf den Halte- **und** den Trainings-OPs. Nach dem Ende von 18 und 19
+> misst es beide genauso nach und zeichnet alle drei. Am Ende liegt
+> `auswertung_17_18_19.tgz` da, mit allen Logs und `bilder/`.
+>
+> **Neu dafür:**
+> * `nachmessen.py` schreibt je OP die **Zeitreihe** mit: Fehler über die
+>   363 Gitterpunkte als MAE, Minimum, 25 %, Median, 75 % und Maximum, dazu
+>   mit Vorzeichen, Mittel und Hotspot von Daten und Modell sowie eine
+>   Fehlerkarte je Punkt. Neu ist auch `--json`, damit die In-sample-Messung
+>   die der Halte-OPs nicht überschreibt.
+> * `tools/bilder.py` zeichnet daraus, ohne GPU und ohne Daten:
+>   `*_sensoren` (|Fehler| über die Zeit: MAE, Min, Max, 25/75-%-Band),
+>   `*_vorzeichen` (dasselbe mit Vorzeichen), `*_temperatur`, `*_karte`,
+>   `*_profil`, `*_lernkurven`, `*_bias_epochen` und die Vergleiche
+>   `vergleich_latte`, `vergleich_profil` und `vergleich_zeit`.
+> * Das Training rechnet **unverändert**, denn die Zeitreihe entsteht nur
+>   beim Nachmessen. 165 Tests; einer hält fest, dass `val_auswertung` ohne `kurven`
+>   dieselben Zahlen liefert.
+
 > ## 🛠 23.09. abends, PR #51 — drei Schalter, alle mit dem alten Default
 >
 > | Schalter | was | warum | Test |

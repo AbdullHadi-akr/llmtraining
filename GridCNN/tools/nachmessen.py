@@ -35,6 +35,16 @@ zusammen -- dann ist das Profil nichts wert.
 ⚠ ``model.pt`` ist EIN Stand, die berichtete Zahl ist ein Median ueber das
 letzte Drittel. Das Profil hier ist eine Diagnose (wo sitzt der Fehler, zu
 warm oder zu kalt), keine Kopfzahl.
+
+Fuer die Bilder
+---------------
+Die JSON traegt je OP und Checkpoint auch die **Zeitreihe** (``kurve``:
+Fehler, mittlere Temperatur von Daten und Modell). ``tools/bilder.py``
+zeichnet daraus. Wer mit anderen ``--val-ops`` misst (z. B. die
+Trainings-OPs fuer over-/underfit), gibt ``--json`` einen eigenen Namen,
+sonst ueberschreibt die Messung die der Halte-OPs::
+
+    ... --val-ops OP01 OP02 ... --json GridCNN/artifacts/A/nachgemessen_insample.json
 """
 
 from __future__ import annotations
@@ -55,6 +65,9 @@ def main(argv: list | None = None) -> int:
     p.add_argument("--laeufe", type=Path, required=True,
                    help="Verzeichnis mit seed*/model.pt, z. B. "
                         "GridCNN/artifacts/A")
+    p.add_argument("--json", type=Path, default=None,
+                   help="wohin die Messung geschrieben wird (Vorgabe: "
+                        "<laeufe>/nachgemessen.json)")
     args = p.parse_args(argv)
     if not args.cache.exists():
         print(f"!! Kein Cache unter {args.cache}.", file=sys.stderr)
@@ -81,7 +94,8 @@ def main(argv: list | None = None) -> int:
     print(f"[clamp] {clamp_text}")
     net_kw = T.modell_kwargs(args, statics)["net"]
     kw = dict(lag1=args.lag1, lag2=args.lag2, clamp=args.clamp,
-              T_sigma=bundle.T_sigma, device=device)
+              T_sigma=bundle.T_sigma, device=device, kurven=True,
+              T_mu=float(bundle.T_mu), T_span_ref=float(bundle.T_span_ref))
 
     ergebnis, letzte = {}, []
     for d in seeds:
@@ -129,9 +143,10 @@ def main(argv: list | None = None) -> int:
         print(z)
     print("\nProbe: die MAE je model.pt muss die Zeile 'letztes ep ...' im "
           "Log treffen.")
-    ziel = args.laeufe / "nachgemessen.json"
+    ziel = args.json or (args.laeufe / "nachgemessen.json")
     ziel.write_text(json.dumps(
         {"konfiguration": T.konfigurationsname(args),
+         "ops": list(args.ops), "val_ops": list(args.val_ops),
          "subsample": args.subsample, "lag1": args.lag1, "lag2": args.lag2,
          "clamp": float(args.clamp), "je_checkpoint": ergebnis,
          "median_model_pt": ueber, "tafel": tafel}, indent=2))

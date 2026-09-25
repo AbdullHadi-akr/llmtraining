@@ -64,6 +64,11 @@
 # gehoert also versioniert und nicht in eine Zwischenablage.
 !PINNmodulusTwo/deploy/nvidia-mps.service
 
+# Ablaufskripte fuer die Rechenmaschine (GridCNN/tools/lauf_18_19.sh): ein
+# Kommandoblock, der nur in einem Chat steht, ist beim naechsten Lauf weg --
+# und mit ihm, welche Flags die Nachmessung eines Laufs brauchte.
+!GridCNN/tools/*.sh
+
 # Same for the profile extension (its config.yaml IS the benchmark configuration)
 !PINNmodulusTwoExtProfiles/config.yaml
 
