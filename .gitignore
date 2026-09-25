@@ -69,6 +69,12 @@
 # und mit ihm, welche Flags die Nachmessung eines Laufs brauchte.
 !GridCNN/tools/*.sh
 
+# Materialdaten. Ohne constants.yaml und die Cell-/JR1-CSVs bricht train.py
+# ab, bevor ein OP gelesen wird. Das fuehrende `*` wuerde yaml/csv sonst
+# weiter verwerfen, auch wenn der Ordner selbst nicht ignoriert ist.
+!PINNmodulusTwo/material_properties/**
+!PINNmodulusTwo/material_properties/**/*
+
 # Same for the profile extension (its config.yaml IS the benchmark configuration)
 !PINNmodulusTwoExtProfiles/config.yaml
 
@@ -91,11 +97,10 @@ storeOps/
 
 
 # ---------------------------------------------------------------------------
-# The simulation data. These rules come LAST on purpose: a directory that is
-# itself ignored is never descended into, so the `!*.py` / `!README*` allowlist
-# above cannot accidentally pull a file back out of these folders. They stay on
-# your machine and on the GPU server (rsync), never in the repo.
-# See PINNmodulusTwo/README_LOKALER_LAUF.md for what belongs in them.
+# The simulation bundles. This rule comes LAST on purpose: a directory that is
+# itself ignored is never descended into, so the allowlist above cannot
+# accidentally pull a file back out. data_cache stays on the machine (rsync),
+# never in the repo. material_properties is tracked; see the allowlist above.
+# See PINNmodulusTwo/README_LOKALER_LAUF.md for what belongs in data_cache.
 # ---------------------------------------------------------------------------
 data_cache/
-material_properties/
