@@ -789,9 +789,11 @@ def lade_datensatz(args, device):
     # RICHTGROESSE: der Kreuzterm steckt nicht drin, und das Netz ist nicht
     # der blanke explizite Stern. Deshalb eine Warnung und kein Abbruch.
     dt_max = phys.cfl_limit(layout, train[0].fo)
+    integrator = getattr(args, "integrator", "euler")
     print(cfl_text(train[0].dtn, dt_max, float(bundle.T_span_ref),
-                   args.subsample),
-          file=sys.stderr if train[0].dtn > dt_max else sys.stdout)
+                   args.subsample, integrator=integrator),
+          file=sys.stderr if (train[0].dtn > dt_max and integrator != "exp")
+          else sys.stdout)
     if statics.dead:
         print(f"[karten] tot (konstant, auf 0 gezwungen): "
               f"{', '.join(statics.dead)}")
@@ -803,7 +805,7 @@ def lade_datensatz(args, device):
 
 
 def cfl_text(dtn: float, dt_max: float, T_span_ref: float,
-             subsample: int) -> str:
+             subsample: int, integrator: str = "euler") -> str:
     """Die CFL-Zeile -- mit dem Schluss, den die Zahl erlaubt.
 
     Bis zum 23.09. empfahl sie "kleineres --subsample, oder pruefen, ob die
@@ -814,12 +816,22 @@ def cfl_text(dtn: float, dt_max: float, T_span_ref: float,
     ``--subsample`` kann das Problem also gar nicht loesen -- die Zeile sagt
     das jetzt mit der Zahl dazu, statt einen Weg zu empfehlen, der nicht
     hinfuehrt.
+
+    Mit ``integrator="exp"`` (PR #51) IST der eigene Integrator da: der
+    Physikschritt ist exakt und unbedingt stabil. Die Zahl bleibt stehen
+    (sie sagt, wie steif das System ist), aber ohne die Empfehlung, die
+    beim Lesen von Lauf 18 in die Irre fuehren wuerde.
     """
     dt_s, dt_max_s = dtn * T_span_ref, dt_max * T_span_ref
     if dtn <= dt_max:
         return (f"[CFL] dt_n={dtn:.6g} ({dt_s:.4g} s) unter der Schranke "
                 f"dt_max_n={dt_max:.6g} ({dt_max_s:.4g} s).")
     roh = dtn / max(1, int(subsample)) / dt_max
+    if integrator == "exp":
+        return (f"[CFL] dt_n={dtn:.6g} ({dt_s:.4g} s) liegt {dtn / dt_max:.1f}x "
+                f"ueber der expliziten Schranke dt_max_n={dt_max:.6g} "
+                f"({dt_max_s:.4g} s) -- mit --integrator exp ohne Belang: "
+                f"der Physikschritt ist exakt und unbedingt stabil.")
     return (f"!! [CFL] dt_n={dtn:.6g} ({dt_s:.4g} s) liegt {dtn / dt_max:.1f}x "
             f"UEBER der expliziten Schranke dt_max_n={dt_max:.6g} "
             f"({dt_max_s:.4g} s).\n"
@@ -865,7 +877,8 @@ DRIFT_SCHWELLE = 1.5    # ab hier heisst "der Fehler waechst zum Ende" (O13)
 def val_auswertung(net: M.GridCNN, ops: list, statics: M.StaticMaps, *,
                    lag1: int, lag2: int, clamp: float, T_sigma: float,
                    batch: OPBatch | None = None,
-                   segmente: int = SEGMENTE) -> dict:
+                   segmente: int = SEGMENTE, kurven: bool = False,
+                   T_mu: float = 0.0, T_span_ref: float = 1.0) -> dict:
     """Freilaufender Fehler je Halte-OP -- **ueber die Trajektorie aufgeloest**.
 
     ``tn_seq`` ist ``(T - T_mu) / T_sigma``, der Versatz ``T_mu`` faellt in der
@@ -895,6 +908,15 @@ def val_auswertung(net: M.GridCNN, ops: list, statics: M.StaticMaps, *,
         ``MAE(letzter Abschnitt) / MAE(gesamt)``. Nahe 1 heisst gleichmaessig
         verteilt; deutlich darueber heisst **O13**, der Fehler waechst zum
         Trajektorienende. Die eine Zahl, die am 22.09. gefehlt hat.
+
+    ``kurve`` (nur mit ``kurven=True``)
+        die Zeitreihe dahinter, fuer ``tools/bilder.py``: je Zeitschritt
+        Kennzahlen ueber die Gitterpunkte (MAE, Min, Quartile, Max, mit und
+        ohne Vorzeichen) und die Temperatur von Daten und Modell (in C,
+        dafuer ``T_mu``), auf hoechstens ``KURVE_PUNKTE`` Stuetzstellen
+        ausgeduennt; Einzelheiten in :func:`_kurve`. Die Zeit
+        in Sekunden braucht ``T_span_ref``. Im Training aus: die Zahlen oben
+        aendern sich dadurch nicht, nur ``nachmessen.py`` schaltet es ein.
 
     **Gebatcht**, aus demselben Grund wie ``train_epoch``: der Rollout ist
     startlatenz-gebunden. Derselbe ``rollout_batched`` wie im Training -- keine
@@ -926,7 +948,80 @@ def val_auswertung(net: M.GridCNN, ops: list, statics: M.StaticMaps, *,
             "drift": (mae_seg[-1] / mae) if (mae_seg and mae > 0)
                      else float("nan"),
         }
+        if kurven:
+            out[op.op_id]["kurve"] = _kurve(traj, op, fehler, T_mu=T_mu,
+                                            T_sigma=T_sigma,
+                                            T_span_ref=T_span_ref)
     return out
+
+
+KURVE_PUNKTE = 400      # Stuetzstellen je Zeitreihe -- ein Bild, kein Archiv
+
+
+def _kurve(traj: torch.Tensor, op: OPTensors, fehler: torch.Tensor, *,
+           T_mu: float, T_sigma: float, T_span_ref: float) -> dict:
+    """Die Zeitreihe hinter dem Profil, ausgeduennt, als reine Zahlenlisten.
+
+    Das Profil sagt "Abschnitt 1 +1.2 C, Abschnitt 6 -2.0 C". Ob das ein
+    Pegel ist, der langsam kippt, oder ein Sprung an einer Stelle, sagt erst
+    die Kurve -- und die Kurve ist hier, damit niemand sie am 22.09. noch
+    einmal von Hand bauen muss.
+
+    Je Zeitschritt, ueber die ``nx*ny*nz`` Gitterpunkte (die "Sensoren"):
+
+    ``mae``, ``abs_min``, ``abs_q25``, ``abs_q50``, ``abs_q75``, ``abs_max``
+        der Betrag des Fehlers -- Mittel, Minimum, Quartile, Maximum. Zwischen
+        ``abs_q25`` und ``abs_q75`` liegt die Haelfte der Punkte.
+    ``bias``, ``fehler_min``, ``fehler_q25``, ``fehler_q75``, ``fehler_max``
+        dasselbe mit Vorzeichen (Modell - Daten): zu warm oder zu kalt, und ob
+        das Feld als Ganzes verschoben ist oder nur ein Rand.
+    ``T_wahr_*`` / ``T_modell_*`` (``mittel``, ``min``, ``max``)
+        mittlere, kaelteste und heisseste Stelle, Daten gegen Modell, in C.
+
+    Dazu **ohne** Zeitachse: ``karte_mae`` und ``karte_bias``, der
+    zeitgemittelte Fehler je Gitterpunkt (``karte_form`` = ``nx, ny, nz``) --
+    wo im Feld der Fehler sitzt.
+    """
+    n_t = int(op.n_t)
+    schritt = max(1, -(-n_t // KURVE_PUNKTE))           # aufgerundet
+    idx = torch.arange(0, n_t, schritt)
+    form = list(fehler.shape[1:])
+    flach = fehler.detach().cpu().double().reshape(n_t, -1)
+    betrag = flach.abs()
+    wahr = op.tn_seq.detach().cpu().double().reshape(n_t, -1) * T_sigma + T_mu
+    modell = traj.detach().cpu().double().reshape(n_t, -1) * T_sigma + T_mu
+    dt_s = float(op.dtn) * float(T_span_ref)
+    q = torch.tensor([0.25, 0.5, 0.75], dtype=torch.float64)
+    bq = torch.quantile(betrag[idx], q, dim=1)          # (3, n_idx)
+    fq = torch.quantile(flach[idx], q, dim=1)
+
+    def liste(x: torch.Tensor, ausgeduennt: bool = False) -> list:
+        return [round(float(v), 4) for v in (x if ausgeduennt else x[idx])]
+
+    return {
+        "t_s": [round(float(i) * dt_s, 4) for i in idx],
+        "split_t_s": round(float(op.split_t) * dt_s, 4),
+        "mae": liste(betrag.mean(1)),
+        "abs_min": liste(betrag.amin(1)),
+        "abs_q25": liste(bq[0], True),
+        "abs_q50": liste(bq[1], True),
+        "abs_q75": liste(bq[2], True),
+        "abs_max": liste(betrag.amax(1)),
+        "bias": liste(flach.mean(1)),
+        "fehler_min": liste(flach.amin(1)),
+        "fehler_q25": liste(fq[0], True),
+        "fehler_q75": liste(fq[2], True),
+        "fehler_max": liste(flach.amax(1)),
+        "T_wahr_mittel": liste(wahr.mean(1)),
+        "T_wahr_min": liste(wahr.amin(1)),
+        "T_wahr_max": liste(wahr.amax(1)),
+        "T_modell_mittel": liste(modell.mean(1)),
+        "T_modell_min": liste(modell.amin(1)),
+        "T_modell_max": liste(modell.amax(1)),
+        "karte_form": form,
+        "karte_mae": [round(float(v), 4) for v in betrag.mean(0)],
+        "karte_bias": [round(float(v), 4) for v in flach.mean(0)],
+    }
 
 
 def val_mae(net: M.GridCNN, ops: list, statics: M.StaticMaps, *,
@@ -1468,7 +1563,8 @@ def tafel_aus_metrics(metriken: list) -> tuple[dict, dict, set]:
 
 def profil_aus_checkpoint(pfad: Path, layout, net_kwargs: dict, val: list,
                           statics: M.StaticMaps, *, lag1: int, lag2: int,
-                          clamp: float, T_sigma: float, device=None) -> dict:
+                          clamp: float, T_sigma: float, device=None,
+                          **kurven_kw) -> dict:
     """Ein gespeichertes ``model.pt`` nachmessen, ohne nachzutrainieren.
 
     Am 23.09. lief der Lauf auf voller Aufloesung mit einem ``train.py`` von
@@ -1479,6 +1575,10 @@ def profil_aus_checkpoint(pfad: Path, layout, net_kwargs: dict, val: list,
     Derselbe :func:`val_auswertung` wie im Lauf, also dieselbe Zahl: die MAE
     hier muss die Zeile ``letztes ep ...`` aus dem Log treffen. Tut sie das
     nicht, passen Checkpoint und Flags nicht zusammen.
+
+    ``kurven_kw`` (``kurven``, ``T_mu``, ``T_span_ref``) geht unveraendert an
+    :func:`val_auswertung` -- fuer die Zeitreihen, die ``tools/bilder.py``
+    zeichnet.
     """
     net = M.GridCNN(layout, **net_kwargs)
     zustand = torch.load(pfad, map_location=device or "cpu")
@@ -1486,7 +1586,7 @@ def profil_aus_checkpoint(pfad: Path, layout, net_kwargs: dict, val: list,
     if device is not None:
         net = net.to(device)
     return val_auswertung(net, val, statics, lag1=lag1, lag2=lag2,
-                          clamp=clamp, T_sigma=T_sigma)
+                          clamp=clamp, T_sigma=T_sigma, **kurven_kw)
 
 
 def profil_ueber_seeds(profile: list) -> dict:
